@@ -1,0 +1,14 @@
+[package]
+name = "caligo-bridge"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+# rlib:供 CLI/测试以普通依赖引用常量与纯函数;
+# cdylib:实际被 loader 注入宿主进程的动态库产物。
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+windows-sys = { workspace = true }

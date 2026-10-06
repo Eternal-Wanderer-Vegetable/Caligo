@@ -1,0 +1,17 @@
+[package]
+name = "caligo-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "caligo-cli"
+path = "src/main.rs"
+
+[dependencies]
+caligo-model = { workspace = true }
+caligo-core = { workspace = true }
+caligo-bridge = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+windows-sys = { workspace = true }

@@ -20,7 +20,7 @@
 | S10 | PMHQ | 第三方项目 | 未固定 | - | rejected(本轮) | 公开配置声明需要 manager 凭据;仅列调查候选,不作为执行依赖 |
 | S11 | Lagrange NativeAPI | 第三方项目 | 未固定 | - | rejected(本轮) | C ABI 不改变其 C# 实现事实;仅调查候选 |
 | S12 | Mania | 第三方项目 | 未固定 | - | rejected(本轮) | 已归档且声明发送能力不完整;仅调查候选 |
-| S13 | QQNT 公开架构资料(NapCat / LLOneBot 等公开文档对 major.node、wrapper.node、QQNT 模块分工的**描述**) | 社区公开资料 | 逐条 URL 与抓取时间记于 `docs/research/native-entry-contract.md` | 2026-10-06 起按条登记 | pending | 仅作 K1 调查线索(候选入口假设);每条线索仍需本机实证;不复制其代码,不引用其运行时行为为已验证事实 |
+| S13 | QQNT 公开架构资料:①[go-cqhttp issue #2471](https://github.com/Mrs4s/go-cqhttp/issues/2471)(wrapper/major 加载关系);②[解析NTQQ数据库(lengyue.me)](https://lengyue.me)(旧版本 wrapper.node 数据库密钥函数);③[NapCat 文档](https://napneko.github.io/guide/napcat)(调用层级描述) | 社区公开资料 | 抓取时间均为 2026-10-06 | 2026-10-06 | pending(线索已核对一轮) | 仅作 K1 调查线索;核对结论记于 native-entry-contract §5(其中 ②的 `nt_sqlite3_key_v2` 在本版本导出表中**不存在**,不得按旧版本外推);不复制其代码,不引用其运行时行为为已验证事实 |
 | S14 | 本机 QQ 安装(`D:\Program Files\Tencent\QQNT`,版本 9.9.33-52230-aff854e8) | 本机二进制 | 模块 SHA-256 见 `environment.json` 与 `docs/contracts/version-adapter-manifest.json` | 2026-10-06 | adopted(实验对象) | K1 起的静态观察与受控实验对象;其二进制不入库、不随项目分发 |
 
 ## 纪律说明

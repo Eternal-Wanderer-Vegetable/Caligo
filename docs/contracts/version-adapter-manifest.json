@@ -1,0 +1,57 @@
+{
+  "$schema_note": "Caligo 单版本适配清单(计划 §6.1/§10,K1 交付物)。识别策略:精确模块 SHA-256,不做地址/偏移猜测,不自动适配多版本。",
+  "schema_version": 1,
+  "baseline_id": "qq-9.9.33-52230",
+  "platform": "windows-x64",
+  "qq": {
+    "launcher_path": "D:/Program Files/Tencent/QQNT/QQ.exe",
+    "file_version": "9.9.33.52230",
+    "product_version": "9.9.33.52230-aff854e8",
+    "version_dir": "D:/Program Files/Tencent/QQNT/versions/9.9.33-52230",
+    "runtime_layer_note": "QQNT.dll 为 Node.js 运行时层(libnode,内含 Electron/40.0.0 标识字符串);QQ.exe 是启动器,运行内核版本以进程实际加载的版本目录为准"
+  },
+  "modules": [
+    {
+      "role": "launcher",
+      "path": "D:/Program Files/Tencent/QQNT/QQ.exe",
+      "sha256": "ABBED71FC3DFE84FA712A2243041029C4A2E60B25595528522CB92C5758D388A",
+      "size_bytes": 1717800,
+      "hash_checked": true
+    },
+    {
+      "role": "node-runtime",
+      "path": "D:/Program Files/Tencent/QQNT/versions/9.9.33-52230/QQNT.dll",
+      "sha256": "F6F35B8517DA5C38ACE8D4B6ABAD1ABED42F61C8E706D23192A22D91C7620E59",
+      "size_bytes": 214599728,
+      "hash_checked": true
+    },
+    {
+      "role": "business-js-native",
+      "path": "D:/Program Files/Tencent/QQNT/versions/9.9.33-52230/resources/app/major.node",
+      "sha256": "3FDC17FA0512FD4B702F34A0025FFE4ECA0A5C70229872F7FC0A0324BDFB5FDF",
+      "size_bytes": 107373608,
+      "hash_checked": true
+    },
+    {
+      "role": "session-shell-wrapper",
+      "path": "D:/Program Files/Tencent/QQNT/versions/9.9.33-52230/resources/app/wrapper.node",
+      "sha256": "63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0",
+      "size_bytes": 115118632,
+      "hash_checked": true
+    },
+    {
+      "role": "app-bundle",
+      "path": "D:/Program Files/Tencent/QQNT/versions/9.9.33-52230/resources/app/application.asar",
+      "sha256": "882AA00613AFD72F63B424DCE347D0BFFCEB25C5CE643BABCEBE2776AB8606D7",
+      "size_bytes": 30339880,
+      "hash_checked": true
+    }
+  ],
+  "policy": {
+    "on_mismatch": "reject_attach_and_reject_send",
+    "auto_multi_version": false,
+    "recognition": "exact-module-sha256",
+    "address_offsets_are_identity": false,
+    "notes": "摘要不匹配时拒绝 attach 与发送(计划 §5、T01);必要时为本版本单独出分支维护,不做跨版本猜测。attach 前用 caligo-cli verify-manifest 核对,inject 命令内建此门。"
+  }
+}

@@ -1,0 +1,9 @@
+[package]
+name = "caligo-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+caligo-model = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
