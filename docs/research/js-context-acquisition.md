@@ -61,11 +61,42 @@
 - 旧结论修正:两处静态解码笔误已修正(qq_magic 尾跳目标 0x01C8F5EB;链表头 0x0C7092F0 的
   手工算术此前有 ±2 误差,以运行时 pattern 推导为准)。
 
-## 4. 决定(修订)
+## 5. EXP-K2-01 结果(2026-10-06,已执行,**崩溃级负结果**)
 
-1. ~~方案 b 单独作为 env 路线~~ → 失败(表 A 不可查),保留为机制组件;
-2. **方案 d = 生产主路线**(EXP-K2-01 实施),配合 AddLinkedBinding 把自有绑定挂入自建 env;
-3. 方案 e(inspector/CDP)保留为调查加速器,需执行者以特定启动参数重启 QQ 时另行请求;
+- **成功部分**:阶段化执行器按设计工作——platform/uv_loop/allocator 三个阶段都在 QQ 主进程内
+  自有线程上**创建成功**(live 报告 local-evidence/k2-01b-pid49148-env.jsonl);第一轮还暴露并修正了
+  两处修饰名笔误(NewIsolate 的 `VCppHeap` 前缀、Context::Global 的 const 限定)。
+- **负结果**:`node::NewIsolate` 调用**崩溃了 QQ 主进程**(实例 49148 及其子进程终止;第二实例 38472
+  未被触碰、健康存活;无 WER 转储——QQ 自有 crashpad 吞掉)。阶段 JSONL 精确定位崩溃点:
+  报告停格于 allocator 之后、"new_isolate" 行之前。
+- 根因候选(按可能性排序,未再实验验证):
+  1. `CreatePlatform(2, null)` —— null TracingController:返回了非空 platform,但其内部不完整,
+     首次创建 isolate 时 tracing 路径解引用空控制器;
+  2. 零块 IsolateSettings(4 KiB)不满足该 Electron 构建的不变量(settings 含非 POD 字段,
+     零值选择到不支持路径);
+  3. CppHeap 空 unique_ptr 对此重载非法。
+- **过程修正记录**:此前文档两处静态解码笔误已勘误(qq_magic 尾跳目标 0x01C8F5EB;
+  手工算术的链表头 ±2 误差以运行时推导为准)。
+- **结论**:方案 d 的朴素实现(零块 settings + null controller)被判负。继续深挖 ABI
+  (解码 IsolateSettings/构造 TracingController)成本高且仍在 QQ 内玩火。
+
+## 6. 修订后的路线:方案 e(CDP/inspector)升级为主调查路线
+
+- 理由:**零进程内风险**(不注入、不创建 v8),直接在 QQ 的**真实主 Environment** 里枚举 major
+  服务面的方法名与签名——这正是 K2 需要的证据;且 DevTools 协议输出可直接回填 §6.1 契约。
+- 需要执行者配合:以调试参数重启 QQ(见 recovery-notes;仅影响新实例,不改安装)。
+  候选参数(依次尝试,QQNT 基于 Electron 40):
+  1. `QQ.exe --remote-debugging-port=9222`(Electron 主开关,最可能生效);
+  2. 若被剥离:`set ELECTRON_ENABLE_LOGGING=1` + `--remote-debugging-port`;
+  3. 若仍无效:调查 QQ 是否白名单化启动参数(需重新评估)。
+- 方案 d 保留为长期候选,重启条件:完成 IsolateSettings/TracingController 的 ABI 解码,
+  或拿到 QQ 自身 platform/isolate 的复用通道;进入任何再次"进程内创建"实验前先做方案变更记录。
+
+## 7. 决定(修订 v2)
+
+1. 方案 b(机制组件)保留;~~单独 env 路线~~判负(双链表);
+2. 方案 d 朴素实现判负(NewIsolate 崩溃,见 §5);冻结,重启条件见 §6;
+3. **方案 e(CDP)= 当前主调查路线**,等待执行者以调试参数重启 QQ(§6);
 4. 方案 c(内存扫描)维持拒绝。
 
 ## 3. 纪律与生命周期

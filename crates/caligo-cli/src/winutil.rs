@@ -155,6 +155,8 @@ pub struct InjectOutcome {
     pub obs_exit_code: Option<u32>,
     /// `caligo_register_entry` 的返回码(仅在 register_entry 提供时)。
     pub register_exit_code: Option<u32>,
+    /// `caligo_env_start` 的返回码(仅在 env_report 提供时;链路线程异步执行)。
+    pub env_exit_code: Option<u32>,
 }
 
 type RemoteThreadFn = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
@@ -181,6 +183,7 @@ pub unsafe fn inject_and_probe(
     bridge_path: &Path,
     report_path: &Path,
     obs_report: Option<&Path>,
+    env_report: Option<&Path>,
     register_entry: bool,
     wait_ms: u32,
 ) -> Result<InjectOutcome, String> {
@@ -223,6 +226,7 @@ pub unsafe fn inject_and_probe(
         let mut buf_bridge: Option<*mut core::ffi::c_void> = None;
         let mut buf_report: Option<*mut core::ffi::c_void> = None;
         let mut buf_obs: Option<*mut core::ffi::c_void> = None;
+        let mut buf_env: Option<*mut core::ffi::c_void> = None;
 
         let result = (|| -> Result<InjectOutcome, String> {
             let alloc_and_write = |bytes: &[u16],
@@ -447,11 +451,56 @@ pub unsafe fn inject_and_probe(
                 obs_exit = Some(code);
             }
 
+            // 可选:自建 Environment 链路(caligo_env_start;执行线程异步运行,
+            // 阶段结果增量写入 env 报告文件——中途崩溃亦保留已完成阶段)。
+            let mut env_exit: Option<u32> = None;
+            if let Some(env_path) = env_report {
+                let env_wide = to_wide(&env_path.to_string_lossy());
+                let env_addr = match read_remote_export(proc_h, remote_base, "caligo_env_start") {
+                    Ok(Some(a)) => a,
+                    Ok(None) => return Err("caligo_env_start not found in remote".into()),
+                    Err(e) => return Err(format!("remote export lookup (env): {e}")),
+                };
+                let remote_env_path = alloc_and_write(&env_wide, "alloc env report path")?;
+                buf_env = Some(remote_env_path);
+                let env_fn: unsafe extern "system" fn(*const u16) -> u32 =
+                    std::mem::transmute::<usize, unsafe extern "system" fn(*const u16) -> u32>(
+                        env_addr,
+                    );
+                let start_env: RemoteThreadFn =
+                    std::mem::transmute::<usize, RemoteThreadFn>(env_fn as usize);
+                let env_thread = CreateRemoteThread(
+                    proc_h,
+                    std::ptr::null(),
+                    0,
+                    Some(start_env),
+                    remote_env_path,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if env_thread.is_null() {
+                    return Err(format!(
+                        "CreateRemoteThread(env): Win32 error {}",
+                        GetLastError()
+                    ));
+                }
+                let wait =
+                    WaitForSingleObject(env_thread, if wait_ms > 0 { wait_ms } else { INFINITE });
+                let mut code: u32 = u32::MAX;
+                GetExitCodeThread(env_thread, &mut code);
+                CloseHandle(env_thread);
+                if wait != 0 {
+                    return Err(format!("env remote thread wait failed: code {wait:#x}"));
+                }
+                env_exit = Some(code);
+            }
+
             Ok(InjectOutcome {
                 remote_base,
                 probe_exit_code: exit_code,
                 obs_exit_code: obs_exit,
                 register_exit_code: register_exit,
+                env_exit_code: env_exit,
             })
         })();
 
@@ -462,6 +511,9 @@ pub unsafe fn inject_and_probe(
             VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
         }
         if let Some(p) = buf_obs {
+            VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
+        }
+        if let Some(p) = buf_env {
             VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
         }
         CloseHandle(proc_h);

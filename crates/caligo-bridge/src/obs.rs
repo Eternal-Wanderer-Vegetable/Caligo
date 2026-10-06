@@ -18,7 +18,7 @@
 use serde::Serialize;
 
 /// node_module 字段偏移(本机 QQNT.dll 实证,见 get_linked_module 解码)。
-mod node_module_offset {
+pub mod node_module_offset {
     pub const VERSION: usize = 0x00;
     pub const FLAGS: usize = 0x04;
     pub const FILENAME: usize = 0x10;
@@ -454,6 +454,22 @@ unsafe fn observe_qqnt() -> QqntObservation {
 
 /// 对捕获目标的 node_module 结构读取注册回调指针,解析所属映像并转储
 /// context_register_func 的代码字节。全部只读。
+///
+/// 供 envrun 等模块使用的两个只读助手:
+/// - [`linked_targets`]:返回捕获目标 (name, node_va) 列表;
+/// - [`read_node_field`]:读取 node 结构中偏移处的指针字段。
+pub fn linked_targets() -> Vec<(String, usize)> {
+    // SAFETY: 只读遍历,详见 observe_qqnt。
+    let (_, _, targets, _) = unsafe { observe_qqnt() };
+    targets
+}
+
+/// 读取 node 结构中指定偏移处的 8 字节字段(只读)。
+pub fn read_node_field(node_va: usize, offset: usize) -> Option<usize> {
+    // SAFETY: node_va 来自运行时链表数据,偏移为已实证的布局偏移。
+    unsafe { rd_usize(node_va + offset) }
+}
+
 unsafe fn capture_callbacks(
     targets: &[(String, usize)],
     images: &[ImageRange],

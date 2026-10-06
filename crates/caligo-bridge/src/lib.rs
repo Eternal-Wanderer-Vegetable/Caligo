@@ -43,6 +43,7 @@ pub mod probe_code {
     pub const ERR_WRITE_FAILED: u32 = 3;
 }
 
+pub mod envrun;
 pub mod obs;
 pub mod register;
 
@@ -64,6 +65,27 @@ pub extern "system" fn caligo_entry_registered() -> u32 {
 /// 回调是否已被 Node 调用(0/1)。
 pub extern "system" fn caligo_entry_fired() -> u32 {
     u32::from(register::entry_state().1)
+}
+
+#[no_mangle]
+/// 启动自建 Environment 链路线程(envrun;EXP-K2-01)。立即返回(线程异步执行),
+/// 结果以 JSONL 报告文件呈现(每阶段一行,崩溃亦保留已完成阶段)。
+///
+/// # Safety
+///
+/// `report_path` 必须指向有效的 NUL 结尾 UTF-16 缓冲区(由 loader 写入)。
+pub unsafe extern "system" fn caligo_env_start(report_path: *const u16) -> u32 {
+    let len = match wide_string_len(report_path) {
+        Some(len) => len,
+        None => return probe_code::ERR_NULL_PATH,
+    };
+    // SAFETY: len 来自 wide_string_len 的 NUL 扫描,切片不越过缓冲区。
+    let path_str = match String::from_utf16(unsafe { std::slice::from_raw_parts(report_path, len) })
+    {
+        Ok(s) => s,
+        Err(_) => return probe_code::ERR_BAD_PATH,
+    };
+    envrun::env_start(&path_str)
 }
 
 /// 探测报告。K1 阶段字段只覆盖"已加载、可握手"这一层证据;

@@ -85,6 +85,21 @@
   CreateEnvironment/AddLinkedBinding/LoadEnvironment/uv_loop)。详见 js-context-acquisition.md §3-4。
 - liveness:注入后 PID 49148 Responding=True。
 
+### EXP-K2-01 自建 Environment 链路 — **已执行,2026-10-06,崩溃级负结果;QQ 一实例崩溃**
+
+- 指定实例:PID 49148(EXP-K1-02 同实例,执行者已知悉崩溃风险并授权;恢复按 recovery-notes §2)。
+- 结果:
+  - 成功:platform/uv_loop/allocator 在 QQ 内自有线程创建成功;阶段化 JSONL 报告完整定位崩溃点;
+  - **`node::NewIsolate` 调用崩溃 QQ 主进程**(49148 及其子进程终止;无 WER 转储,QQ crashpad 吞掉);
+  - **第二实例 38472 未被触碰、9 个存活进程全部 Responding=True**(含 QQ 崩溃恢复弹窗进程 14700);
+  - 崩溃实例上的 4 份只读 bridge 随进程一起回收,无残留。
+- 根因候选与路线修订:见 js-context-acquisition.md §5-7(方案 d 冻结;CDP/inspector 升级为主调查路线,
+  需执行者以 `--remote-debugging-port=9222` 重启 QQ)。
+- 证据:local-evidence/k2-01-pid49148-env.jsonl(轮1,符号笔误停格)、k2-01b-pid49148-env.jsonl(轮2,崩溃点)、
+  k2-01b-crash-eventlog.txt(事后现场)。
+- 纪律核查:本次实验前已声明崩溃风险与恢复路径;崩溃后未做任何二次进程内尝试(按 §7 冻结);
+  未触碰存活实例。
+
 ### EXP-K1-04 安全收尾 — **已执行,2026-10-06 闭合**
 
 - 人工收发确认(计划 K1 第 6 条):执行者确认实验期间 TEST-ACCOUNT-A(私聊对象 FRIEND-B)消息收发无任何异常。

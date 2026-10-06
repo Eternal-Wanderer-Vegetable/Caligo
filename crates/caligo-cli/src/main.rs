@@ -30,7 +30,8 @@ caligo-cli <K1 probe>
   caligo-cli bytes <module-path> <rva-hex | export=NAME> [--len <n>]
   caligo-cli inject --pid <n> --bridge <bridge.dll> --manifest <manifest.json>
                     --report <report.json> --confirm-designated-test-instance
-                    [--obs-report <obs.json>] [--register-entry] [--wait-ms <ms>]
+                    [--obs-report <obs.json>] [--env-report <env.jsonl>]
+                    [--register-entry] [--wait-ms <ms>]
 
 说明:
   inject 是唯一会产生加载动作的命令;它要求 manifest 核对全部通过,
@@ -550,6 +551,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut manifest: Option<PathBuf> = None;
     let mut report: Option<PathBuf> = None;
     let mut obs_report: Option<PathBuf> = None;
+    let mut env_report: Option<PathBuf> = None;
     let mut register_entry = false;
     let mut confirmed = false;
     let mut wait_ms: u32 = 20_000;
@@ -593,6 +595,13 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => obs_report = Some(PathBuf::from(v)),
                 None => {
                     eprintln!("--obs-report 需要路径参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--env-report" => match next(&mut i) {
+                Some(v) => env_report = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("--env-report 需要路径参数");
                     return ExitCode::FAILURE;
                 }
             },
@@ -660,6 +669,25 @@ fn cmd_inject(args: &[String]) -> ExitCode {
         }
         None => None,
     };
+    let env_report = match env_report {
+        Some(p) => {
+            let abs = match to_absolute(&p) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("--env-report 路径无效: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Some(parent) = abs.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!("env 报告目录创建失败 {}: {e}", parent.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+            Some(abs)
+        }
+        None => None,
+    };
 
     // 门 1:manifest 摘要核对(计划 §5:版本与模块摘要确认 → 接入)。
     println!("[gate 1] 核对模块基线 …");
@@ -686,7 +714,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     }
     println!("[gate 2] PASS — 执行者已确认 PID {pid} 为指定测试实例");
 
-    // 加载 + probe(可选 obs)。
+    // 加载 + probe(可选 obs / register / env)。
     println!("[inject] 加载 bridge 并调用 caligo_probe_run …");
     let outcome = unsafe {
         winutil::inject_and_probe(
@@ -694,6 +722,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             &bridge,
             &report,
             obs_report.as_deref(),
+            env_report.as_deref(),
             register_entry,
             wait_ms,
         )
@@ -721,6 +750,19 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                         1 => "ERR_ALREADY(本实例已注册)",
                         2 => "ERR_NO_QQNT",
                         3 => "ERR_NO_MAGIC",
+                        _ => "UNKNOWN",
+                    }
+                );
+            }
+            if let Some(env_code) = o.env_exit_code {
+                println!(
+                    "[env] caligo_env_start:exit_code={} ({})",
+                    env_code,
+                    match env_code {
+                        caligo_bridge::envrun::env_code::OK => "OK(链路线程已启动)",
+                        caligo_bridge::envrun::env_code::ERR_NULL_PATH => "ERR_NULL_PATH",
+                        caligo_bridge::envrun::env_code::ERR_NO_QQNT => "ERR_NO_QQNT",
+                        caligo_bridge::envrun::env_code::ERR_THREAD => "ERR_THREAD",
                         _ => "UNKNOWN",
                     }
                 );
@@ -778,6 +820,32 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Err(e) => {
                     eprintln!("probe 报告读取失败 {}: {e}", report.display());
                     return ExitCode::FAILURE;
+                }
+            }
+            // env 链路线程异步执行:等待其完成(最多 30 秒),然后打印 JSONL 报告。
+            if let Some(env_path) = env_report.as_deref() {
+                println!("[env] 等待自建环境链路完成(最多 30s)…");
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    if let Ok(content) = std::fs::read_to_string(env_path) {
+                        if content.contains("\"stage\":\"done\"") {
+                            break;
+                        }
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
+                match std::fs::read_to_string(env_path) {
+                    Ok(content) => {
+                        println!("=== env report ({}) ===", env_path.display());
+                        println!("{content}");
+                    }
+                    Err(e) => {
+                        eprintln!("env 报告读取失败 {}: {e}", env_path.display());
+                        return ExitCode::FAILURE;
+                    }
                 }
             }
             ExitCode::SUCCESS

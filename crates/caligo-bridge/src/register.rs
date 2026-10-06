@@ -31,7 +31,7 @@ unsafe impl Send for NapiModule {}
 /// napi.h `napi_module` 布局(本机实测:version=1,flags,0x08 filename,
 /// 0x10 register_func,0x18 modname,0x20 priv,0x28 reserved[4])。
 #[repr(C)]
-struct NapiModule {
+pub(crate) struct NapiModule {
     nm_version: i32,
     nm_flags: u32,
     nm_filename: *const u8,
@@ -54,7 +54,7 @@ unsafe extern "C" fn entry_register(env: *mut c_void, exports: *mut c_void) -> *
     exports
 }
 
-static ENTRY_NAPI_MODULE: NapiModule = NapiModule {
+pub(crate) static ENTRY_NAPI_MODULE: NapiModule = NapiModule {
     nm_version: 1,
     nm_flags: 2, // NM_F_LINKED(get_linked_module 的判定位,本机实证)
     nm_filename: ENTRY_FILENAME.as_ptr(),
