@@ -47,6 +47,7 @@ pub const SCRIPT_GLOBAL_INTROSPECT: u32 = 3;
 pub const SCRIPT_MAINMODULE_PROBE: u32 = 4;
 pub const SCRIPT_ELECTRON_ENUM: u32 = 5;
 pub const SCRIPT_RENDERER_BRIDGE: u32 = 6;
+pub const SCRIPT_API_MAP: u32 = 7;
 
 /// mode 2 的枚举脚本:只读(不调用任何 QQ 函数)、自包含、异常全捕获。
 /// 第二版:除顶层键外,另取 load 的类型/源码指纹、process.versions、
@@ -77,6 +78,10 @@ pub const ELECTRON_ENUM_SCRIPT: &str = "(function(){try{var o={ok:true};var req=
 /// 段 A(URL 含 #/main/message 的 webContents 上 executeJavaScript 只读探针,
 /// 结果挂 `__caligo_r7`);段 B(读回并删除)。renderer 探针纯键名/typeof。
 pub const RENDERER_BRIDGE_SCRIPT: &str = "(function(){try{var G=globalThis;var st=G['__caligo_r7'];if(st!==undefined&&st!=='waiting'){delete G['__caligo_r7'];return String(st).slice(0,60000)}if(st==='waiting'){return 'waiting'}var req=process.mainModule&&process.mainModule.require;if(typeof req!=='function'){return 'ERR:no require'}var electron=req('electron');var all=electron.webContents.getAllWebContents();var target=null;for(var i=0;i<all.length;i++){var u='';try{u=String(all[i].getURL())}catch(err){}if(u.indexOf('#/main/message')>=0){target=all[i];break}}if(!target){return 'ERR:main/message webContents not found'}var probe=\"(function(){var o={ok:true};try{o.href=String(location.href).slice(0,150)}catch(e){}try{var wk=Object.getOwnPropertyNames(window);o.windowKeysTotal=wk.length;o.windowKeysTail=wk.slice(-160)}catch(e){}try{o.hasProcess=typeof process;o.hasRequire=typeof require}catch(e){}var sus=['ntApi','qq','qqnt','ipc','bridge','services','windowApi'];o.suspects={};for(var i=0;i<sus.length;i++){try{o.suspects[sus[i]]=typeof window[sus[i]]}catch(e){}}return JSON.stringify(o)})()\";G['__caligo_r7']='waiting';target.executeJavaScript(probe,false).then(function(r){G['__caligo_r7']=String(r).slice(0,60000)},function(e){G['__caligo_r7']='ERR:'+String(e).slice(0,300)});return 'kicked'}catch(e){return 'ERR:'+String(e).slice(0,300)}})()";
+
+/// K2-08 两段式探针(`__caligo_r8`):preloadApi / experimentalAPIs 结构地图
+/// (键名+typeof+arity+一层子键;ipcRenderer 仅键名)。零调用、零属性值。
+pub const API_MAP_SCRIPT: &str = "(function(){try{var G=globalThis;var st=G['__caligo_r8'];if(st!==undefined&&st!=='waiting'){delete G['__caligo_r8'];return String(st).slice(0,64000)}if(st==='waiting'){return 'waiting'}var req=process.mainModule&&process.mainModule.require;if(typeof req!=='function'){return 'ERR:no require'}var electron=req('electron');var all=electron.webContents.getAllWebContents();var target=null;for(var i=0;i<all.length;i++){var u='';try{u=String(all[i].getURL())}catch(err){}if(u.indexOf('#/main/message')>=0){target=all[i];break}}if(!target){return 'ERR:main/message webContents not found'}var probe=\"(function(){function shape(v,topCap,childCap,childN){var e={};try{e.type=typeof v;if(v===null){e.type='null';return e}if(typeof v!=='object'&&typeof v!=='function'){return e}var ks=Object.getOwnPropertyNames(v);e.total=ks.length;e.keys=ks.slice(0,topCap);e.types={};for(var i=0;i<e.keys.length;i++){var t=typeof v[e.keys[i]];e.types[e.keys[i]]=t;if(t==='function'){try{e.types[e.keys[i]]='function('+v[e.keys[i]].length+')'}catch(err){}}}if(childN>0){e.children={};var n=0;for(var j=0;j<e.keys.length&&n<childN;j++){var cv;try{cv=v[e.keys[j]]}catch(err){continue}if(cv&&typeof cv==='object'){e.children[e.keys[j]]=Object.getOwnPropertyNames(cv).slice(0,childCap);n++}}}}catch(err){e.err=String(err).slice(0,150)}return e}var o={ok:true};try{o.preloadApi=shape(window.preloadApi,200,80,60)}catch(e){o.paErr=String(e).slice(0,150)}try{o.experimentalAPIs=shape(window.experimentalAPIs,120,60,40)}catch(e){o.eaErr=String(e).slice(0,150)}try{o.ipcRendererType=typeof window.ipcRenderer;o.ipcRendererKeys=window.ipcRenderer?Object.getOwnPropertyNames(window.ipcRenderer).slice(0,60):undefined}catch(e){}return JSON.stringify(o)})()\";G['__caligo_r8']='waiting';target.executeJavaScript(probe,false).then(function(r){G['__caligo_r8']=String(r).slice(0,64000)},function(e){G['__caligo_r8']='ERR:'+String(e).slice(0,300)});return 'kicked'}catch(e){return 'ERR:'+String(e).slice(0,300)}})()";
 
 /// 远程调用上下文(加载器写入,#[repr(C)]).
 #[repr(C)]
@@ -488,6 +493,7 @@ unsafe fn exec_enum_script(ex: &Exports, isolate: usize, ctx: usize, script: u32
         SCRIPT_MAINMODULE_PROBE => MAINMODULE_PROBE_SCRIPT,
         SCRIPT_ELECTRON_ENUM => ELECTRON_ENUM_SCRIPT,
         SCRIPT_RENDERER_BRIDGE => RENDERER_BRIDGE_SCRIPT,
+        SCRIPT_API_MAP => API_MAP_SCRIPT,
         _ => ENUM_SCRIPT,
     };
     // String::NewFromUtf8(kNormal=0;sret 约定)。

@@ -332,6 +332,18 @@ R-A 的第 1-2 步完全离线/只读,是下一步的开工点。
 - **下一实验档(K2-08 候选,需设计记录)**:`preloadApi` 键名枚举 → nodeIKernel*
   方法面;ipcRenderer 通道名枚举。五类入口契约的最后一块地图。
 
+## 17. K2-08:preloadApi 地图——负结果与服务桥再收敛(2026-10-06,当前有效)
+
+记录:local-evidence/k2-08/。实例 9328 存活。
+
+- `window.preloadApi` = `{ mounted }`(生命周期钩子)——**服务桥候选排除**;
+  `experimentalAPIs` = 5 个性能工具;`ipcRenderer` = `{ send, invoke, on }`
+  通用桥确认(通道名未枚举)。
+- **服务面在 webpack 模块闭包内**(键表 `webpackChunkqq_chat` + 
+  `dtResponseCallbacks` 佐证)。K2-09 候选(风险升序):① dtResponseCallbacks
+  键名枚举(零风险);② webpack require 捕获 + 工厂表源码 grep
+  (与 app 运行时最小交互,新门槛);③ ipcRenderer 事件枚举。
+
 ## 3. 纪律与生命周期
 
 - `caligo_bridge` 注册**不可逆**(node_module_register 只有插入):随测试 QQ 进程退出回收;

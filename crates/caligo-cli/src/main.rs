@@ -1004,9 +1004,9 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 }
             },
             "--async-script" => match next(&mut i).and_then(|s| s.parse::<u32>().ok()) {
-                Some(v @ 0..=6) => async_script = v,
+                Some(v @ 0..=7) => async_script = v,
                 _ => {
-                    eprintln!("--async-script 需要 0-6(0指纹 1load探针 2收割 3全局 4mainModule 5electron枚举 6renderer桥两段式)");
+                    eprintln!("--async-script 需要 0-7(…6 renderer桥 7 preloadApi 地图)");
                     return ExitCode::FAILURE;
                 }
             },
