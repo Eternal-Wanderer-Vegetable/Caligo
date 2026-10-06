@@ -123,6 +123,27 @@
 F-3 A2 协议路线(计划 §3.2 分支,需 A1 结论先行)。
 方案 d 复活条件(不变):完成 IsolateSettings/TracingController ABI 解码并作方案变更记录。
 
+## 10. K2-02 路线细化(F-1 终局后,2026-10-06,当前有效)
+
+F-1 五轮证明 wrapper 壳接口无消息业务后,到达 nodeIKernel* 服务面的通道收敛为:
+
+**路线 R-A:主进程 Environment 发现 + RequestInterrupt(优先)**
+1. 离线:QQNT.dll 内做 MSVC RTTI 扫描,定位 `node::Environment` 的 vtable RVA
+   (类型描述符串 `.?AVEnvironment@node@@` → 完整对象定位器(COL) → vtable[-1]);
+   需给 CLI 加文件偏移→RVA 反向映射或字节模式搜索;
+2. obs 内存扫描(全部经 checked_read,崩溃免疫):在可读区域扫描指向
+   `qqnt_base + vtable_rva` 的指针 → 候选 Environment 对象,辅以字段合理性校验;
+3. `node::RequestInterrupt(env, callback, ctx)`(ord 2070,已确认导出)让回调在
+   QQ 的 JS 线程上安全执行 —— 该上下文内枚举 major 服务面;
+4. 风险:扫描只读且崩溃免疫;RequestInterrupt 回调上下文的保证需实验确认。
+
+**路线 R-B:自建 Environment(维持冻结)**
+- 已确认 `GetCurrentPlatform` **未导出**(无法复用 QQ 的 platform);
+- 解码 IsolateSettings + 构造 TracingController 成本高且带实例崩溃风险;
+- 维持冻结,除非 R-A 失败。
+
+R-A 的第 1-2 步完全离线/只读,是下一步的开工点。
+
 ## 3. 纪律与生命周期
 
 - `caligo_bridge` 注册**不可逆**(node_module_register 只有插入):随测试 QQ 进程退出回收;
