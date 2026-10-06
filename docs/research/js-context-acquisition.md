@@ -358,6 +358,17 @@ R-A 的第 1-2 步完全离线/只读,是下一步的开工点。
   监听器——项目首个非纯读动作,须设计记录 + 执行者认可);② 字节码容器离线
   逆向(重投入)。服务名清单仍以 K1 major.node 标识符为准。
 
+## 19. K2-10:RM tap 与载荷格式破解(2026-10-06,执行者认可的首个加性动作)
+
+记录:local-evidence/k2-10/。实例 9328 存活;tap 已安装且可拆卸(script=12)。
+
+- **RM 载荷格式破解**:三参 invoke = frame + `{type:'request',eventName:'ntApi',
+  peerId}` + `{cmdName:'<nodeIKernelXxxService>/<方法>',cmdType:'invoke'|'send',
+  payload:[原生参数]}`。五类入口契约的调用编码齐备。
+- 空闲流量分布:LogApi 洪流 + AvatarService 刷新;MsgService 实样待窗口交互/
+  来消息后捕获(tap 保持安装,样本到手即移除)。
+- 服务调用面(方法名/参数)以实捕为准;发送实验仍属 K3 纪律(test-scope §3)。
+
 ## 3. 纪律与生命周期
 
 - `caligo_bridge` 注册**不可逆**(node_module_register 只有插入):随测试 QQ 进程退出回收;

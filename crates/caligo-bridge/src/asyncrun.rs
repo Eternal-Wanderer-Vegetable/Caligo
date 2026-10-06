@@ -51,6 +51,8 @@ pub const SCRIPT_API_MAP: u32 = 7;
 pub const SCRIPT_WEBPACK_MAP: u32 = 8;
 pub const SCRIPT_IPCMAIN_MAP: u32 = 9;
 pub const SCRIPT_HANDLER_TEXT: u32 = 10;
+pub const SCRIPT_RM_TAP: u32 = 11;
+pub const SCRIPT_RM_TAP_REMOVE: u32 = 12;
 
 /// mode 2 的枚举脚本:只读(不调用任何 QQ 函数)、自包含、异常全捕获。
 /// 第二版:除顶层键外,另取 load 的类型/源码指纹、process.versions、
@@ -96,6 +98,14 @@ pub const IPCMAIN_MAP_SCRIPT: &str = "(function(){try{var o={ok:true};var req=pr
 /// K2-09 第三轮(主 env):RM_IPCFROM_RENDERER* 中继 handler 的 toString 文本
 /// 搜索服务标记 + process._events 键名。只读;字节码占位符如实记录。
 pub const HANDLER_TEXT_SCRIPT: &str = "(function(){try{var o={ok:true};var req=process.mainModule&&process.mainModule.require;if(typeof req!=='function'){return JSON.stringify({ok:false,error:'no require'})}var electron=req('electron');var ev=electron.ipcMain._events||{};var chans=['RM_IPCFROM_RENDERER2','RM_IPCFROM_RENDERER4','RM_IPCFROM_RENDERER5','RM_IPCFROM_RENDERER6','RM_IPCFROM_RENDERER7'];o.handlers={};var marks=['nodeIKernel','getMsgService','getSessionService','getBuddyService','getGroupService','getLoginService','getService','invoke'];for(var c=0;c<chans.length;c++){var ch=chans[c];var h=ev[ch];if(!h){o.handlers[ch]={missing:true};continue}var arr=Array.isArray(h)?h:[h];var e={listeners:arr.length,texts:[]};for(var i=0;i<arr.length&&i<3;i++){var t='';try{t=Function.prototype.toString.call(arr[i])}catch(err){t='ERR:'+String(err).slice(0,80)}var info={len:t.length,placeholder:t.indexOf('[native code]')>=0};var found=[];for(var m=0;m<marks.length;m++){if(t.indexOf(marks[m])>=0){found.push(marks[m])}}if(found.length){var pos=t.indexOf(found[0]);info.marks=found.slice(0,6);info.snip=t.slice(Math.max(0,pos-60),pos+240)}e.texts.push(info)}o.handlers[ch]=e}try{var pe=process._events||{};var pk=Object.getOwnPropertyNames(pe);o.processEvents=pk.slice(0,80);o.processEventCount=pk.length}catch(e){}return JSON.stringify(o)}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
+
+/// K2-10 加性 RM tap(设计 local-evidence/k2-10/design.md;执行者已认可):
+/// 状态机 `__caligo_r10`。段 A 安装 5 通道旁听器(全 try/catch,环形缓冲 50×8KB,
+/// 记录器引用存 `__caligo_tap_fns` 可拆卸);段 B 取走缓冲(读后清空,继续观察)。
+pub const RM_TAP_SCRIPT: &str = "(function(){try{var G=globalThis;var st=G['__caligo_r10'];if(st==='waiting'){var buf=G['__caligo_tap']||[];if(buf.length===0){return 'empty'}var out=JSON.stringify({n:buf.length,items:buf});G['__caligo_tap']=[];return out.slice(0,64000)}if(st!==undefined){delete G['__caligo_r10'];return 'ERR:bad state'}var req=process.mainModule&&process.mainModule.require;if(typeof req!=='function'){return 'ERR:no require'}var electron=req('electron');if(G['__caligo_tap_fns']){return 'ERR:already installed'}var chans=['RM_IPCFROM_RENDERER2','RM_IPCFROM_RENDERER4','RM_IPCFROM_RENDERER5','RM_IPCFROM_RENDERER6','RM_IPCFROM_RENDERER7'];G['__caligo_tap']=[];var fns=[];var rec=function(ch){return function(){try{var G2=globalThis;var b=G2['__caligo_tap'];if(!b){return}var e={ch:ch,t:Date.now(),argc:arguments.length,args:[]};for(var i=0;i<arguments.length;i++){var a=arguments[i];var t=typeof a;if(t==='object'&&a!==null){try{e.args.push({t:t,j:JSON.stringify(a).slice(0,8192)})}catch(err){e.args.push({t:t,j:'ERR:'+String(err).slice(0,80)})}}else{e.args.push({t:t,s:String(a).slice(0,512)})}}b.push(e);if(b.length>50){b.splice(0,b.length-50)}}catch(err){}}};for(var i=0;i<chans.length;i++){var f=rec(chans[i]);fns.push({ch:chans[i],fn:f});electron.ipcMain.on(chans[i],f)}G['__caligo_tap_fns']=fns;G['__caligo_r10']='waiting';return 'kicked'}catch(e){return 'ERR:'+String(e).slice(0,300)}})()";
+
+/// K2-10 tap 移除:removeListener 全部记录器 + 删除状态/缓冲全局,回移除计数。
+pub const RM_TAP_REMOVE_SCRIPT: &str = "(function(){try{var G=globalThis;var fns=G['__caligo_tap_fns'];var n=0;if(fns){var req=process.mainModule&&process.mainModule.require;var electron=req('electron');for(var i=0;i<fns.length;i++){try{electron.ipcMain.removeListener(fns[i].ch,fns[i].fn);n++}catch(err){}}}delete G['__caligo_tap_fns'];delete G['__caligo_tap'];delete G['__caligo_r10'];return JSON.stringify({removed:n})}catch(e){return JSON.stringify({removed:-1,error:String(e).slice(0,200)})}})()";
 
 /// 远程调用上下文(加载器写入,#[repr(C)]).
 #[repr(C)]
@@ -511,6 +521,8 @@ unsafe fn exec_enum_script(ex: &Exports, isolate: usize, ctx: usize, script: u32
         SCRIPT_WEBPACK_MAP => WEBPACK_MAP_SCRIPT,
         SCRIPT_IPCMAIN_MAP => IPCMAIN_MAP_SCRIPT,
         SCRIPT_HANDLER_TEXT => HANDLER_TEXT_SCRIPT,
+        SCRIPT_RM_TAP => RM_TAP_SCRIPT,
+        SCRIPT_RM_TAP_REMOVE => RM_TAP_REMOVE_SCRIPT,
         _ => ENUM_SCRIPT,
     };
     // String::NewFromUtf8(kNormal=0;sret 约定)。
