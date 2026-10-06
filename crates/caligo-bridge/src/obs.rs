@@ -104,7 +104,22 @@ pub struct ObsReport {
     pub entry_fired: bool,
     /// 回调收到的 env 指针值(0 = 未触发)。
     pub entry_env_hint: usize,
+    /// wrapper.node 分发表槽位实时内容(F1-R4;版本绑定 manifest 的 wrapper.node 摘要)。
+    pub dispatch_slots: Vec<DispatchSlot>,
     pub notes: Vec<String>,
+}
+
+/// 分发表槽位探测结果(F1-R4)。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DispatchSlot {
+    /// 槽位在 wrapper.node 内的 RVA。
+    pub slot_rva: u32,
+    /// 槽内实时指针值(0 = 未填充)。
+    pub live_ptr: usize,
+    /// 指针所属映像(短名;不在已知映像内为 "heap/unknown")。
+    pub target_module: String,
+    /// 指针在目标映像内的 RVA(heap/unknown 时为 0)。
+    pub target_rva: u32,
 }
 
 pub fn build_report_json(report: &ObsReport) -> serde_json::Result<String> {
@@ -213,6 +228,7 @@ struct ImageRange {
 }
 
 /// 当前进程的映像列表(基址/大小/路径)。只读快照。
+#[allow(dead_code)]
 unsafe fn collect_images() -> Vec<ImageRange> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -267,6 +283,7 @@ fn to_hex(bytes: &[u8]) -> String {
     s
 }
 
+#[allow(dead_code)]
 fn u16sz(buf: &[u16]) -> String {
     let len = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
     String::from_utf16_lossy(&buf[..len])
@@ -291,16 +308,14 @@ type QqntObservation = (
     Vec<String>,
 );
 
-unsafe fn observe_qqnt() -> QqntObservation {
+unsafe fn observe_qqnt_at(qqnt_base: usize) -> QqntObservation {
     let mut notes = Vec::new();
     let mut targets: Vec<(String, usize)> = Vec::new();
-    let wide: Vec<u16> = "QQNT.dll\0".encode_utf16().collect();
-    let base = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(wide.as_ptr());
-    if base.is_null() {
-        notes.push("QQNT.dll not loaded in this process".to_string());
-        return (None, Vec::new(), targets.clone(), notes);
+    let base = qqnt_base;
+    if base == 0 {
+        notes.push("QQNT base not provided (loader-side lookup failed)".to_string());
+        return (None, Vec::new(), targets, notes);
     }
-    let base = base as usize;
     const CAPTURE_NAMES: [&str; 2] = ["major", "QQNT"];
 
     // 映像大小(SizeOfImage @ optional header +56)。
@@ -459,9 +474,15 @@ unsafe fn observe_qqnt() -> QqntObservation {
 /// - [`linked_targets`]:返回捕获目标 (name, node_va) 列表;
 /// - [`read_node_field`]:读取 node 结构中偏移处的指针字段。
 pub fn linked_targets() -> Vec<(String, usize)> {
-    // SAFETY: 只读遍历,详见 observe_qqnt。
-    let (_, _, targets, _) = unsafe { observe_qqnt() };
-    targets
+    // SAFETY: 只读遍历,详见 observe_qqnt_at。基址经 GetModuleHandleW 解析
+    //(此助手仅供进程内 envrun/测试路径使用,不在远程线程调用)。
+    unsafe {
+        let wide: Vec<u16> = "QQNT.dll\0".encode_utf16().collect();
+        let h = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(wide.as_ptr());
+        let base = if h.is_null() { 0 } else { h as usize };
+        let (_, _, targets, _) = observe_qqnt_at(base);
+        targets
+    }
 }
 
 /// 读取 node 结构中指定偏移处的 8 字节字段(只读)。
@@ -544,19 +565,104 @@ unsafe fn capture_callbacks(
     out
 }
 
+/// wrapper.node 分发表槽位(F1-R4;由 0x3E8AA/0x3E8C0/0x3E906/0x3E89A 转发器实证)。
+const DISPATCH_SLOT_RVAS: [u32; 4] = [0x4910_0088, 0x4910_00A8, 0x4910_00B8, 0x4910_00C0];
+
+/// obs v2 上下文:由加载器侧解析并远程传入。远程线程内**不调用任何加载器锁
+/// 敏感 API**(GetModuleHandleW/Toolhelp),只做裸内存读 + 写文件。
+/// (缺陷记录:EXP-F1-R4 中远程线程内 GetModuleHandleW 与宿主模块加载竞争,
+/// 观测线程挂起且实例 38648 死亡——见 identity-invalidation-observations。)
+#[repr(C)]
+pub struct ObsCtx {
+    pub wrapper_base: usize,
+    pub qqnt_base: usize,
+    pub major_base: usize,
+    /// 远程已写入的 UTF-16 报告路径缓冲地址。
+    pub report_path: usize,
+}
+
+/// 从模块基址裸读 PE 头取得 SizeOfImage(只读;失败返回 0)。
+unsafe fn read_image_size(base: usize) -> usize {
+    let Some(e_lfanew) = rd_u32(base + 0x3C) else {
+        return 0;
+    };
+    rd_u32(base + e_lfanew as usize + 24 + 56).unwrap_or(0) as usize
+}
+
+/// 读取 wrapper.node 分发表槽位的实时指针并解析目标归属(只读裸读)。
+unsafe fn probe_dispatch_slots(
+    wrapper_base: usize,
+    images: &[ImageRange],
+    notes: &mut Vec<String>,
+) -> Vec<DispatchSlot> {
+    let mut out = Vec::new();
+    if wrapper_base == 0 {
+        notes.push("wrapper base not provided (loader-side lookup failed)".to_string());
+        return out;
+    }
+    for slot_rva in DISPATCH_SLOT_RVAS {
+        let live = match rd_usize(wrapper_base + slot_rva as usize) {
+            Some(v) => v,
+            None => {
+                notes.push(format!("slot {slot_rva:#x} unreadable"));
+                0
+            }
+        };
+        let (target_module, target_rva) = if live == 0 {
+            ("unfilled".to_string(), 0)
+        } else {
+            match image_of(images, live) {
+                Some(img) => (short_image_name(img), (live - img.base) as u32),
+                None => ("heap/unknown".to_string(), 0),
+            }
+        };
+        out.push(DispatchSlot {
+            slot_rva,
+            live_ptr: live,
+            target_module,
+            target_rva,
+        });
+    }
+    out
+}
+
 /// 构建完整观测报告(错误都降级为 note,不 panic)。
-pub fn observe() -> ObsReport {
+/// v2 观测:全部模块基址由加载器侧经 [`ObsCtx`] 传入,本函数与被调链
+/// **只做裸内存读**,不触碰加载器锁。报告写盘由调用方完成。
+///
+/// # Safety
+///
+/// ctx 内基址必须来自同进程内真实加载的模块;report_path 须指向本进程内
+/// 已写入的 NUL 结尾 UTF-16 缓冲。
+pub unsafe fn observe_ctx(ctx: &ObsCtx) -> ObsReport {
     let mut report = ObsReport {
         protocol_version: crate::PROTOCOL_VERSION,
         ..Default::default()
     };
-    // SAFETY: 全部为自身进程内只读读取;指针均来自已校验的映像/Node 注册链表。
-    let (qqnt, modules, targets, mut notes) = unsafe { observe_qqnt() };
+    // SAFETY: 只读裸读;基址由加载器侧核对。
+    let (qqnt, modules, targets, mut notes) = unsafe { observe_qqnt_at(ctx.qqnt_base) };
     report.qqnt = qqnt;
     report.modules = modules;
+    // 由已知基址构造映像表(大小经裸读 PE 头取得),用于指针归属。
+    let mut images: Vec<ImageRange> = Vec::new();
+    for (base, name) in [
+        (ctx.qqnt_base, "QQNT.dll"),
+        (ctx.major_base, "major.node"),
+        (ctx.wrapper_base, "wrapper.node"),
+    ] {
+        if base != 0 {
+            // SAFETY: 裸读 PE 头。
+            let size = unsafe { read_image_size(base) };
+            images.push(ImageRange {
+                base,
+                size: size as u32,
+                path: name.to_string(),
+            });
+        }
+    }
+    report.dispatch_slots = unsafe { probe_dispatch_slots(ctx.wrapper_base, &images, &mut notes) };
     if !targets.is_empty() {
-        // SAFETY: 同上,回调指针读取 + 映像内代码转储均为只读。
-        let images = unsafe { collect_images() };
+        // SAFETY: 回调指针读取 + 映像内代码转储均为只读。
         let captures = unsafe { capture_callbacks(&targets, &images, &mut notes) };
         report.callback_captures = captures;
     }
@@ -566,6 +672,32 @@ pub fn observe() -> ObsReport {
     report.entry_env_hint = env_hint;
     report.notes = notes;
     report
+}
+
+/// 兼容入口(进程内自解析)。**已弃用于远程线程**:内部 GetModuleHandleW
+/// 存在加载器锁竞争(见 ObsCtx 文档),仅供进程内测试使用。
+pub fn observe() -> ObsReport {
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
+    // SAFETY: GetModuleHandleW 只读查询(仅本进程内测试路径)。
+    let ctx = unsafe {
+        let qqnt =
+            windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(wide("QQNT.dll").as_ptr());
+        let wrapper = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(
+            wide("wrapper.node").as_ptr(),
+        );
+        ObsCtx {
+            qqnt_base: if qqnt.is_null() { 0 } else { qqnt as usize },
+            wrapper_base: if wrapper.is_null() {
+                0
+            } else {
+                wrapper as usize
+            },
+            major_base: 0,
+            report_path: 0,
+        }
+    };
+    // SAFETY: 基址来自本进程真实模块。
+    unsafe { observe_ctx(&ctx) }
 }
 
 #[cfg(test)]
@@ -625,6 +757,12 @@ mod tests {
                 napi_register_code_hex: None,
                 napi_modname: Some("major".into()),
             }],
+            dispatch_slots: vec![DispatchSlot {
+                slot_rva: 0x4910_0088,
+                live_ptr: 0x1804123A0,
+                target_module: "QQNT.dll".into(),
+                target_rva: 0x4123A0,
+            }],
             notes: vec!["sample".into()],
         };
         let back: serde_json::Value =
@@ -640,6 +778,9 @@ mod tests {
         assert_eq!(back["entry_registered"], true);
         assert_eq!(back["entry_fired"], true);
         assert_eq!(back["entry_env_hint"], 0x7FF00000u64);
+        assert_eq!(back["dispatch_slots"][0]["slot_rva"], 0x4910_0088u64);
+        assert_eq!(back["dispatch_slots"][0]["target_module"], "QQNT.dll");
+        assert_eq!(back["dispatch_slots"][0]["target_rva"], 0x4123A0u64);
         assert_eq!(back["notes"][0], "sample");
     }
 

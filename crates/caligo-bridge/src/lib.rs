@@ -274,6 +274,46 @@ pub unsafe extern "system" fn caligo_obs_run(report_path: *const u16) -> u32 {
 }
 
 #[no_mangle]
+/// 只读运行时观测 v2(EXP-F1-R4 修复版):基址由加载器侧经 [`obs::ObsCtx`]
+/// 传入,远程线程内**不调用任何加载器锁敏感 API**,只做裸内存读 + 写文件。
+///
+/// # Safety
+///
+/// `ctx` 必须指向本进程内有效的 [`obs::ObsCtx`](结构体布局见 obs.rs):
+/// wrapper/qqnt/major 基址来自加载器侧 Toolhelp 快照,report_path 指向
+/// 远程已写入的 NUL 结尾 UTF-16 缓冲。
+pub unsafe extern "system" fn caligo_obs_run2(ctx: *const obs::ObsCtx) -> u32 {
+    if ctx.is_null() {
+        return probe_code::ERR_NULL_PATH;
+    }
+    // SAFETY: ctx 由 loader 写入且位于本进程;字段按 obs::ObsCtx 布局解读。
+    let ctx_view = unsafe { &*ctx };
+    let report = obs::observe_ctx(ctx_view);
+    let path_ptr = ctx_view.report_path;
+    if path_ptr == 0 {
+        return probe_code::ERR_NULL_PATH;
+    }
+    let len = match wide_string_len(path_ptr as *const u16) {
+        Some(len) => len,
+        None => return probe_code::ERR_BAD_PATH,
+    };
+    // SAFETY: len 来自 wide_string_len 的 NUL 扫描,切片不越过缓冲区。
+    let path_str = match String::from_utf16(unsafe {
+        std::slice::from_raw_parts(path_ptr as *const u16, len)
+    }) {
+        Ok(s) => s,
+        Err(_) => return probe_code::ERR_BAD_PATH,
+    };
+    match obs::build_report_json(&report) {
+        Ok(json) => match std::fs::write(&path_str, json) {
+            Ok(()) => probe_code::OK,
+            Err(_) => probe_code::ERR_WRITE_FAILED,
+        },
+        Err(_) => probe_code::ERR_WRITE_FAILED,
+    }
+}
+
+#[no_mangle]
 /// 进程/线程入口。严格最小实现:仅记录自身句柄,不创建线程、不分配、不等待。
 pub extern "system" fn DllMain(hinst: isize, reason: u32, _reserved: isize) -> bool {
     if reason == DLL_PROCESS_ATTACH {

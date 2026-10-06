@@ -146,6 +146,39 @@ pub fn list_processes(image_name: &str) -> Result<Vec<ProcessInfo>, String> {
     }
 }
 
+/// 解析目标进程内模块短名 → 基址(Toolhelp 快照在本进程执行;只读)。
+///
+/// 供 obs v2 把基址传给远程线程,避免远程线程内调用加载器锁敏感 API。
+pub fn module_bases_in(pid: u32) -> Result<std::collections::HashMap<String, usize>, String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
+    };
+
+    let mut out = std::collections::HashMap::new();
+    // SAFETY: Toolhelp 只读快照;句柄在退出前关闭。快照逻辑在本进程执行,
+    // 不触碰目标进程的加载器锁。
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
+        if snap == INVALID_HANDLE_VALUE {
+            return Err("CreateToolhelp32Snapshot(MODULE) failed".into());
+        }
+        let mut ment: MODULEENTRY32W = std::mem::zeroed();
+        ment.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+        if Module32FirstW(snap, &mut ment) != 0 {
+            loop {
+                let name = u16sz(&ment.szModule);
+                out.entry(name).or_insert(ment.modBaseAddr as usize);
+                if Module32NextW(snap, &mut ment) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snap);
+    }
+    Ok(out)
+}
+
 pub struct InjectOutcome {
     /// bridge 在目标进程内的基址。
     pub remote_base: usize,
@@ -406,23 +439,62 @@ pub unsafe fn inject_and_probe(
                 return Err(format!("probe remote thread wait failed: code {wait:#x}"));
             }
 
-            // 可选:只读运行时观测(caligo_obs_run)。
+            // 可选:只读运行时观测 v2(caligo_obs_run2;基址由本加载器进程解析,
+            // 远程线程不再调用 GetModuleHandleW/Toolhelp —— EXP-F1-R4 缺陷修复)。
             let mut obs_exit: Option<u32> = None;
             if let Some(obs_path) = obs_report {
                 let obs_wide = to_wide(&obs_path.to_string_lossy());
-                let obs_addr = match read_remote_export(proc_h, remote_base, "caligo_obs_run") {
+                let obs_addr = match read_remote_export(proc_h, remote_base, "caligo_obs_run2") {
                     Ok(Some(a)) => a,
-                    Ok(None) => {
-                        return Err("caligo_obs_run not found in remote export table".into())
-                    }
+                    Ok(None) => return Err("caligo_obs_run2 not found in remote".into()),
                     Err(e) => return Err(format!("remote export lookup (obs): {e}")),
                 };
+                // 加载器侧解析目标进程内关键模块基址(快照在本进程执行,不碰目标锁)。
+                let bases = module_bases_in(pid)?;
+                let wrapper_base = *bases.get("wrapper.node").unwrap_or(&0);
+                let qqnt_base = *bases.get("QQNT.dll").unwrap_or(&0);
+                let major_base = *bases.get("major.node").unwrap_or(&0);
+                if wrapper_base == 0 || qqnt_base == 0 {
+                    return Err(format!(
+                        "module bases unresolved in target: wrapper={wrapper_base:#x} qqnt={qqnt_base:#x}"
+                    ));
+                }
                 let remote_obs_path = alloc_and_write(&obs_wide, "alloc obs report path")?;
                 buf_obs = Some(remote_obs_path);
-                let obs_fn: unsafe extern "system" fn(*const u16) -> u32 =
-                    std::mem::transmute::<usize, unsafe extern "system" fn(*const u16) -> u32>(
-                        obs_addr,
-                    );
+                // caligo_bridge::obs::ObsCtx 的进程内副本(#[repr(C)]:4 个 usize)。
+                let mut ctx_bytes = Vec::with_capacity(32);
+                ctx_bytes.extend_from_slice(&wrapper_base.to_le_bytes());
+                ctx_bytes.extend_from_slice(&qqnt_base.to_le_bytes());
+                ctx_bytes.extend_from_slice(&major_base.to_le_bytes());
+                ctx_bytes.extend_from_slice(&(remote_obs_path as usize).to_le_bytes());
+                let remote_ctx = VirtualAllocEx(
+                    proc_h,
+                    std::ptr::null(),
+                    ctx_bytes.len(),
+                    MEM_COMMIT | MEM_RESERVE,
+                    PAGE_READWRITE,
+                );
+                if remote_ctx.is_null() {
+                    return Err(format!("alloc obs ctx: Win32 error {}", GetLastError()));
+                }
+                let mut written: usize = 0;
+                if WriteProcessMemory(
+                    proc_h,
+                    remote_ctx,
+                    ctx_bytes.as_ptr().cast(),
+                    ctx_bytes.len(),
+                    &mut written,
+                ) == 0
+                    || written != ctx_bytes.len()
+                {
+                    VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
+                    return Err("alloc obs ctx: WriteProcessMemory incomplete".into());
+                }
+                let obs_fn: unsafe extern "system" fn(*const core::ffi::c_void) -> u32 =
+                    std::mem::transmute::<
+                        usize,
+                        unsafe extern "system" fn(*const core::ffi::c_void) -> u32,
+                    >(obs_addr);
                 let start_obs: RemoteThreadFn =
                     std::mem::transmute::<usize, RemoteThreadFn>(obs_fn as usize);
                 let obs_thread = CreateRemoteThread(
@@ -430,11 +502,12 @@ pub unsafe fn inject_and_probe(
                     std::ptr::null(),
                     0,
                     Some(start_obs),
-                    remote_obs_path,
+                    remote_ctx,
                     0,
                     std::ptr::null_mut(),
                 );
                 if obs_thread.is_null() {
+                    VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
                     return Err(format!(
                         "CreateRemoteThread(obs): Win32 error {}",
                         GetLastError()
@@ -445,6 +518,7 @@ pub unsafe fn inject_and_probe(
                 let mut code: u32 = u32::MAX;
                 GetExitCodeThread(obs_thread, &mut code);
                 CloseHandle(obs_thread);
+                VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
                 if wait != 0 {
                     return Err(format!("obs remote thread wait failed: code {wait:#x}"));
                 }
