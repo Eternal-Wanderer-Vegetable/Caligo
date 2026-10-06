@@ -1,0 +1,131 @@
+{
+  "$schema_note": "Caligo K0 environment record. Produced by local-evidence/k0/env-check.ps1 (read-only). Raw output: local-evidence/k0/env-check-output.txt (not committed).",
+  "record_version": 1,
+  "observed_at_local": "2026-10-06T12:59:00+08:00",
+  "executor_note": "Fields below record observed facts only. Running QQ instances are observations, NOT designated experiment targets.",
+  "os": {
+    "caption": "Microsoft Windows 11 专业工作站版",
+    "version": "10.0.26200",
+    "build": "26200",
+    "architecture": "AMD64",
+    "cpu": "AMD Ryzen 7 9700X 8-Core Processor"
+  },
+  "toolchain": {
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "rustup_installed_targets": ["x86_64-pc-windows-msvc"],
+    "rustup_default_toolchain": "stable-x86_64-pc-windows-msvc"
+  },
+  "msvc": {
+    "visualstudio": {
+      "installationPath": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community",
+      "installationVersion": "18.9.12105.275",
+      "workload_vc_tools_confirmed": true
+    },
+    "msvc_tools_version": "14.51.36231",
+    "link_exe": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\14.51.36231\\bin\\Hostx64\\x64\\link.exe",
+    "cl_exe": "C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\14.51.36231\\bin\\Hostx64\\x64\\cl.exe",
+    "windows_sdk_versions": ["10.0.26100.0"]
+  },
+  "debug_tools": {
+    "checked_names": ["cdb.exe", "windbg.exe", "x64dbg.exe", "dumpbin.exe"],
+    "on_path": [],
+    "note": "None found on PATH. dumpbin.exe is expected inside the VS installation but was not resolved from PATH; debug tool selection is still open (see source-register / test-scope)."
+  },
+  "qq_install": {
+    "launcher": {
+      "path": "D:\\Program Files\\Tencent\\QQNT\\QQ.exe",
+      "size_bytes": 1717800,
+      "last_write_utc": "2026-08-22T00:18:54.3818289Z",
+      "file_version": "9.9.33.52230",
+      "product_version": "9.9.33.52230-aff854e8",
+      "sha256": "ABBED71FC3DFE84FA712A2243041029C4A2E60B25595528522CB92C5758D388A",
+      "note": "QQ.exe may be only a launcher; the running kernel version is confirmed per-process in K1, not from this version string alone."
+    },
+    "frozen_version_dir": "D:\\Program Files\\Tencent\\QQNT\\versions\\9.9.33-52230",
+    "frozen_modules": [
+      {
+        "path": "D:\\Program Files\\Tencent\\QQNT\\versions\\9.9.33-52230\\QQNT.dll",
+        "size_bytes": 214599728,
+        "last_write_utc": "2026-08-22T00:18:56.7538300Z",
+        "sha256": "F6F35B8517DA5C38ACE8D4B6ABAD1ABED42F61C8E706D23192A22D91C7620E59"
+      },
+      {
+        "path": "D:\\Program Files\\Tencent\\QQNT\\versions\\9.9.33-52230\\resources\\app\\major.node",
+        "size_bytes": 107373608,
+        "last_write_utc": "2026-08-22T00:19:00.4131667Z",
+        "sha256": "3FDC17FA0512FD4B702F34A0025FFE4ECA0A5C70229872F7FC0A0324BDFB5FDF"
+      },
+      {
+        "path": "D:\\Program Files\\Tencent\\QQNT\\versions\\9.9.33-52230\\resources\\app\\wrapper.node",
+        "size_bytes": 115118632,
+        "last_write_utc": "2026-08-22T00:19:07.4616310Z",
+        "sha256": "63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0"
+      },
+      {
+        "path": "D:\\Program Files\\Tencent\\QQNT\\versions\\9.9.33-52230\\resources\\app\\application.asar",
+        "size_bytes": 30339880,
+        "last_write_utc": "2026-08-22T00:18:58.0312560Z",
+        "sha256": "882AA00613AFD72F63B424DCE347D0BFFCEB25C5CE643BABCEBE2776AB8606D7"
+      }
+    ]
+  },
+  "observed_running_processes": {
+    "observed_at_local": "2026-10-06T13:01:00+08:00",
+    "qq_process_count": 18,
+    "main_process_candidates": [
+      {
+        "pid": 19352,
+        "path": "D:\\Program Files\\Tencent\\QQNT\\QQ.exe",
+        "started_local": "2026-10-05T11:32:20.1609965+08:00",
+        "distinctive_modules": [
+          "resources/app/wrapper.node",
+          "resources/app/major.node",
+          "resources/app/qq-proton.node",
+          "resources/app/ipc.node",
+          "resources/app/initIpc_x64.node",
+          "resources/app/broadcast_ipc.dll",
+          "resources/app/win64/parent-ipc-core-x64.dll",
+          "resources/app/Win64/SSOShareInfoHelper64.dll",
+          "resources/app/LightQuic.dll",
+          "resources/app/shiply.dll"
+        ]
+      },
+      {
+        "pid": 27992,
+        "path": "D:\\Program Files\\Tencent\\QQNT\\QQ.exe",
+        "started_local": "2026-10-05T13:33:25.9323439+08:00",
+        "distinctive_modules": [
+          "resources/app/wrapper.node",
+          "resources/app/major.node",
+          "resources/app/qq-proton.node",
+          "resources/app/ipc.node",
+          "resources/app/initIpc_x64.node",
+          "resources/app/win64/parent-ipc-core-x64.dll",
+          "resources/app/Win64/SSOShareInfoHelper64.dll",
+          "resources/app/LightQuic.dll"
+        ]
+      }
+    ],
+    "observations": [
+      "All 18 QQ processes load versions/9.9.33-52230/QQNT.dll (the Electron/Node runtime layer).",
+      "major.node is loaded in many processes (main and renderer alike).",
+      "wrapper.node was observed only in the two main-process candidates above.",
+      "Additional native modules observed in main-process candidates: qq-proton.node, ipc.node, initIpc_x64.node, sharp-win32-x64.node, shiply-pcqq.node, AudioFoundation.node, plus libvips/glib/gobject, crypto/ssl, SSOShareInfoHelper64.dll, parent-ipc-core-x64.dll, LightQuic.dll, qimei.dll.",
+      "No third-party protocol-end module (e.g. NapCat/LLOneBot-style .node) was observed in the filtered Tencent/*.node module list; the full unfiltered 60-module-per-process listing is in the raw evidence file."
+    ],
+    "disclaimer": "This is a read-only snapshot. None of these PIDs is auto-designated as the K1/K2 experiment target; the executor designates the test instance per docs/research/test-scope.md."
+  },
+  "rebuild_instructions": [
+    "rustc --version  # expect 1.97.1",
+    "cargo --version  # expect 1.97.1",
+    "rustup target list --installed  # expect x86_64-pc-windows-msvc",
+    "Get-FileHash -LiteralPath 'D:/Program Files/Tencent/QQNT/QQ.exe' -Algorithm SHA256  # expect ABBED71F...d388a",
+    "Get-FileHash each frozen module above  # expect listed SHA-256 values"
+  ],
+  "known_gaps": [
+    "Actual debugger selection not finalized.",
+    "QQ user-data config paths not yet verified for backup purposes (see recovery-notes.md).",
+    "MSVC Debugging Tools workload presence inside VS 18 not confirmed."
+  ]
+}
