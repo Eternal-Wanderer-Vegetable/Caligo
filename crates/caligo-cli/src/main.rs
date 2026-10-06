@@ -548,6 +548,16 @@ fn u16_at(b: &[u8], off: usize) -> Option<u16> {
         .map(|s| u16::from_le_bytes([s[0], s[1]]))
 }
 
+fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
+    if !s.len().is_multiple_of(2) {
+        return Err("odd hex length".into());
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect()
+}
+
 /// 离线静态分析:反汇编模块内指定 RVA 或导出函数的代码(iced-x86,只读文件)。
 fn cmd_disasm(args: &[String]) -> ExitCode {
     let mut module: Option<&str> = None;
@@ -870,6 +880,46 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                     Ok(json) => {
                         println!("=== obs report ({}) ===", obs_path.display());
                         println!("{json}");
+                        // F1-R5:活内存代码转储落盘 + 反汇编(内存域真相)。
+                        if let Ok(rep) =
+                            serde_json::from_str::<caligo_bridge::obs::ObsReport>(&json)
+                        {
+                            for dump in &rep.code_dumps {
+                                if dump.hex.is_empty() {
+                                    continue;
+                                }
+                                let bytes = match decode_hex(&dump.hex) {
+                                    Ok(b) => b,
+                                    Err(e) => {
+                                        eprintln!("hex 解码失败({}): {e}", dump.label);
+                                        continue;
+                                    }
+                                };
+                                let bin = obs_path.with_file_name(format!(
+                                    "{}-{}-{:#x}.bin",
+                                    obs_path
+                                        .file_stem()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("obs"),
+                                    dump.label,
+                                    dump.rva
+                                ));
+                                if let Err(e) = std::fs::write(&bin, &bytes) {
+                                    eprintln!("转储写盘失败 {}: {e}", bin.display());
+                                    continue;
+                                }
+                                println!(
+                                    "=== live code {} @ {:#x} ({} bytes) ===",
+                                    dump.label,
+                                    dump.rva,
+                                    bytes.len()
+                                );
+                                match disasm::disasm_at(&bytes, 0, dump.rva, bytes.len()) {
+                                    Ok(text) => print!("{text}"),
+                                    Err(e) => eprintln!("disasm: {e}"),
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!("obs 报告读取失败 {}: {e}", obs_path.display());

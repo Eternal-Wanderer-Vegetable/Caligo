@@ -15,7 +15,7 @@
 //! - 遍历上限 4096 节点并做环检测;注册/注销并发竞争(QM_F_DELETEME 类)导致的
 //!   读取窗口风险如实登记为本方法限制。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// node_module 字段偏移(本机 QQNT.dll 实证,见 get_linked_module 解码)。
 pub mod node_module_offset {
@@ -49,7 +49,7 @@ pub mod nm_flags {
     pub const QQ_NAPI: u32 = 0x8;
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QqntObs {
     pub base: usize,
     pub image_size: u32,
@@ -59,7 +59,7 @@ pub struct QqntObs {
     pub qq_magic_napi_register_rva: u32,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ObservedNodeModule {
     pub name: String,
     pub filename: Option<String>,
@@ -70,7 +70,7 @@ pub struct ObservedNodeModule {
 }
 
 /// 对选定模块的注册回调捕获(只读):地址、所属映像、代码字节转储。
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CallbackCapture {
     pub module_name: String,
     pub register_func_va: Option<usize>,
@@ -93,7 +93,7 @@ pub struct CallbackCapture {
     pub napi_modname: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default, Deserialize)]
 pub struct ObsReport {
     pub protocol_version: u32,
     pub qqnt: Option<QqntObs>,
@@ -106,11 +106,26 @@ pub struct ObsReport {
     pub entry_env_hint: usize,
     /// wrapper.node 分发表槽位实时内容(F1-R4;版本绑定 manifest 的 wrapper.node 摘要)。
     pub dispatch_slots: Vec<DispatchSlot>,
+    /// 活内存方法字节转储(F1-R5;内存域真相,文件不可信)。读取失败的项记空串。
+    pub code_dumps: Vec<CodeDump>,
     pub notes: Vec<String>,
 }
 
+/// 活内存代码转储(F1-R5)。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodeDump {
+    /// wrapper.node 内 RVA。
+    pub rva: u32,
+    /// 转储用途说明。
+    pub label: String,
+    /// 实际读取的字节数(0 = 页不可读/读取失败)。
+    pub len: usize,
+    /// 字节十六进制。
+    pub hex: String,
+}
+
 /// 分发表槽位探测结果(F1-R4)。
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DispatchSlot {
     /// 槽位在 wrapper.node 内的 RVA。
     pub slot_rva: u32,
@@ -745,6 +760,55 @@ unsafe fn probe_dispatch_slots(
     out
 }
 
+/// F1-R5 转储目标:(RVA, 标签)。来源:F-1 三轮的文件态接口表/方法清单。
+/// 文件与内存可能不一致——本转储就是为取得内存域真相。
+const LIVE_DUMP_TARGETS: [(u32, &str); 12] = [
+    (0x3BE64, "tbl1_slot0_fwd"),
+    (0x3BE6E, "tbl1_slot8_method"),
+    (0x3BECC, "tbl1_4arg"),
+    (0x3C0C4, "tbl1_check_act"),
+    (0x3C110, "tbl1_string_ret"),
+    (0x3E89A, "tbl2_m0"),
+    (0x3E8AA, "tbl2_m1"),
+    (0x3E8C0, "tbl2_m2"),
+    (0x3E906, "tbl2_m3"),
+    (0x3E916, "tbl2_m4"),
+    (0x3EBE2B8, "base_vtable_88b"),
+    (0x3EBD728, "derived_vtable_88b"),
+];
+
+/// 转储活内存中上述目标的字节(每方法 192 字节,vtable 88 字节;只读)。
+unsafe fn dump_live_code(wrapper_base: usize, notes: &mut Vec<String>) -> Vec<CodeDump> {
+    let mut out = Vec::new();
+    if wrapper_base == 0 {
+        return out;
+    }
+    for (rva, label) in LIVE_DUMP_TARGETS {
+        let is_vtable = label.contains("vtable");
+        let len = if is_vtable { 88 } else { 192 };
+        let mut buf = vec![0u8; len];
+        // SAFETY: 页校验读,坏页返回 None。
+        let ok = unsafe { checked_read(wrapper_base + rva as usize, buf.as_mut_ptr(), len) };
+        if !ok {
+            notes.push(format!("live dump {label}@{rva:#x} unreadable"));
+            out.push(CodeDump {
+                rva,
+                label: label.to_string(),
+                len: 0,
+                hex: String::new(),
+            });
+            continue;
+        }
+        out.push(CodeDump {
+            rva,
+            label: label.to_string(),
+            len,
+            hex: to_hex(&buf),
+        });
+    }
+    out
+}
+
 /// 构建完整观测报告(错误都降级为 note,不 panic)。
 /// v2 观测:全部模块基址由加载器侧经 [`ObsCtx`] 传入,本函数与被调链
 /// **只做裸内存读**,不触碰加载器锁。报告写盘由调用方完成。
@@ -780,6 +844,8 @@ pub unsafe fn observe_ctx(ctx: &ObsCtx) -> ObsReport {
         }
     }
     report.dispatch_slots = unsafe { probe_dispatch_slots(ctx.wrapper_base, &images, &mut notes) };
+    // F1-R5:活内存方法字节转储(文件不可信,以内存域为准)。
+    report.code_dumps = unsafe { dump_live_code(ctx.wrapper_base, &mut notes) };
     if !targets.is_empty() {
         // SAFETY: 回调指针读取 + 映像内代码转储均为只读。
         let captures = unsafe { capture_callbacks(&targets, &images, &mut notes) };
@@ -882,6 +948,12 @@ mod tests {
                 target_module: "QQNT.dll".into(),
                 target_rva: 0x4123A0,
             }],
+            code_dumps: vec![CodeDump {
+                rva: 0x3C110,
+                label: "tbl1_string_ret".into(),
+                len: 4,
+                hex: "4883EC28".into(),
+            }],
             notes: vec!["sample".into()],
         };
         let back: serde_json::Value =
@@ -900,6 +972,8 @@ mod tests {
         assert_eq!(back["dispatch_slots"][0]["slot_rva"], 0x4910_0088u64);
         assert_eq!(back["dispatch_slots"][0]["target_module"], "QQNT.dll");
         assert_eq!(back["dispatch_slots"][0]["target_rva"], 0x4123A0u64);
+        assert_eq!(back["code_dumps"][0]["rva"], 0x3C110u64);
+        assert_eq!(back["code_dumps"][0]["label"], "tbl1_string_ret");
         assert_eq!(back["notes"][0], "sample");
     }
 
