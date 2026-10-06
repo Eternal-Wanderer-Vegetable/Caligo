@@ -263,6 +263,33 @@ R-A 的第 1-2 步完全离线/只读,是下一步的开工点。
 - 事故台账:9000(2026-10-06 10:53 启动,20:26 死于 sret 缺陷)记入
   local-evidence/k2-03/run-notes.md;crashpad 原件归档同目录。
 
+## 13. K2-04:首次调用 QQ 业务函数——`major.load` 探针与错误收割(2026-10-06,当前有效)
+
+设计记录:local-evidence/k2-04/design.md;运行记录:k2-04/run-notes.md。
+实例 9328(第三轮同一指定实例),全程 post_check=true,零伤亡。
+
+### 13.1 结论
+
+- **`major.load` = QQ 的字节码模块加载器**,不是 nodeIKernel* 服务访问器:
+  `load(file_path, type, pre_type)`,从 asar 加载执行字节码模块
+  (证据:major.node 内字符串邻居 `vm.Script/createCachedData/--no-lazy`、
+  `application.asar`、`app_launcher`、`error: no matched type. : ` 等)。
+- 错误收割:`load()`/`load(1)`/`load('x')` → "Wrong number of arguments";
+  `load('x','y')` → "Wrong arguments"(内容校验失败)。**不通过 load 获取
+  服务面**——那是"替 QQ 执行自己的业务代码",风险档完全不同。
+- **globalThis 全量键表(157 键)暴露 QQ 自身运行状态**:`launcher`、
+  `loginWin`/`loginWindowPid`、`authData`/`statusData`/`qqLocked`、
+  `isAppQuitting`、`multiInstancePort`、Vue 注入器等。nodeIKernel* 服务实例
+  已在主 env 内(QQ 自身模块加载时创建),服务获取的只读优先路径是经这些
+  全局对象向下 introspect。
+- 隐私纪律:`authData`/`statusData` 等涉及账号状态的对象,后续如 introspect
+  **仅限结构**(键名与类型),严禁导出会话票据/凭据值(test-scope 隐私纪律)。
+
+### 13.2 工程增量
+
+- `AsyncCtx.script` 字段 + `--async-script <n>`:0=指纹、1=load 探针、
+  2=错误收割;探针脚本可复用扩展,每次新脚本仍按纪律先改设计记录。
+
 ## 3. 纪律与生命周期
 
 - `caligo_bridge` 注册**不可逆**(node_module_register 只有插入):随测试 QQ 进程退出回收;

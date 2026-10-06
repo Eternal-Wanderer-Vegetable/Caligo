@@ -895,6 +895,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut async_report: Option<PathBuf> = None;
     let mut async_mode: Option<u32> = None;
     let mut async_env: Option<usize> = None;
+    let mut async_script: u32 = 0;
     let mut async_wait_ms: u32 = 10_000;
 
     let mut i = 0;
@@ -999,6 +1000,13 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => async_env = Some(v),
                 None => {
                     eprintln!("--async-env 需要十六进制指针参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--async-script" => match next(&mut i).and_then(|s| s.parse::<u32>().ok()) {
+                Some(v @ 0..=2) => async_script = v,
+                _ => {
+                    eprintln!("--async-script 需要 0(指纹)/1(load 探针)/2(错误收割)");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1156,13 +1164,24 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             }
             if env != 0 && mode >= 1 {
                 println!(
-                    "[gate] K2-03 mode {mode}:将在指定实例上对 env {env:#x} 投递 uv_async 载荷{}",
-                    if mode == 2 { "(含 JS 枚举)" } else { "" }
+                    "[gate] K2-03/04 mode {mode}:将在指定实例上对 env {env:#x} 投递 uv_async 载荷{}",
+                    if mode == 2 {
+                        match async_script {
+                            1 => "(含 load 探针:首次调用 QQ 业务函数,无参一次)",
+                            _ => "(含 JS 枚举)",
+                        }
+                    } else {
+                        ""
+                    }
                 );
+            }
+            if async_script == 1 && mode == 2 {
+                println!("[gate] K2-04:load 探针为首次调用 QQ 业务函数,按设计记录 local-evidence/k2-04/design.md 执行");
             }
             Some(winutil::AsyncRequest {
                 env,
                 mode,
+                script: async_script,
                 report: abs,
                 wait_ms: async_wait_ms,
             })

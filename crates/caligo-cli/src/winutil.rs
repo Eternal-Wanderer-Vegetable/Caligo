@@ -229,8 +229,10 @@ pub struct IntrRequest {
 pub struct AsyncRequest {
     /// 候选 node::Environment*(0 = 干跑)。
     pub env: usize,
-    /// 0=干跑 1=原子载荷 2=JS 枚举。
+    /// 0=干跑 1=原子载荷 2=JS 枚举 3=中断捕获+执行(备用)。
     pub mode: u32,
+    /// mode 2 脚本选择:0=指纹 1=load 探针(K2-04)。
+    pub script: u32,
     /// JSONL 报告路径。
     pub report: PathBuf,
     /// 等待回调触发的毫秒数。
@@ -717,11 +719,12 @@ pub unsafe fn inject_and_probe(
                 let req_wide = to_wide(&req.report.to_string_lossy());
                 let remote_req_path = alloc_and_write(&req_wide, "alloc async report path")?;
                 buf_async = Some(remote_req_path);
-                // caligo_bridge::asyncrun::AsyncCtx 的进程内副本(4×usize + 2×u32)。
+                // caligo_bridge::asyncrun::AsyncCtx 的进程内副本(env,mode,script,
+                // report_path,wait_ms,pad)。
                 let mut ctx_bytes: Vec<u8> = Vec::with_capacity(48);
                 ctx_bytes.extend_from_slice(&req.env.to_le_bytes());
                 ctx_bytes.extend_from_slice(&req.mode.to_le_bytes());
-                ctx_bytes.extend_from_slice(&0u32.to_le_bytes());
+                ctx_bytes.extend_from_slice(&req.script.to_le_bytes());
                 ctx_bytes.extend_from_slice(&(remote_req_path as usize).to_le_bytes());
                 ctx_bytes.extend_from_slice(&req.wait_ms.to_le_bytes());
                 ctx_bytes.extend_from_slice(&0u32.to_le_bytes());

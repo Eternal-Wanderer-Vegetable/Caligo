@@ -39,24 +39,38 @@ pub mod async_code {
     pub const ERR_NO_CAPTURE: u32 = 6;
 }
 
+/// mode 2 脚本选择(ctx.script):0 = 只读指纹(v2),1 = load 探针(v3,K2-04)。
+pub const SCRIPT_FINGERPRINT: u32 = 0;
+pub const SCRIPT_LOAD_PROBE: u32 = 1;
+pub const SCRIPT_LOAD_HARVEST: u32 = 2;
+
 /// mode 2 的枚举脚本:只读(不调用任何 QQ 函数)、自包含、异常全捕获。
 /// 第二版:除顶层键外,另取 load 的类型/源码指纹、process.versions、
 /// require 可用性与 globalThis 键表(截断),全部为纯读取。
 pub const ENUM_SCRIPT: &str = "(function(){try{var m=process._linkedBinding('major');var o={ok:true,keys:Object.getOwnPropertyNames(m),loadType:typeof m.load};try{o.loadSrc=String(m.load).slice(0,300)}catch(e){o.loadSrcErr=String(e)}try{o.versions=process.versions}catch(e){}try{o.hasRequire=typeof require;o.hasProcess=typeof process}catch(e){}try{o.globalKeys=Object.getOwnPropertyNames(globalThis).slice(0,120)}catch(e){}return JSON.stringify(o)}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
+
+/// K2-04 load 探针(K2-04 设计记录):纯读描述符/name/length → **无参调用一次
+/// load()** → 记录返回值形态或异常消息。不传参、不链式调用返回值成员、不赋值。
+pub const LOAD_PROBE_SCRIPT: &str = "(function(){try{var m=process._linkedBinding('major');var o={ok:true};var d=Object.getOwnPropertyDescriptor(m,'load');o.desc=d&&{writable:d.writable,enumerable:d.enumerable,configurable:d.configurable,hasGet:!!d.get,hasSet:!!d.set};o.fnName=m.load.name;o.fnArity=m.load.length;try{var r=m.load();o.retType=typeof r;if(r&&(typeof r==='object'||typeof r==='function')){o.retKeys=Object.getOwnPropertyNames(r).slice(0,200);try{o.retCtor=r.constructor&&r.constructor.name}catch(e){}}else{o.retPrim=String(r).slice(0,100)}}catch(e){o.callErr=String(e)}return JSON.stringify(o)}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
+
+/// K2-04 v4 探针:错误收割(load 各位参喂错误类型,校验错误暴露签名)+
+/// 全量 globalThis 键表。不触发任何模块执行。
+pub const LOAD_HARVEST_SCRIPT: &str = "(function(){try{var m=process._linkedBinding('major');var o={ok:true};var probes=[['load(1)',function(){return m.load(1)}],['load(x)',function(){return m.load('x')}],['load(x,y)',function(){return m.load('x','y')}],['load(x,y,z)',function(){return m.load('x','y','z')}]];o.harvest=[];for(var i=0;i<probes.length;i++){var e={name:probes[i][0]};try{var r=probes[i][1]();e.retType=typeof r;if(r&&typeof r==='object'){e.retKeys=Object.getOwnPropertyNames(r).slice(0,80)}}catch(err){e.err=String(err).slice(0,300)}o.harvest.push(e)}try{var g=Object.getOwnPropertyNames(globalThis);o.globalCount=g.length;o.globalKeys=g}catch(e){o.globalErr=String(e)}return JSON.stringify(o)}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
 
 /// 远程调用上下文(加载器写入,#[repr(C)]).
 #[repr(C)]
 pub struct AsyncCtx {
     /// 候选 node::Environment*(0 = 干跑:只验证解析与布局链,不 init async)。
     pub env: usize,
-    /// 0=干跑 1=原子载荷 2=JS 枚举。
+    /// 0=干跑 1=原子载荷 2=JS 枚举 3=中断捕获+执行(备用)。
     pub mode: u32,
-    pub _pad: u32,
+    /// mode 2 的脚本选择:0=指纹 1=load 探针。
+    pub script: u32,
     /// NUL 结尾 UTF-16 报告路径缓冲地址。
     pub report_path: usize,
     /// 等待回调触发的毫秒数。
     pub wait_ms: u32,
-    pub _pad2: u32,
+    pub _pad: u32,
 }
 
 // --- 回调侧状态(仅原子;缓冲在回调前就绪) ---
@@ -69,6 +83,7 @@ static CB_JS_ERR: AtomicU32 = AtomicU32::new(0); // 0=ok 1=newstring/compile空 
 static RESULT_LEN: AtomicU32 = AtomicU32::new(0);
 static RESULT_SEQ: AtomicU32 = AtomicU32::new(0); // 0=未触发 1=已触发无结果 2=有结果
 static CB_MODE: AtomicU32 = AtomicU32::new(0);
+static CB_SCRIPT: AtomicU32 = AtomicU32::new(0);
 static CB_ENV: AtomicUsize = AtomicUsize::new(0);
 static CB_ISOLATE: AtomicUsize = AtomicUsize::new(0);
 /// mode 3:中断点捕获的 tagged Context 指针(0 = 未捕获)。
@@ -400,7 +415,8 @@ unsafe extern "C" fn async_cb(_handle: *mut c_void) {
         ctx = slot as usize;
     }
     // SAFETY: 助手只做 Compile/Run/Utf8,均在当前有效 HandleScope 内。
-    let r = unsafe { exec_enum_script(ex, isolate, ctx) };
+    let script_sel = CB_SCRIPT.load(Ordering::Acquire);
+    let r = unsafe { exec_enum_script(ex, isolate, ctx, script_sel) };
     // SAFETY: 成对析构。
     unsafe { (ex.handle_scope_dtor)(scope.as_mut_ptr().cast()) };
     finish(r);
@@ -440,11 +456,16 @@ unsafe extern "system" fn intr_capture_cb(_ctx: *mut c_void) {
     CAP_SEQ.store(1, Ordering::Release);
 }
 
-/// 在给定 isolate/context 上执行只读枚举脚本并落结果缓冲。
+/// 在给定 isolate/context 上执行选定脚本并落结果缓冲。
 /// 返回 js_err 码(0=成功)。须在有效 HandleScope 内调用。
-unsafe fn exec_enum_script(ex: &Exports, isolate: usize, ctx: usize) -> u32 {
+unsafe fn exec_enum_script(ex: &Exports, isolate: usize, ctx: usize, script: u32) -> u32 {
+    let src_str = match script {
+        SCRIPT_LOAD_PROBE => LOAD_PROBE_SCRIPT,
+        SCRIPT_LOAD_HARVEST => LOAD_HARVEST_SCRIPT,
+        _ => ENUM_SCRIPT,
+    };
     // String::NewFromUtf8(kNormal=0;sret 约定)。
-    let script_bytes = ENUM_SCRIPT.as_bytes();
+    let script_bytes = src_str.as_bytes();
     let mut src = 0usize;
     // SAFETY: 只读静态缓冲 + 有效 isolate;sret 槽在栈上。
     unsafe {
@@ -539,6 +560,7 @@ pub unsafe fn async_run(ctx: &AsyncCtx) -> u32 {
     RESULT_SEQ.store(0, Ordering::Release);
     CB_MODE.store(0, Ordering::Release);
     CB_ENV.store(0, Ordering::Release);
+    CB_SCRIPT.store(0, Ordering::Release);
     CB_ISOLATE.store(0, Ordering::Release);
     CB_CTX_TAG.store(0, Ordering::Release);
     CAP_SEQ.store(0, Ordering::Release);
@@ -668,6 +690,7 @@ pub unsafe fn async_run(ctx: &AsyncCtx) -> u32 {
 
     CB_MODE.store(ctx.mode, Ordering::Release);
     CB_ENV.store(ctx.env, Ordering::Release);
+    CB_SCRIPT.store(ctx.script, Ordering::Release);
 
     let init_r = unsafe {
         (ex.uv_async_init)(loop_ as *mut c_void, async_handle as *mut c_void, async_cb)
@@ -737,25 +760,37 @@ mod tests {
         assert!(ENUM_SCRIPT.contains("try"));
         assert!(ENUM_SCRIPT.contains("_linkedBinding('major')"));
         assert!(ENUM_SCRIPT.ends_with("}})()"));
+        // load 探针:无参调用一次,异常捕获,不链式调用。
+        assert!(LOAD_PROBE_SCRIPT.contains("m.load()"));
+        assert!(LOAD_PROBE_SCRIPT.contains("callErr"));
+        assert!(LOAD_PROBE_SCRIPT.contains("fnArity"));
+        // 错误收割:只喂错误类型参数,不喂有效路径。
+        assert!(LOAD_HARVEST_SCRIPT.contains("load(1)"));
+        assert!(LOAD_HARVEST_SCRIPT.contains("globalCount"));
+        assert!(!LOAD_HARVEST_SCRIPT.contains("app_launcher"));
     }
 
     #[test]
     fn ctx_layout_is_fixed() {
-        // repr(C) 布局核对:env/mode/pad/report/wait —— 与加载器写入序列一致。
+        // repr(C) 布局核对:env/mode/script/report/wait —— 与加载器写入序列一致。
         assert_eq!(std::mem::size_of::<AsyncCtx>(), std::mem::size_of::<usize>() * 3 + 8);
         let c = AsyncCtx {
             env: 0x11,
             mode: 2,
-            _pad: 0,
+            script: 1,
             report_path: 0x22,
             wait_ms: 33,
-            _pad2: 0,
+            _pad: 0,
         };
         let base = &c as *const AsyncCtx as *const u8;
         // SAFETY: 读自身结构体字段。
         unsafe {
             assert_eq!(*(base as *const usize), 0x11);
             assert_eq!(*base.add(std::mem::size_of::<usize>()).cast::<u32>(), 2);
+            assert_eq!(
+                *base.add(std::mem::size_of::<usize>() + 4).cast::<u32>(),
+                1
+            );
             assert_eq!(
                 *base.add(std::mem::size_of::<usize>() * 2).cast::<usize>(),
                 0x22
