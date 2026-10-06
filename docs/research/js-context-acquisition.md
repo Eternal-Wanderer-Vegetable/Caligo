@@ -317,6 +317,21 @@ R-A 的第 1-2 步完全离线/只读,是下一步的开工点。
 - K2-07 分界:executeJavaScript 跨上下文执行(目标 wc#2)需独立设计记录
   ——renderer 侧只读探针 + 服务桥定位,是五类入口契约的最后一块地图。
 
+## 16. K2-07:跨上下文执行打通与 renderer 服务桥定位(2026-10-06,当前有效)
+
+设计/运行记录:local-evidence/k2-07/。实例 9328 存活。
+
+- **executeJavaScript 跨上下文执行端到端打通**:两段式状态机
+  (`__caligo_r7` 自有命名空间,读后即删)——段 A 在 wc#2(`#/main/message`)
+  上 executeJavaScript 只读探针,段 B 读回结果。主 env ↔ renderer 往返实证。
+- **renderer 服务桥定位**(window 键表尾部,1243 键):**`preloadApi`**、
+  **`experimentalAPIs`**、**`ipcRenderer`**(+ electron/webContentId/ipcImpl/
+  crashReporter);`uin` 键在位(值未取);skey 管理三件套
+  (resetSkey 等);webpack 应用(webpackChunkqq_chat)。
+- renderer 无 node 集成(process/require = undefined,contextIsolation)。
+- **下一实验档(K2-08 候选,需设计记录)**:`preloadApi` 键名枚举 → nodeIKernel*
+  方法面;ipcRenderer 通道名枚举。五类入口契约的最后一块地图。
+
 ## 3. 纪律与生命周期
 
 - `caligo_bridge` 注册**不可逆**(node_module_register 只有插入):随测试 QQ 进程退出回收;

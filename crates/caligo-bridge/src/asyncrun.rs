@@ -46,6 +46,7 @@ pub const SCRIPT_LOAD_HARVEST: u32 = 2;
 pub const SCRIPT_GLOBAL_INTROSPECT: u32 = 3;
 pub const SCRIPT_MAINMODULE_PROBE: u32 = 4;
 pub const SCRIPT_ELECTRON_ENUM: u32 = 5;
+pub const SCRIPT_RENDERER_BRIDGE: u32 = 6;
 
 /// mode 2 的枚举脚本:只读(不调用任何 QQ 函数)、自包含、异常全捕获。
 /// 第二版:除顶层键外,另取 load 的类型/源码指纹、process.versions、
@@ -71,6 +72,11 @@ pub const MAINMODULE_PROBE_SCRIPT: &str = "(function(){try{var o={ok:true};try{v
 /// K2-06 v7 探针:require('electron')(内置缓存命中)→ 模块键名 +
 /// webContents 枚举(id/type/url/destroyed,纯查询)。不触碰 executeJavaScript。
 pub const ELECTRON_ENUM_SCRIPT: &str = "(function(){try{var o={ok:true};var req=process.mainModule&&process.mainModule.require;o.requireType=typeof req;if(typeof req!=='function'){o.err='no require';return JSON.stringify(o)}var electron=req('electron');o.electronKeys=Object.getOwnPropertyNames(electron).slice(0,150);try{var wc=electron.webContents.getAllWebContents();o.count=wc.length;o.list=[];for(var i=0;i<wc.length;i++){var c=wc[i];var e={idx:i};try{e.id=c.getId()}catch(err){}try{e.type=c.getType()}catch(err){}try{e.url=String(c.getURL()).slice(0,200)}catch(err){}try{e.destroyed=c.isDestroyed()}catch(err){}o.list.push(e)}}catch(err){o.wcErr=String(err).slice(0,200)}return JSON.stringify(o)}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
+
+/// K2-07 两段式探针(设计 local-evidence/k2-07/design.md):
+/// 段 A(URL 含 #/main/message 的 webContents 上 executeJavaScript 只读探针,
+/// 结果挂 `__caligo_r7`);段 B(读回并删除)。renderer 探针纯键名/typeof。
+pub const RENDERER_BRIDGE_SCRIPT: &str = "(function(){try{var G=globalThis;var st=G['__caligo_r7'];if(st!==undefined&&st!=='waiting'){delete G['__caligo_r7'];return String(st).slice(0,60000)}if(st==='waiting'){return 'waiting'}var req=process.mainModule&&process.mainModule.require;if(typeof req!=='function'){return 'ERR:no require'}var electron=req('electron');var all=electron.webContents.getAllWebContents();var target=null;for(var i=0;i<all.length;i++){var u='';try{u=String(all[i].getURL())}catch(err){}if(u.indexOf('#/main/message')>=0){target=all[i];break}}if(!target){return 'ERR:main/message webContents not found'}var probe=\"(function(){var o={ok:true};try{o.href=String(location.href).slice(0,150)}catch(e){}try{var wk=Object.getOwnPropertyNames(window);o.windowKeysTotal=wk.length;o.windowKeysTail=wk.slice(-160)}catch(e){}try{o.hasProcess=typeof process;o.hasRequire=typeof require}catch(e){}var sus=['ntApi','qq','qqnt','ipc','bridge','services','windowApi'];o.suspects={};for(var i=0;i<sus.length;i++){try{o.suspects[sus[i]]=typeof window[sus[i]]}catch(e){}}return JSON.stringify(o)})()\";G['__caligo_r7']='waiting';target.executeJavaScript(probe,false).then(function(r){G['__caligo_r7']=String(r).slice(0,60000)},function(e){G['__caligo_r7']='ERR:'+String(e).slice(0,300)});return 'kicked'}catch(e){return 'ERR:'+String(e).slice(0,300)}})()";
 
 /// 远程调用上下文(加载器写入,#[repr(C)]).
 #[repr(C)]
@@ -481,6 +487,7 @@ unsafe fn exec_enum_script(ex: &Exports, isolate: usize, ctx: usize, script: u32
         SCRIPT_GLOBAL_INTROSPECT => GLOBAL_INTROSPECT_SCRIPT,
         SCRIPT_MAINMODULE_PROBE => MAINMODULE_PROBE_SCRIPT,
         SCRIPT_ELECTRON_ENUM => ELECTRON_ENUM_SCRIPT,
+        SCRIPT_RENDERER_BRIDGE => RENDERER_BRIDGE_SCRIPT,
         _ => ENUM_SCRIPT,
     };
     // String::NewFromUtf8(kNormal=0;sret 约定)。
