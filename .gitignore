@@ -1,0 +1,9 @@
+# Rust build artifacts
+/target
+
+# Local evidence (machine-local raw logs, account data, screenshots; never published)
+/local-evidence
+
+# Local-only overrides
+*.local.json
+*.local.md
