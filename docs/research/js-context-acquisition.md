@@ -96,8 +96,32 @@
 
 1. 方案 b(机制组件)保留;~~单独 env 路线~~判负(双链表);
 2. 方案 d 朴素实现判负(NewIsolate 崩溃,见 §5);冻结,重启条件见 §6;
-3. **方案 e(CDP)= 当前主调查路线**,等待执行者以调试参数重启 QQ(§6);
+3. ~~方案 e(CDP)= 当前主调查路线~~ → **实测判死(2026-10-06,§8)**;
 4. 方案 c(内存扫描)维持拒绝。
+
+## 8. 方案 e 实测记录(2026-10-06,判死)
+
+| 尝试 | 结果 |
+|---|---|
+| `--remote-debugging-port=9222` | 参数进入主进程 argv(实测确认);**9222 从未绑定**;QQ 主进程 9210/9211 端口是其内部 JWT 服务(响应 `errCode:4001 请求数据格式错误`),非 CDP → 应用层主动禁用 |
+| `--inspect=9229` | 参数进入主进程 argv(实测确认);9229 关闭 → **`EnableNodeCliInspectArguments` 熔断被编译期禁用** |
+
+- 证据:local-evidence/k2-cdp-port-hijack.txt。
+- 结论:腾讯对调试后门做了系统性关闭(应用层 + 熔断位双层)。命令行注入路线全部关闭。
+
+## 9. 决定(修订 v3,当前有效)
+
+**主路线转为 F-1:wrapper.node C++ ABI 离线解码** —— 完全离线、零 QQ 交互风险,且直接服务
+五类入口(native-entry-contract E-3 本就是候选):
+
+1. 解码 `__qq::std::string` 内存布局(wrapper 导出函数的反汇编可实证:SSO 判定位、容量字段);
+2. 解码 `CreateNTSessionShell(const string&) -> shared_ptr<INTCSessionShellBase>` 的返回对象布局
+   (vtable → 接口方法表,即 C++ 层的会话/消息入口面);
+3. 以解码结果回填 E-3 的 §6.1 契约字段;ABI/线程/生命周期闭合后才进入任何调用实验。
+
+备选(按序,未激活):F-2 内存扫描定位主 Environment(侵入性强,维持拒绝倾向);
+F-3 A2 协议路线(计划 §3.2 分支,需 A1 结论先行)。
+方案 d 复活条件(不变):完成 IsolateSettings/TracingController ABI 解码并作方案变更记录。
 
 ## 3. 纪律与生命周期
 
