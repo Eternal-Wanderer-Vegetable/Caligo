@@ -21,7 +21,7 @@
 | 产物 | SHA-256 | 说明 |
 |---|---|---|
 | `target/release/caligo-cli.exe` | 7E72D2B97E5E3C9A0B72C762F7A9D59DD3A3DA7EAC9BB2D30F49B831BCD47296 | |
-| `target/release/caligo_bridge.dll` | 7DE9E72E1D808E9EFF4E30D416266FEACA97EAC23CE59C1AECD2A185CCB73918 | 被 PID 27992 加载锁定;源码后续 `unsafe extern` 签名修正(仅 Rust 侧元数据,机器码与导出符号不变)待实例退出后重建生效 |
+| `target/release/caligo_bridge.dll` | 5ADA7D0544BE1CFD2C4A296287270B392A90829E8BDAD896EAADCEC641AB998F | 实例退出解锁后重建(含 `unsafe extern` 签名修正),已在牺牲进程冒烟验证全链路 |
 
 质量关卡(2026-10-06 最终):`cargo clippy --workspace --all-targets -- -D warnings` 0 警告;`cargo fmt --all -- --check` 通过;`cargo test --workspace` 17/17。
 
