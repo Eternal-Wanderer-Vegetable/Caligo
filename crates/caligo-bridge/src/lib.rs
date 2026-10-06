@@ -44,6 +44,27 @@ pub mod probe_code {
 }
 
 pub mod obs;
+pub mod register;
+
+/// 注册入口结果码。
+#[no_mangle]
+/// 注册自有 linked binding(EXP-K2-00;详见 register.rs 与方案文档)。
+/// 无参导出,由 loader 远程调用。返回 register_code 结果码。
+pub extern "system" fn caligo_register_entry() -> u32 {
+    register::register_entry()
+}
+
+#[no_mangle]
+/// 本 DLL 实例是否已执行注册。
+pub extern "system" fn caligo_entry_registered() -> u32 {
+    u32::from(register::entry_state().0)
+}
+
+#[no_mangle]
+/// 回调是否已被 Node 调用(0/1)。
+pub extern "system" fn caligo_entry_fired() -> u32 {
+    u32::from(register::entry_state().1)
+}
 
 /// 探测报告。K1 阶段字段只覆盖"已加载、可握手"这一层证据;
 /// 真实账号与会话信息必须等入口契约确认后由确认入口提供,不在此伪造。

@@ -153,6 +153,8 @@ pub struct InjectOutcome {
     pub probe_exit_code: u32,
     /// `caligo_obs_run` 的返回码(仅在 obs_report 提供时)。
     pub obs_exit_code: Option<u32>,
+    /// `caligo_register_entry` 的返回码(仅在 register_entry 提供时)。
+    pub register_exit_code: Option<u32>,
 }
 
 type RemoteThreadFn = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
@@ -179,6 +181,7 @@ pub unsafe fn inject_and_probe(
     bridge_path: &Path,
     report_path: &Path,
     obs_report: Option<&Path>,
+    register_entry: bool,
     wait_ms: u32,
 ) -> Result<InjectOutcome, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
@@ -318,6 +321,47 @@ pub unsafe fn inject_and_probe(
                 })?
             };
 
+            // 可选:注册自有 linked binding(caligo_register_entry,无参调用)。
+            let mut register_exit: Option<u32> = None;
+            if register_entry {
+                let reg_addr =
+                    match read_remote_export(proc_h, remote_base, "caligo_register_entry") {
+                        Ok(Some(a)) => a,
+                        Ok(None) => return Err("caligo_register_entry not found in remote".into()),
+                        Err(e) => return Err(format!("remote export lookup (register): {e}")),
+                    };
+                let reg_fn: unsafe extern "system" fn() -> u32 =
+                    std::mem::transmute::<usize, unsafe extern "system" fn() -> u32>(reg_addr);
+                let start_reg: RemoteThreadFn =
+                    std::mem::transmute::<usize, RemoteThreadFn>(reg_fn as usize);
+                let reg_thread = CreateRemoteThread(
+                    proc_h,
+                    std::ptr::null(),
+                    0,
+                    Some(start_reg),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if reg_thread.is_null() {
+                    return Err(format!(
+                        "CreateRemoteThread(register): Win32 error {}",
+                        GetLastError()
+                    ));
+                }
+                let wait =
+                    WaitForSingleObject(reg_thread, if wait_ms > 0 { wait_ms } else { INFINITE });
+                let mut code: u32 = u32::MAX;
+                GetExitCodeThread(reg_thread, &mut code);
+                CloseHandle(reg_thread);
+                if wait != 0 {
+                    return Err(format!(
+                        "register remote thread wait failed: code {wait:#x}"
+                    ));
+                }
+                register_exit = Some(code);
+            }
+
             // 解析远程 PE 导出表,找 caligo_probe_run。
             let probe_addr = match read_remote_export(proc_h, remote_base, "caligo_probe_run") {
                 Ok(Some(a)) => a,
@@ -407,6 +451,7 @@ pub unsafe fn inject_and_probe(
                 remote_base,
                 probe_exit_code: exit_code,
                 obs_exit_code: obs_exit,
+                register_exit_code: register_exit,
             })
         })();
 

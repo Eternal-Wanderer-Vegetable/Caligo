@@ -99,6 +99,11 @@ pub struct ObsReport {
     pub qqnt: Option<QqntObs>,
     pub modules: Vec<ObservedNodeModule>,
     pub callback_captures: Vec<CallbackCapture>,
+    /// 本 DLL 实例的自有绑定状态(register.rs;跨实例不可见,链表层另见 modules)。
+    pub entry_registered: bool,
+    pub entry_fired: bool,
+    /// 回调收到的 env 指针值(0 = 未触发)。
+    pub entry_env_hint: usize,
     pub notes: Vec<String>,
 }
 
@@ -539,6 +544,10 @@ pub fn observe() -> ObsReport {
         let captures = unsafe { capture_callbacks(&targets, &images, &mut notes) };
         report.callback_captures = captures;
     }
+    let (registered, fired, env_hint) = crate::register::entry_state();
+    report.entry_registered = registered;
+    report.entry_fired = fired;
+    report.entry_env_hint = env_hint;
     report.notes = notes;
     report
 }
@@ -565,6 +574,9 @@ mod tests {
     fn obs_report_json_shape() {
         let report = ObsReport {
             protocol_version: 1,
+            entry_registered: true,
+            entry_fired: true,
+            entry_env_hint: 0x7FF00000,
             qqnt: Some(QqntObs {
                 base: 0x180000000,
                 image_size: 0xCC8C2B0,
@@ -609,6 +621,9 @@ mod tests {
             back["callback_captures"][0]["context_register_func_image"],
             "QQNT.dll"
         );
+        assert_eq!(back["entry_registered"], true);
+        assert_eq!(back["entry_fired"], true);
+        assert_eq!(back["entry_env_hint"], 0x7FF00000u64);
         assert_eq!(back["notes"][0], "sample");
     }
 

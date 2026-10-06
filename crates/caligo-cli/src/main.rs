@@ -30,7 +30,7 @@ caligo-cli <K1 probe>
   caligo-cli bytes <module-path> <rva-hex | export=NAME> [--len <n>]
   caligo-cli inject --pid <n> --bridge <bridge.dll> --manifest <manifest.json>
                     --report <report.json> --confirm-designated-test-instance
-                    [--wait-ms <ms>]
+                    [--obs-report <obs.json>] [--register-entry] [--wait-ms <ms>]
 
 说明:
   inject 是唯一会产生加载动作的命令;它要求 manifest 核对全部通过,
@@ -550,6 +550,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut manifest: Option<PathBuf> = None;
     let mut report: Option<PathBuf> = None;
     let mut obs_report: Option<PathBuf> = None;
+    let mut register_entry = false;
     let mut confirmed = false;
     let mut wait_ms: u32 = 20_000;
 
@@ -595,6 +596,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
+            "--register-entry" => register_entry = true,
             "--wait-ms" => match next(&mut i).and_then(|s| s.parse().ok()) {
                 Some(v) => wait_ms = v,
                 None => {
@@ -686,8 +688,16 @@ fn cmd_inject(args: &[String]) -> ExitCode {
 
     // 加载 + probe(可选 obs)。
     println!("[inject] 加载 bridge 并调用 caligo_probe_run …");
-    let outcome =
-        unsafe { winutil::inject_and_probe(pid, &bridge, &report, obs_report.as_deref(), wait_ms) };
+    let outcome = unsafe {
+        winutil::inject_and_probe(
+            pid,
+            &bridge,
+            &report,
+            obs_report.as_deref(),
+            register_entry,
+            wait_ms,
+        )
+    };
     match outcome {
         Ok(o) => {
             println!(
@@ -702,6 +712,19 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                     _ => "UNKNOWN",
                 }
             );
+            if let Some(reg_code) = o.register_exit_code {
+                println!(
+                    "[register] caligo_register_entry:exit_code={} ({})",
+                    reg_code,
+                    match reg_code {
+                        0 => "OK",
+                        1 => "ERR_ALREADY(本实例已注册)",
+                        2 => "ERR_NO_QQNT",
+                        3 => "ERR_NO_MAGIC",
+                        _ => "UNKNOWN",
+                    }
+                );
+            }
             if let (Some(obs_path), Some(obs_code)) = (obs_report.as_deref(), o.obs_exit_code) {
                 println!(
                     "[obs] caligo_obs_run 完成:exit_code={} ({})",

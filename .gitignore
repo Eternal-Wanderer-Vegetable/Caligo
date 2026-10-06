@@ -1,7 +1,6 @@
 # Rust build artifacts
 /target
-/target-obs
-/target-obs2
+/target-obs*
 
 # Local evidence (machine-local raw logs, account data, screenshots; never published)
 /local-evidence

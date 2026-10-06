@@ -68,6 +68,23 @@
 
 - 需要执行者在指定实例上做账号退出/重登操作;进程级核对工具(PID+创建时间)已就绪。
 
+### EXP-K2-00 自有 linked binding 注册机制验证 — **已执行,2026-10-06,负结果但架构性收获重大**
+
+- 前置:方案评估完成(js-context-acquisition.md);指定实例 PID 49148(仍为 EXP-K1-02 实例);双门控注入。
+- 操作:新 bridge 导出 `caligo_register_entry` → 远程调用 → 经 QQNT 导出 `qq_magic_napi_register`
+  注册自有 napi_module(name="caligo_bridge",flags=2,镜像 major 实测模式;回调仅原子记录 env 指针)。
+- 实际结果:
+  - 注册调用返回 0(OK);干跑(无 QQNT 进程)优雅返回 2(ERR_NO_QQNT);
+  - **obs 链表仍 46 节点、无 caligo_bridge**;entry_fired=false;
+  - 离线解码定位根因:**QQNT 有两条链表** —— node_module_register(0x01C8F5EB)维护表 A
+    (0x0C7092EA,qq_magic 插入处);get_linked_module 读表 B(0x0C7092F0,linked 查找表)。
+    经 qq_magic 注册的绑定不进入 lookup 域,回调永不触发。
+- 证据:local-evidence/k2-00-*.json/txt、k2-00-static-node-module-register.txt。
+- 结论:方案 b(单靠 qq_magic)不能取得 env;**自建 Environment 路线(方案 d)确认为主路线**,
+  所需导出 API 全部核实存在(CreatePlatform/NewIsolate/CreateIsolateData/NewContext/
+  CreateEnvironment/AddLinkedBinding/LoadEnvironment/uv_loop)。详见 js-context-acquisition.md §3-4。
+- liveness:注入后 PID 49148 Responding=True。
+
 ### EXP-K1-04 安全收尾 — **已执行,2026-10-06 闭合**
 
 - 人工收发确认(计划 K1 第 6 条):执行者确认实验期间 TEST-ACCOUNT-A(私聊对象 FRIEND-B)消息收发无任何异常。
