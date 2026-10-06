@@ -45,6 +45,7 @@ pub const SCRIPT_LOAD_PROBE: u32 = 1;
 pub const SCRIPT_LOAD_HARVEST: u32 = 2;
 pub const SCRIPT_GLOBAL_INTROSPECT: u32 = 3;
 pub const SCRIPT_MAINMODULE_PROBE: u32 = 4;
+pub const SCRIPT_ELECTRON_ENUM: u32 = 5;
 
 /// mode 2 的枚举脚本:只读(不调用任何 QQ 函数)、自包含、异常全捕获。
 /// 第二版:除顶层键外,另取 load 的类型/源码指纹、process.versions、
@@ -66,6 +67,10 @@ pub const GLOBAL_INTROSPECT_SCRIPT: &str = "(function(){try{var o={ok:true};var 
 /// K2-05 v6 探针:process.mainModule(CJS 主模块把手)+ process 自有键表 +
 /// require.cache 键名(模块清单)。仍纯读:不调用 require。
 pub const MAINMODULE_PROBE_SCRIPT: &str = "(function(){try{var o={ok:true};try{var mm=process.mainModule;o.mainModuleExists=mm!==undefined&&mm!==null;if(mm){o.mmKeys=Object.getOwnPropertyNames(mm).slice(0,80);o.mmFilename=String(mm.filename||'').slice(0,300);o.mmRequireType=typeof mm.require;o.mmExportsKeys=(mm.exports&&typeof mm.exports==='object')?Object.getOwnPropertyNames(mm.exports).slice(0,100):undefined;o.mmCtor=mm.constructor&&mm.constructor.name}}catch(e){o.mmErr=String(e).slice(0,200)}try{o.processKeys=Object.getOwnPropertyNames(process).slice(0,250)}catch(e){o.pErr=String(e)}try{if(process.mainModule&&process.mainModule.require){var cache=process.mainModule.require.cache;o.cacheCount=Object.keys(cache||{}).length;var ck=Object.getOwnPropertyNames(cache||{});o.cachePaths=ck.slice(0,150);o.cacheTotal=ck.length}}catch(e){o.cacheErr=String(e).slice(0,200)}return JSON.stringify(o)}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
+
+/// K2-06 v7 探针:require('electron')(内置缓存命中)→ 模块键名 +
+/// webContents 枚举(id/type/url/destroyed,纯查询)。不触碰 executeJavaScript。
+pub const ELECTRON_ENUM_SCRIPT: &str = "(function(){try{var o={ok:true};var req=process.mainModule&&process.mainModule.require;o.requireType=typeof req;if(typeof req!=='function'){o.err='no require';return JSON.stringify(o)}var electron=req('electron');o.electronKeys=Object.getOwnPropertyNames(electron).slice(0,150);try{var wc=electron.webContents.getAllWebContents();o.count=wc.length;o.list=[];for(var i=0;i<wc.length;i++){var c=wc[i];var e={idx:i};try{e.id=c.getId()}catch(err){}try{e.type=c.getType()}catch(err){}try{e.url=String(c.getURL()).slice(0,200)}catch(err){}try{e.destroyed=c.isDestroyed()}catch(err){}o.list.push(e)}}catch(err){o.wcErr=String(err).slice(0,200)}return JSON.stringify(o)}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
 
 /// 远程调用上下文(加载器写入,#[repr(C)]).
 #[repr(C)]
@@ -475,6 +480,7 @@ unsafe fn exec_enum_script(ex: &Exports, isolate: usize, ctx: usize, script: u32
         SCRIPT_LOAD_HARVEST => LOAD_HARVEST_SCRIPT,
         SCRIPT_GLOBAL_INTROSPECT => GLOBAL_INTROSPECT_SCRIPT,
         SCRIPT_MAINMODULE_PROBE => MAINMODULE_PROBE_SCRIPT,
+        SCRIPT_ELECTRON_ENUM => ELECTRON_ENUM_SCRIPT,
         _ => ENUM_SCRIPT,
     };
     // String::NewFromUtf8(kNormal=0;sret 约定)。

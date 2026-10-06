@@ -306,6 +306,17 @@ R-A 的第 1-2 步完全离线/只读,是下一步的开工点。
   非必要不走);③ wrapper C++ 层(F-1 已判死)。
 - mode 2 通道 + script 选择机制继续复用;探针输出缓冲已扩至 64 KiB。
 
+## 15. K2-06:electron 获取与 webContents 枚举(2026-10-06,当前有效)
+
+设计/运行记录:local-evidence/k2-06/。实例 9328 存活。
+
+- `mainModule.require('electron')` 成功(内置缓存命中);全套主 API 在位。
+- webContents 枚举 6 个:**webContents #2 = `#/main/message` 主消息窗口**
+  (NT 服务桥所在 renderer);另有 chatPool(#/chat)、公会 webview、隐藏池、
+  截图窗。用户已登录。
+- K2-07 分界:executeJavaScript 跨上下文执行(目标 wc#2)需独立设计记录
+  ——renderer 侧只读探针 + 服务桥定位,是五类入口契约的最后一块地图。
+
 ## 3. 纪律与生命周期
 
 - `caligo_bridge` 注册**不可逆**(node_module_register 只有插入):随测试 QQ 进程退出回收;
