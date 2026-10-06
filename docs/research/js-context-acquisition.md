@@ -344,6 +344,20 @@ R-A 的第 1-2 步完全离线/只读,是下一步的开工点。
   键名枚举(零风险);② webpack require 捕获 + 工厂表源码 grep
   (与 app 运行时最小交互,新门槛);③ ipcRenderer 事件枚举。
 
+## 18. K2-09:服务面地图三层探测——拓扑钉死(2026-10-06,当前有效)
+
+记录:local-evidence/k2-09/。实例 9328 存活。
+
+- 三层排除:renderer webpack 1721 工厂 0 命中(无服务层);主进程 ipcMain 仅
+  14 通道,业务走 **`RM_IPCFROM_RENDERER2/4/5/6/7` 通用中继**(载荷式 RPC);
+  RM handler toString 全为字节码占位符;asar bundle 字符串被自研字节码容器
+  变换(ASCII/UTF-16 均不可 grep)。
+- **钉死拓扑**:renderer →(RM 中继通道 + service/method 载荷)→ 主进程 app
+  字节码闭包 → major.load 运行时 → nodeIKernel* 服务。
+- 五类入口契约剩余未知 = **RM 载荷格式**。路线:① 加性观察 tap(ipcMain 追加
+  监听器——项目首个非纯读动作,须设计记录 + 执行者认可);② 字节码容器离线
+  逆向(重投入)。服务名清单仍以 K1 major.node 标识符为准。
+
 ## 3. 纪律与生命周期
 
 - `caligo_bridge` 注册**不可逆**(node_module_register 只有插入):随测试 QQ 进程退出回收;

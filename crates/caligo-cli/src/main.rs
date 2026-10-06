@@ -1004,9 +1004,9 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 }
             },
             "--async-script" => match next(&mut i).and_then(|s| s.parse::<u32>().ok()) {
-                Some(v @ 0..=7) => async_script = v,
+                Some(v @ 0..=10) => async_script = v,
                 _ => {
-                    eprintln!("--async-script 需要 0-7(…6 renderer桥 7 preloadApi 地图)");
+                    eprintln!("--async-script 需要 0-10(…9 ipcMain 通道表 10 RM handler 文本)");
                     return ExitCode::FAILURE;
                 }
             },
