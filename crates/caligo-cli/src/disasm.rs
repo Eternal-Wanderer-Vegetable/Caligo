@@ -23,7 +23,7 @@ pub fn disasm_at(file: &[u8], file_offset: usize, rva: u32, len: usize) -> Resul
             continue;
         }
         let start = instr.ip() as usize - rva as usize;
-        let hex: String = bytes[start..start + instr.len() as usize]
+        let hex: String = bytes[start..start + instr.len()]
             .iter()
             .map(|b| format!("{b:02X}"))
             .collect();
