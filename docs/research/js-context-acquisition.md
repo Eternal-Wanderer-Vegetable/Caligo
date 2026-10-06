@@ -369,6 +369,19 @@ R-A 的第 1-2 步完全离线/只读,是下一步的开工点。
   来消息后捕获(tap 保持安装,样本到手即移除)。
 - 服务调用面(方法名/参数)以实捕为准;发送实验仍属 K3 纪律(test-scope §3)。
 
+## 20. K2-10 续:对话观测与只读边界(2026-10-06,只读阶段收官)
+
+记录:local-evidence/k2-10/run-notes-round2.md。两轮对话窗口期间 RM 通道零业务
+捕获;排除链(_invokeHandlers 空、_events 恒 14、dtc 恒 0、contextBridge 占位、
+moduleLoadList 无应用条目)钉死:**聊天走 QQ 自研原生总线
+(parent-ipc-core/initIpc_x64),Electron 层只读观测不可见。**
+
+- **tap 已全部移除({removed:5}),实例完整还原、存活。**
+- K2 只读阶段结论:持有 RM 信封编码(实测)+ K1 服务名清单 + 双执行通道;
+  剩余未知只能靠**业务调用实验**闭合——按侵入度递增:A. 主 env 直调 RM
+  handler 重放只读型服务调用;B. MsgService 只读方法;C. 发送(完整 K3 纪律)。
+  每步独立设计记录 + 认可。
+
 ## 3. 纪律与生命周期
 
 - `caligo_bridge` 注册**不可逆**(node_module_register 只有插入):随测试 QQ 进程退出回收;

@@ -53,6 +53,13 @@ pub const SCRIPT_IPCMAIN_MAP: u32 = 9;
 pub const SCRIPT_HANDLER_TEXT: u32 = 10;
 pub const SCRIPT_RM_TAP: u32 = 11;
 pub const SCRIPT_RM_TAP_REMOVE: u32 = 12;
+pub const SCRIPT_RM_TAP_FILTERED: u32 = 13;
+pub const SCRIPT_INVOKE_HANDLERS: u32 = 14;
+pub const SCRIPT_RM_TAP_V3: u32 = 15;
+pub const SCRIPT_RENDERER_DEEP: u32 = 16;
+pub const SCRIPT_IPCIMPL_TEXT: u32 = 17;
+pub const SCRIPT_PROCESS_TOPO: u32 = 18;
+pub const SCRIPT_MODULE_LOADLIST: u32 = 19;
 
 /// mode 2 的枚举脚本:只读(不调用任何 QQ 函数)、自包含、异常全捕获。
 /// 第二版:除顶层键外,另取 load 的类型/源码指纹、process.versions、
@@ -106,6 +113,32 @@ pub const RM_TAP_SCRIPT: &str = "(function(){try{var G=globalThis;var st=G['__ca
 
 /// K2-10 tap 移除:removeListener 全部记录器 + 删除状态/缓冲全局,回移除计数。
 pub const RM_TAP_REMOVE_SCRIPT: &str = "(function(){try{var G=globalThis;var fns=G['__caligo_tap_fns'];var n=0;if(fns){var req=process.mainModule&&process.mainModule.require;var electron=req('electron');for(var i=0;i<fns.length;i++){try{electron.ipcMain.removeListener(fns[i].ch,fns[i].fn);n++}catch(err){}}}delete G['__caligo_tap_fns'];delete G['__caligo_tap'];delete G['__caligo_r10'];return JSON.stringify({removed:n})}catch(e){return JSON.stringify({removed:-1,error:String(e).slice(0,200)})}})()";
+
+/// K2-10 tap v2(过滤版):先移除旧记录器,再装"跳过 LogApi(cmdName==='info')"
+/// 的记录器——业务调用不再被日志洪流挤出环形缓冲。引用仍存 `__caligo_tap_fns`
+/// (script=12 移除逻辑通用)。
+pub const RM_TAP_FILTERED_SCRIPT: &str = "(function(){try{var G=globalThis;var req=process.mainModule&&process.mainModule.require;if(typeof req!=='function'){return 'ERR:no require'}var electron=req('electron');var old=G['__caligo_tap_fns'];var removed=0;if(old){for(var i=0;i<old.length;i++){try{electron.ipcMain.removeListener(old[i].ch,old[i].fn);removed++}catch(err){}}}var chans=['RM_IPCFROM_RENDERER2','RM_IPCFROM_RENDERER4','RM_IPCFROM_RENDERER5','RM_IPCFROM_RENDERER6','RM_IPCFROM_RENDERER7'];G['__caligo_tap']=[];var fns=[];var rec=function(ch){return function(){try{var b=G['__caligo_tap'];if(!b){return}var a2=arguments[2];try{if(a2&&typeof a2==='object'&&a2.cmdName==='info'){return}}catch(err){}var e={ch:ch,t:Date.now(),argc:arguments.length,args:[]};for(var i=0;i<arguments.length;i++){var a=arguments[i];var t=typeof a;if(t==='object'&&a!==null){try{e.args.push({t:t,j:JSON.stringify(a).slice(0,8192)})}catch(err){e.args.push({t:t,j:'ERR:'+String(err).slice(0,80)})}}else{e.args.push({t:t,s:String(a).slice(0,512)})}}b.push(e);if(b.length>50){b.splice(0,b.length-50)}}catch(err){}}};for(var i=0;i<chans.length;i++){var f=rec(chans[i]);fns.push({ch:chans[i],fn:f});electron.ipcMain.on(chans[i],f)}G['__caligo_tap_fns']=fns;G['__caligo_r10']='waiting';return JSON.stringify({kicked:true,removed:removed,installed:fns.length})}catch(e){return 'ERR:'+String(e).slice(0,300)}})()";
+
+/// K2-10 追加:ipcMain._invokeHandlers 键名(invoke/handle 体系,区别于 _events)
+/// + _events 复查。只读。
+pub const INVOKE_HANDLERS_SCRIPT: &str = "(function(){try{var o={ok:true};var req=process.mainModule&&process.mainModule.require;if(typeof req!=='function'){return JSON.stringify({ok:false,error:'no require'})}var electron=req('electron');try{var ih=electron.ipcMain._invokeHandlers||{};var k=Object.getOwnPropertyNames(ih);o.invokeCount=k.length;o.invokeChannels=k.slice(0,500)}catch(e){o.ihErr=String(e).slice(0,200)}try{var ev=electron.ipcMain._events||{};o.eventChannels=Object.getOwnPropertyNames(ev).slice(0,200)}catch(e){}try{var syms=Object.getOwnPropertySymbols(electron.ipcMain);o.symbols=[];for(var i=0;i<syms.length;i++){o.symbols.push(String(syms[i].description||syms[i]))}}catch(e){}return JSON.stringify(o)}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
+
+/// K2-10 tap v3:过滤 LogApi(info)+ AvatarService,环扩 200——业务调用可长期存活。
+pub const RM_TAP_V3_SCRIPT: &str = "(function(){try{var G=globalThis;var req=process.mainModule&&process.mainModule.require;if(typeof req!=='function'){return 'ERR:no require'}var electron=req('electron');var old=G['__caligo_tap_fns'];var removed=0;if(old){for(var i=0;i<old.length;i++){try{electron.ipcMain.removeListener(old[i].ch,old[i].fn);removed++}catch(err){}}}var chans=['RM_IPCFROM_RENDERER2','RM_IPCFROM_RENDERER4','RM_IPCFROM_RENDERER5','RM_IPCFROM_RENDERER6','RM_IPCFROM_RENDERER7'];G['__caligo_tap']=[];var fns=[];var rec=function(ch){return function(){try{var b=G['__caligo_tap'];if(!b){return}var a2=arguments[2];try{if(a2&&typeof a2==='object'){var cn=a2.cmdName;if(cn==='info'||(typeof cn==='string'&&cn.indexOf('nodeIKernelAvatarService')===0)){return}}}catch(err){}var e={ch:ch,t:Date.now(),argc:arguments.length,args:[]};for(var i=0;i<arguments.length;i++){var a=arguments[i];var t=typeof a;if(t==='object'&&a!==null){try{e.args.push({t:t,j:JSON.stringify(a).slice(0,8192)})}catch(err){e.args.push({t:t,j:'ERR:'+String(err).slice(0,80)})}}else{e.args.push({t:t,s:String(a).slice(0,512)})}}b.push(e);if(b.length>200){b.splice(0,b.length-200)}}catch(err){}}};for(var i=0;i<chans.length;i++){var f=rec(chans[i]);fns.push({ch:chans[i],fn:f});electron.ipcMain.on(chans[i],f)}G['__caligo_tap_fns']=fns;G['__caligo_r10']='waiting';return JSON.stringify({kicked:true,removed:removed,installed:fns.length})}catch(e){return 'ERR:'+String(e).slice(0,300)}})()";
+
+/// K2-10 追加:主消息窗口 renderer 深探——全量 window 键表(1243 键全名)+
+/// dtResponseCallbacks 结构(对话后应已 populate)+ ipcImpl 类型/键。
+/// 两段式 `__caligo_r11`,全部只读。
+pub const RENDERER_DEEP_SCRIPT: &str = "(function(){try{var G=globalThis;var st=G['__caligo_r11'];if(st!==undefined&&st!=='waiting'){delete G['__caligo_r11'];return String(st).slice(0,64000)}if(st==='waiting'){return 'waiting'}var req=process.mainModule&&process.mainModule.require;if(typeof req!=='function'){return 'ERR:no require'}var electron=req('electron');var all=electron.webContents.getAllWebContents();var target=null;for(var i=0;i<all.length;i++){var u='';try{u=String(all[i].getURL())}catch(err){}if(u.indexOf('#/main/message')>=0){target=all[i];break}}if(!target){return 'ERR:main/message webContents not found'}var probe=\"(function(){var o={ok:true};try{var wk=Object.getOwnPropertyNames(window);o.windowKeysAll=wk}catch(e){}try{var d=window.dtResponseCallbacks;if(d&&typeof d==='object'){var dk=Object.getOwnPropertyNames(d);o.dtcTotal=dk.length;o.dtcKeys=dk.slice(0,40);var first=dk[0];if(first){var fv=d[first];o.dtcValueType=typeof fv;if(fv&&typeof fv==='object'){o.dtcValueKeys=Object.getOwnPropertyNames(fv).slice(0,40)}}}}catch(e){o.dtcErr=String(e).slice(0,150)}try{o.ipcImplType=typeof window.ipcImpl;o.ipcImplKeys=window.ipcImpl&&typeof window.ipcImpl==='object'?Object.getOwnPropertyNames(window.ipcImpl).slice(0,80):undefined}catch(e){}try{o.electronType=typeof window.electron;o.electronKeys=window.electron&&typeof window.electron==='object'?Object.getOwnPropertyNames(window.electron).slice(0,80):undefined}catch(e){}return JSON.stringify(o)})()\";G['__caligo_r11']='waiting';target.executeJavaScript(probe,false).then(function(r){G['__caligo_r11']=String(r).slice(0,64000)},function(e){G['__caligo_r11']='ERR:'+String(e).slice(0,300)});return 'kicked'}catch(e){return 'ERR:'+String(e).slice(0,300)}})()";
+
+/// K2-10 追加:ipcImpl/ipcRenderer 方法源文本(toString,只读)——暴露 IPC 路由。
+pub const IPCIMPL_TEXT_SCRIPT: &str = "(function(){try{var G=globalThis;var st=G['__caligo_r12'];if(st!==undefined&&st!=='waiting'){delete G['__caligo_r12'];return String(st).slice(0,64000)}if(st==='waiting'){return 'waiting'}var req=process.mainModule&&process.mainModule.require;if(typeof req!=='function'){return 'ERR:no require'}var electron=req('electron');var all=electron.webContents.getAllWebContents();var target=null;for(var i=0;i<all.length;i++){var u='';try{u=String(all[i].getURL())}catch(err){}if(u.indexOf('#/main/message')>=0){target=all[i];break}}if(!target){return 'ERR:main/message webContents not found'}var probe=\"(function(){function fninfo(name,f){var e={name:name};try{e.type=typeof f;if(typeof f==='function'){e.arity=f.length;var t=Function.prototype.toString.call(f);e.len=t.length;e.placeholder=t.indexOf('[native code]')>=0;e.snip=t.slice(0,600)}}catch(err){e.err=String(err).slice(0,100)}return e}var o={ok:true};try{var ii=window.ipcImpl;if(ii){o.ipcImpl={ctor:ii.constructor&&ii.constructor.name};o.send=fninfo('send',ii.send);o.on=fninfo('on',ii.on);o.removeAll=fninfo('removeAllListeners',ii.removeAllListeners)}}catch(e){o.iiErr=String(e).slice(0,120)}try{var ir=window.ipcRenderer;if(ir){o.ipcRenderer={ctor:ir.constructor&&ir.constructor.name,keys:Object.getOwnPropertyNames(ir).slice(0,60)};o.irSend=fninfo('send',ir.send);o.irInvoke=fninfo('invoke',ir.invoke);o.irOn=fninfo('on',ir.on);o.irPostMessage=fninfo('postMessage',ir.postMessage)}}catch(e){o.irErr=String(e).slice(0,120)}return JSON.stringify(o)})()\";G['__caligo_r12']='waiting';target.executeJavaScript(probe,false).then(function(r){G['__caligo_r12']=String(r).slice(0,64000)},function(e){G['__caligo_r12']='ERR:'+String(e).slice(0,300)});return 'kicked'}catch(e){return 'ERR:'+String(e).slice(0,300)}})()";
+
+/// K2-10 追加:进程拓扑——_events 复查(对话后新通道?)+ utilityProcess 列表。
+pub const PROCESS_TOPO_SCRIPT: &str = "(function(){try{var o={ok:true};var req=process.mainModule&&process.mainModule.require;if(typeof req!=='function'){return JSON.stringify({ok:false,error:'no require'})}var electron=req('electron');try{var ev=electron.ipcMain._events||{};var k=Object.getOwnPropertyNames(ev);o.eventChannels=k;o.channelCount=k.length}catch(e){}try{var up=electron.utilityProcess;if(up&&typeof up.getAllProcesses==='function'){var ps=up.getAllProcesses();o.utility=[];for(var i=0;i<ps.length;i++){o.utility.push({pid:ps[i].pid,type:ps[i].type})}}}catch(e){o.upErr=String(e).slice(0,150)}try{o.childProcessType=require('child_process')?'module':'?'}catch(e){}return JSON.stringify(o)}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
+
+/// K2-10 收尾探针:process.moduleLoadList(纯读)——找 initIpc/qq-proton 注册名。
+pub const MODULE_LOADLIST_SCRIPT: &str = "(function(){try{var o={ok:true};try{var ml=process.moduleLoadList;o.loadList=ml;o.loadCount=ml?ml.length:0}catch(e){o.mlErr=String(e).slice(0,150)}try{o.hasLinkedBindingFn=typeof process._linkedBinding}catch(e){}return JSON.stringify(o)}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
 
 /// 远程调用上下文(加载器写入,#[repr(C)]).
 #[repr(C)]
@@ -523,6 +556,13 @@ unsafe fn exec_enum_script(ex: &Exports, isolate: usize, ctx: usize, script: u32
         SCRIPT_HANDLER_TEXT => HANDLER_TEXT_SCRIPT,
         SCRIPT_RM_TAP => RM_TAP_SCRIPT,
         SCRIPT_RM_TAP_REMOVE => RM_TAP_REMOVE_SCRIPT,
+        SCRIPT_RM_TAP_FILTERED => RM_TAP_FILTERED_SCRIPT,
+        SCRIPT_INVOKE_HANDLERS => INVOKE_HANDLERS_SCRIPT,
+        SCRIPT_RM_TAP_V3 => RM_TAP_V3_SCRIPT,
+        SCRIPT_RENDERER_DEEP => RENDERER_DEEP_SCRIPT,
+        SCRIPT_IPCIMPL_TEXT => IPCIMPL_TEXT_SCRIPT,
+        SCRIPT_PROCESS_TOPO => PROCESS_TOPO_SCRIPT,
+        SCRIPT_MODULE_LOADLIST => MODULE_LOADLIST_SCRIPT,
         _ => ENUM_SCRIPT,
     };
     // String::NewFromUtf8(kNormal=0;sret 约定)。

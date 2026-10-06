@@ -1004,9 +1004,9 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 }
             },
             "--async-script" => match next(&mut i).and_then(|s| s.parse::<u32>().ok()) {
-                Some(v @ 0..=12) => async_script = v,
+                Some(v @ 0..=19) => async_script = v,
                 _ => {
-                    eprintln!("--async-script 需要 0-12(…10 handler文本 11 RM tap 12 tap移除)");
+                    eprintln!("--async-script 需要 0-19(…18 进程拓扑 19 moduleLoadList)");
                     return ExitCode::FAILURE;
                 }
             },
