@@ -128,16 +128,87 @@ pub fn build_report_json(report: &ObsReport) -> serde_json::Result<String> {
 
 // --- 自身进程内存的原始读取(只读) ---
 
+/// 页可读性缓存(远程线程单线程使用;thread_local 隔离)。
+/// EXP-F1-R4 事故后引入:任何裸读前先做 VirtualQuery 校验,坏地址返回 None
+/// 而非触发 AV(QQ 的 crashpad 会全进程接管 AV,导致实例死亡)。
+fn page_readable(addr: usize) -> bool {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static PAGE_CACHE: RefCell<HashMap<usize, bool>> = RefCell::new(HashMap::new());
+    }
+    let page = addr & !0xFFF;
+    PAGE_CACHE.with(|c| {
+        if let Some(v) = c.borrow().get(&page) {
+            return *v;
+        }
+        // SAFETY: VirtualQuery 为无锁内核查询,只读自身进程页表信息。
+        let ok = unsafe {
+            let mut mbi: windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION =
+                std::mem::zeroed();
+            let n = windows_sys::Win32::System::Memory::VirtualQuery(
+                addr as *const core::ffi::c_void,
+                &mut mbi,
+                std::mem::size_of::<windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION>(),
+            );
+            if n == 0 {
+                None
+            } else {
+                Some(mbi)
+            }
+        };
+        let Some(mbi) = ok else {
+            c.borrow_mut().insert(page, false);
+            return false;
+        };
+        // MEM_COMMIT = 0x1000;PAGE_NOACCESS = 0x01;PAGE_GUARD = 0x100。
+        const MEM_COMMIT: u32 = 0x1000;
+        const PAGE_NOACCESS: u32 = 0x01;
+        const PAGE_GUARD: u32 = 0x100;
+        let readable = mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+        c.borrow_mut().insert(page, readable);
+        readable
+    })
+}
+
+/// 带页校验的区间读:覆盖 [p, p+len) 的每一页,任一页不可读即失败(不触发 AV)。
+///
+/// # Safety
+///
+/// `out` 须指向至少 `len` 字节的可写缓冲。
+unsafe fn checked_read(p: usize, out: *mut u8, len: usize) -> bool {
+    let start_page = p & !0xFFF;
+    let end_page = (p + len - 1) & !0xFFF;
+    let mut page = start_page;
+    while page <= end_page {
+        if !page_readable(page) {
+            return false;
+        }
+        page += 0x1000;
+    }
+    // SAFETY: 页已校验为可读;校验后瞬间被卸载的窗口由观测 notes 暴露。
+    unsafe {
+        core::ptr::copy_nonoverlapping(p as *const u8, out, len);
+    }
+    true
+}
+
 unsafe fn rd_u8(p: usize) -> Option<u8> {
-    (p as *const u8).as_ref().map(|v| *v)
+    let mut b = 0u8;
+    // SAFETY: 单字节读,页校验由 checked_read 完成。
+    unsafe { checked_read(p, &mut b, 1).then_some(b) }
 }
 
 unsafe fn rd_u16(p: usize) -> Option<u16> {
-    (p as *const u16).as_ref().map(|v| v.to_le())
+    let mut b = [0u8; 2];
+    // SAFETY: 两字节读,页校验由 checked_read 完成。
+    unsafe { checked_read(p, b.as_mut_ptr(), 2) }.then(|| u16::from_le_bytes(b))
 }
 
 unsafe fn rd_u32(p: usize) -> Option<u32> {
-    (p as *const u32).as_ref().map(|v| v.to_le())
+    let mut b = [0u8; 4];
+    // SAFETY: 四字节读,页校验由 checked_read 完成。
+    unsafe { checked_read(p, b.as_mut_ptr(), 4) }.then(|| u32::from_le_bytes(b))
 }
 
 unsafe fn rd_i32(p: usize) -> Option<i32> {
@@ -145,7 +216,9 @@ unsafe fn rd_i32(p: usize) -> Option<i32> {
 }
 
 unsafe fn rd_usize(p: usize) -> Option<usize> {
-    (p as *const usize).as_ref().copied()
+    let mut b = [0u8; 8];
+    // SAFETY: 八字节读,页校验由 checked_read 完成。
+    unsafe { checked_read(p, b.as_mut_ptr(), 8) }.then(|| usize::from_le_bytes(b))
 }
 
 /// 读取 NUL 结尾字节串(上限 [`limits::MAX_STRING`]),lossy UTF-8。
