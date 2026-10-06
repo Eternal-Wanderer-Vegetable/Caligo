@@ -27,6 +27,7 @@ caligo-cli <K1 probe>
   caligo-cli verify-manifest <manifest.json>
   caligo-cli process
   caligo-cli exports <module-path> [--all]
+  caligo-cli bytes <module-path> <rva-hex | export=NAME> [--len <n>]
   caligo-cli inject --pid <n> --bridge <bridge.dll> --manifest <manifest.json>
                     --report <report.json> --confirm-designated-test-instance
                     [--wait-ms <ms>]
@@ -34,6 +35,7 @@ caligo-cli <K1 probe>
 说明:
   inject 是唯一会产生加载动作的命令;它要求 manifest 核对全部通过,
   且执行者显式确认目标实例已按 docs/research/test-scope.md 指定。
+  bytes 是离线静态分析工具(读文件字节,十六进制转储)。
 ";
 
 fn main() -> ExitCode {
@@ -58,6 +60,7 @@ fn main() -> ExitCode {
             }
         },
         Some("exports") => cmd_exports(&args[1..]),
+        Some("bytes") => cmd_bytes(&args[1..]),
         Some("inject") => cmd_inject(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
@@ -296,11 +299,113 @@ fn to_absolute(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// 离线静态分析:十六进制转储模块内指定 RVA 或导出函数起始的字节。只读文件。
+fn cmd_bytes(args: &[String]) -> ExitCode {
+    let mut module: Option<&str> = None;
+    let mut target: Option<&str> = None;
+    let mut len: usize = 96;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--len" => {
+                i += 1;
+                match args.get(i).and_then(|s| s.parse().ok()) {
+                    Some(v) => len = v,
+                    None => {
+                        eprintln!("--len 需要数字参数");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            other if module.is_none() => module = Some(other),
+            other if target.is_none() => target = Some(other),
+            other => {
+                eprintln!("多余参数: {other}\n{USAGE}");
+                return ExitCode::FAILURE;
+            }
+        }
+        i += 1;
+    }
+    let (Some(module), Some(target)) = (module, target) else {
+        eprintln!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+
+    let bytes = match std::fs::read(module) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("read {module}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // 解析目标:十六进制 RVA,或 export=导出名。
+    let rva: u32 = if let Some(name) = target.strip_prefix("export=") {
+        match std::fs::read(module)
+            .map_err(|e| e.to_string())
+            .and_then(|b| pe::parse_export_table(&b).map(|t| (t, b)))
+        {
+            Ok((table, _)) => match table.exports.iter().find(|e| e.name == name) {
+                Some(e) => e.function_rva,
+                None => {
+                    eprintln!("导出 {name} 未找到于 {module}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            Err(e) => {
+                eprintln!("解析导出表: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else if let Some(hex) = target.strip_prefix("0x").or(target.strip_prefix("0X")) {
+        match u32::from_str_radix(hex, 16) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("RVA 解析失败: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        eprintln!("目标须为 rva-hex 或 export=NAME");
+        return ExitCode::FAILURE;
+    };
+
+    let offset = match pe::rva_to_file_offset(&bytes, rva) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let end = (offset + len).min(bytes.len());
+    println!("file: {module}");
+    println!(
+        "rva: {rva:#010x}  file_offset: {offset:#010x}  bytes: {}",
+        end - offset
+    );
+    for (row, chunk) in bytes[offset..end].chunks(16).enumerate() {
+        let hex: String = chunk.iter().map(|b| format!("{b:02X} ")).collect();
+        let ascii: String = chunk
+            .iter()
+            .map(|b| {
+                if b.is_ascii_graphic() || *b == b' ' {
+                    *b as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        println!("  {:+06x}  {:<48} {ascii}", row * 16, hex);
+    }
+    ExitCode::SUCCESS
+}
+
 fn cmd_inject(args: &[String]) -> ExitCode {
     let mut pid: Option<u32> = None;
     let mut bridge: Option<PathBuf> = None;
     let mut manifest: Option<PathBuf> = None;
     let mut report: Option<PathBuf> = None;
+    let mut obs_report: Option<PathBuf> = None;
     let mut confirmed = false;
     let mut wait_ms: u32 = 20_000;
 
@@ -336,6 +441,13 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => report = Some(PathBuf::from(v)),
                 None => {
                     eprintln!("--report 需要路径参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--obs-report" => match next(&mut i) {
+                Some(v) => obs_report = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("--obs-report 需要路径参数");
                     return ExitCode::FAILURE;
                 }
             },
@@ -383,6 +495,25 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    let obs_report = match obs_report {
+        Some(p) => {
+            let abs = match to_absolute(&p) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("--obs-report 路径无效: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Some(parent) = abs.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!("obs 报告目录创建失败 {}: {e}", parent.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+            Some(abs)
+        }
+        None => None,
+    };
 
     // 门 1:manifest 摘要核对(计划 §5:版本与模块摘要确认 → 接入)。
     println!("[gate 1] 核对模块基线 …");
@@ -409,9 +540,10 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     }
     println!("[gate 2] PASS — 执行者已确认 PID {pid} 为指定测试实例");
 
-    // 加载 + probe。
+    // 加载 + probe(可选 obs)。
     println!("[inject] 加载 bridge 并调用 caligo_probe_run …");
-    let outcome = unsafe { winutil::inject_and_probe(pid, &bridge, &report, wait_ms) };
+    let outcome =
+        unsafe { winutil::inject_and_probe(pid, &bridge, &report, obs_report.as_deref(), wait_ms) };
     match outcome {
         Ok(o) => {
             println!(
@@ -426,6 +558,29 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                     _ => "UNKNOWN",
                 }
             );
+            if let (Some(obs_path), Some(obs_code)) = (obs_report.as_deref(), o.obs_exit_code) {
+                println!(
+                    "[obs] caligo_obs_run 完成:exit_code={} ({})",
+                    obs_code,
+                    match obs_code {
+                        caligo_bridge::probe_code::OK => "OK",
+                        caligo_bridge::probe_code::ERR_NULL_PATH => "ERR_NULL_PATH",
+                        caligo_bridge::probe_code::ERR_BAD_PATH => "ERR_BAD_PATH",
+                        caligo_bridge::probe_code::ERR_WRITE_FAILED => "ERR_WRITE_FAILED",
+                        _ => "UNKNOWN",
+                    }
+                );
+                match std::fs::read_to_string(obs_path) {
+                    Ok(json) => {
+                        println!("=== obs report ({}) ===", obs_path.display());
+                        println!("{json}");
+                    }
+                    Err(e) => {
+                        eprintln!("obs 报告读取失败 {}: {e}", obs_path.display());
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
             match std::fs::read_to_string(&report) {
                 Ok(json) => {
                     println!("=== probe report ({}) ===", report.display());

@@ -43,6 +43,8 @@ pub mod probe_code {
     pub const ERR_WRITE_FAILED: u32 = 3;
 }
 
+pub mod obs;
+
 /// 探测报告。K1 阶段字段只覆盖"已加载、可握手"这一层证据;
 /// 真实账号与会话信息必须等入口契约确认后由确认入口提供,不在此伪造。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -196,6 +198,36 @@ pub unsafe extern "system" fn caligo_probe_run(report_path: *const u16) -> u32 {
 fn current_pid() -> u32 {
     // SAFETY: GetCurrentProcessId 无副作用。
     unsafe { windows_sys::Win32::System::Threading::GetCurrentProcessId() }
+}
+
+#[no_mangle]
+/// 只读运行时观测(EXP-K1-02):解析 QQNT.dll 导出定位 node_module 注册链表头,
+/// 遍历输出全部已注册原生模块的 JS 名字。详见 [`obs`] 模块文档。
+///
+/// 返回 [`probe_code`] 结果码。不调用任何 QQ/Node 函数;唯一写动作是报告文件。
+///
+/// # Safety
+///
+/// `report_path` 必须指向有效的 NUL 结尾 UTF-16 缓冲区(由 loader 写入)。
+pub unsafe extern "system" fn caligo_obs_run(report_path: *const u16) -> u32 {
+    let len = match wide_string_len(report_path) {
+        Some(len) => len,
+        None => return probe_code::ERR_NULL_PATH,
+    };
+    // SAFETY: len 来自 wide_string_len 的 NUL 扫描,切片不越过缓冲区。
+    let path_str = match String::from_utf16(unsafe { std::slice::from_raw_parts(report_path, len) })
+    {
+        Ok(s) => s,
+        Err(_) => return probe_code::ERR_BAD_PATH,
+    };
+    let report = obs::observe();
+    match obs::build_report_json(&report) {
+        Ok(json) => match std::fs::write(&path_str, json) {
+            Ok(()) => probe_code::OK,
+            Err(_) => probe_code::ERR_WRITE_FAILED,
+        },
+        Err(_) => probe_code::ERR_WRITE_FAILED,
+    }
 }
 
 #[no_mangle]

@@ -151,11 +151,13 @@ pub struct InjectOutcome {
     pub remote_base: usize,
     /// `caligo_probe_run` 的返回码(见 caligo-bridge::probe_code)。
     pub probe_exit_code: u32,
+    /// `caligo_obs_run` 的返回码(仅在 obs_report 提供时)。
+    pub obs_exit_code: Option<u32>,
 }
 
 type RemoteThreadFn = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
 
-/// 把 bridge 装入指定进程并调用其 `caligo_probe_run`。
+/// 把 bridge 装入指定进程并调用其 `caligo_probe_run`(可选:`caligo_obs_run`)。
 ///
 /// 步骤(每步失败即中止,不给"部分成功"):
 /// 1. OpenProcess(创建远程线程 + 虚拟内存读写 + 查询权限);
@@ -164,7 +166,8 @@ type RemoteThreadFn = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
 /// 4. 在目标模块快照中定位 bridge 基址(x64 上线程退出码会截断,不可靠),
 ///    用 ReadProcessMemory 解析其远程 PE 导出表,找到 `caligo_probe_run`;
 /// 5. 分配报告路径缓冲,CreateRemoteThread 调用 probe;
-/// 6. 释放远端内存与句柄。
+/// 6. `obs_report` 给出时,再以同样方式调用 `caligo_obs_run`(只读运行时观测);
+/// 7. 释放远端内存与句柄。
 ///
 /// 门控(manifest 摘要核对、执行者显式确认)在 CLI 入口完成,不在此重复。
 ///
@@ -175,6 +178,7 @@ pub unsafe fn inject_and_probe(
     pid: u32,
     bridge_path: &Path,
     report_path: &Path,
+    obs_report: Option<&Path>,
     wait_ms: u32,
 ) -> Result<InjectOutcome, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
@@ -215,6 +219,7 @@ pub unsafe fn inject_and_probe(
         }
         let mut buf_bridge: Option<*mut core::ffi::c_void> = None;
         let mut buf_report: Option<*mut core::ffi::c_void> = None;
+        let mut buf_obs: Option<*mut core::ffi::c_void> = None;
 
         let result = (|| -> Result<InjectOutcome, String> {
             let alloc_and_write = |bytes: &[u16],
@@ -352,9 +357,56 @@ pub unsafe fn inject_and_probe(
             if wait != 0 {
                 return Err(format!("probe remote thread wait failed: code {wait:#x}"));
             }
+
+            // 可选:只读运行时观测(caligo_obs_run)。
+            let mut obs_exit: Option<u32> = None;
+            if let Some(obs_path) = obs_report {
+                let obs_wide = to_wide(&obs_path.to_string_lossy());
+                let obs_addr = match read_remote_export(proc_h, remote_base, "caligo_obs_run") {
+                    Ok(Some(a)) => a,
+                    Ok(None) => {
+                        return Err("caligo_obs_run not found in remote export table".into())
+                    }
+                    Err(e) => return Err(format!("remote export lookup (obs): {e}")),
+                };
+                let remote_obs_path = alloc_and_write(&obs_wide, "alloc obs report path")?;
+                buf_obs = Some(remote_obs_path);
+                let obs_fn: unsafe extern "system" fn(*const u16) -> u32 =
+                    std::mem::transmute::<usize, unsafe extern "system" fn(*const u16) -> u32>(
+                        obs_addr,
+                    );
+                let start_obs: RemoteThreadFn =
+                    std::mem::transmute::<usize, RemoteThreadFn>(obs_fn as usize);
+                let obs_thread = CreateRemoteThread(
+                    proc_h,
+                    std::ptr::null(),
+                    0,
+                    Some(start_obs),
+                    remote_obs_path,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if obs_thread.is_null() {
+                    return Err(format!(
+                        "CreateRemoteThread(obs): Win32 error {}",
+                        GetLastError()
+                    ));
+                }
+                let wait =
+                    WaitForSingleObject(obs_thread, if wait_ms > 0 { wait_ms } else { INFINITE });
+                let mut code: u32 = u32::MAX;
+                GetExitCodeThread(obs_thread, &mut code);
+                CloseHandle(obs_thread);
+                if wait != 0 {
+                    return Err(format!("obs remote thread wait failed: code {wait:#x}"));
+                }
+                obs_exit = Some(code);
+            }
+
             Ok(InjectOutcome {
                 remote_base,
                 probe_exit_code: exit_code,
+                obs_exit_code: obs_exit,
             })
         })();
 
@@ -362,6 +414,9 @@ pub unsafe fn inject_and_probe(
             VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
         }
         if let Some(p) = buf_report {
+            VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
+        }
+        if let Some(p) = buf_obs {
             VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
         }
         CloseHandle(proc_h);

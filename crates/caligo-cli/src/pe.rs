@@ -67,6 +67,46 @@ fn rva_to_offset(sections: &[Section], rva: u32) -> Option<usize> {
     None
 }
 
+/// 把 RVA 换算为文件偏移(独立入口,供字节转储等离线分析使用)。
+pub fn rva_to_file_offset(file: &[u8], rva: u32) -> Result<usize, String> {
+    if file.len() < 0x40 || &file[0..2] != b"MZ" {
+        return Err("not an MZ image".into());
+    }
+    let e_lfanew = u32_at(file, 0x3C).ok_or("truncated DOS header")? as usize;
+    if file.get(e_lfanew..e_lfanew + 4) != Some(&b"PE\0\0"[..]) {
+        return Err("PE signature not found".into());
+    }
+    let coff = e_lfanew + 4;
+    let number_of_sections = u16_at(file, coff + 2).ok_or("truncated COFF header")? as usize;
+    let size_of_optional = u16_at(file, coff + 16).ok_or("truncated COFF header")? as usize;
+    let opt = coff + 20;
+    let magic = u16_at(file, opt).ok_or("truncated optional header")?;
+    let _ = match magic {
+        0x20B | 0x10B => 0,
+        other => return Err(format!("unknown optional header magic 0x{other:04X}")),
+    };
+    let sec_base = opt + size_of_optional;
+    for i in 0..number_of_sections {
+        let base = sec_base + i * 40;
+        if base + 40 > file.len() {
+            return Err("section table truncated".into());
+        }
+        let vsize = u32_at(file, base + 8).unwrap_or(0);
+        let va = u32_at(file, base + 12).unwrap_or(0);
+        let raw_size = u32_at(file, base + 16).unwrap_or(0);
+        let raw_ptr = u32_at(file, base + 20).unwrap_or(0);
+        let span = vsize.max(raw_size);
+        if rva >= va && rva < va + span {
+            let delta = rva - va;
+            if delta < raw_size {
+                return Ok((raw_ptr + delta) as usize);
+            }
+            return Err(format!("rva {rva:#x} in uninitialized section range"));
+        }
+    }
+    Err(format!("rva {rva:#x} not mapped by any section"))
+}
+
 /// 解析 PE 导出表。任何结构性异常都以 Err(String) 返回,不做猜测性容错。
 pub fn parse_export_table(file: &[u8]) -> Result<ExportTable, String> {
     if file.len() < 0x40 || &file[0..2] != b"MZ" {
