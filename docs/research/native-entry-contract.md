@@ -77,13 +77,21 @@
   后接自引用 RVA 元数据块;+0x90 处存在第二组 4 方法表(0x44998 / 0x449BE / 0x63EC0 / 0x49D2)。
   结构形态像 QQ 自定义接口描述符,不是裸 C++ vtable —— 完整语义待解码。
 - **构造链 [verified]**:CreateNTSessionShell(0x275FA)→ 内层工厂 0x27773 → 实际构造 0x43F02
-  → 对象构造 0x43FAC;全链静态可达。
-- **仍未知 [assumed]**:`__qq::std::string` 精确布局(SSO 判定位未定);各 vtable 方法签名;
-  对象生命周期归属(谁释放、线程要求)。
+  → 池句柄绑定(0x43F8A/0x4404E,全局对象池步长 0x9D0,句柄标签=1)→ 大会话壳初始化 0x29252
+  (对象 0x530+ 字节,6 个接口 vtable:0x3EBD7B8/0x3EBDA98/0x3EBDAB8/0x3EBDAE8/0x3EBDB58/0x3EBDB88,
+  浮点字段 +0x40/+0x68=1.0f,成员含多个 24 字节子对象)。
+- **类层次与接口表 [verified]**:INTSessionShell 派生 vtable 0x3EBD728;基类 INTCSessionShellBase
+  **接口表 @ RVA 0x3EBE2B8**,方法槽:0x3BE64、0x3E6D5CC×7(同一指针=未实现桩)、0x3BE6E、0x3BECC、
+  0x3C0C4、0x3C110;第二表 +0x80 起:0x3E89A、0x3E8AA、0x3E8C0、0x3E906、0x3E916。表尾为
+  自引用 RVA 元数据块 + 运行期 cookie(0x05BEC430 类,加载时解析)。
+- **string 布局 [inferred-strong]**:成员初始化模式(16 字节清零 + 单字节 0,24 字节跨度,如 +0x98 处)
+  与 libc++ 短形态空串吻合(byte0=size<<1,内联缓冲 +1);`__qq::std` 疑为运行时 libc++(`__Cr::std`)
+  的同源分支。**SSO 判定位尚需一条 data()/append 模式的直接实证**。
+- **仍未知 [assumed]**:各方法槽的签名(参数/sret/string 位);字符串成员在壳对象内的确切偏移。
 - **工具**:caligo-cli `disasm` 子命令(iced-x86,Apache-2.0,已登记 source-register)。
-  证据:local-evidence/f1-*.txt。
-- **结论**:E-3 从"候选"升级为"部分契约"——调用约定与对象布局已实证;string 布局与方法签名
-  是进入调用实验前的最后两块拼图。
+  证据:local-evidence/f1-*.txt(全部本轮 dump)。
+- **结论**:E-3 从"候选"升级为"部分契约"——调用约定、对象布局、接口方法表全部实证;
+  剩余缺口 = 方法签名解码 + SSO 直接实证,均在纯离线范围。
 
 ### E-4 跨进程 IPC 模块(ipc.node)
 

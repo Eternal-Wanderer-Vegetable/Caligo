@@ -22,14 +22,12 @@ pub fn disasm_at(file: &[u8], file_offset: usize, rva: u32, len: usize) -> Resul
             out.push_str(&format!("  {:#010x}  (invalid)\n", instr.ip() as u32));
             continue;
         }
-        let hex: String = bytes[(instr.ip() as usize - rva as usize)..]
+        let start = instr.ip() as usize - rva as usize;
+        let hex: String = bytes[start..start + instr.len() as usize]
             .iter()
             .map(|b| format!("{b:02X}"))
-            .collect::<String>()
-            .chars()
-            .take(24)
             .collect();
-        let mut line = format!("  {:#010x}  {:<24} {}", instr.ip() as u32, hex, instr,);
+        let mut line = format!("  {:#010x}  {:<30} {}", instr.ip() as u32, hex, instr);
         // RIP 相对操作数:标注绝对 VA(此处无基址,仅 RVA)与目标偏移。
         for i in 0..instr.op_count() {
             if instr.op_kind(i) == iced_x86::OpKind::Memory
