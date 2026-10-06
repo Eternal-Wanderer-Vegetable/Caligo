@@ -98,8 +98,10 @@ const NAME_HANDLE_SCOPE_DTOR: &str = "??1HandleScope@v8@@QEAA@XZ";
 const NAME_STRING_NEW_FROM_UTF8: &str =
     "?NewFromUtf8@String@v8@@SA?AV?$MaybeLocal@VString@v8@@@2@PEAVIsolate@2@PEBDW4NewStringType@2@H@Z";
 const NAME_SCRIPT_COMPILE: &str = "?Compile@Script@v8@@SA?AV?$MaybeLocal@VScript@v8@@@2@V?$Local@VContext@v8@@@2@V?$Local@VString@v8@@@2@PEAVScriptOrigin@2@@Z";
+// Run 的单参导出是裸跳板(直跳双参本体且不准备 R9 → 残留 R9 会被当作
+// Local<Data>);直接调用双参重载,data 传空 Local(0)。
 const NAME_SCRIPT_RUN: &str =
-    "?Run@Script@v8@@QEAA?AV?$MaybeLocal@VValue@v8@@@2@V?$Local@VContext@v8@@@2@@Z";
+    "?Run@Script@v8@@QEAA?AV?$MaybeLocal@VValue@v8@@@2@V?$Local@VContext@v8@@@2@V?$Local@VData@v8@@@2@@Z";
 const NAME_UTF8_CTOR: &str =
     "??0Utf8Value@String@v8@@QEAA@PEAVIsolate@2@V?$Local@VValue@v8@@@2@@Z";
 const NAME_UTF8_DTOR: &str = "??1Utf8Value@String@v8@@QEAA@XZ";
@@ -114,9 +116,12 @@ type FnUvAsyncSend = unsafe extern "C" fn(async_: *mut c_void) -> i32;
 type FnUvHandleSize = unsafe extern "C" fn(t: i32) -> usize;
 type FnUvLoopAlive = unsafe extern "C" fn(loop_: *mut c_void) -> i32;
 type FnIsolateGetCurrent = unsafe extern "C" fn() -> *mut c_void;
-/// v8::Local/MaybeLocal 是带构造函数的非平凡类:MSVC ABI 下经隐藏 sret 指针
-/// 返回(rcx),实际参数整体后移一位。K2-03 首轮实弹已实证(缺 sret 即 AV)。
-type FnIsolateCtx = unsafe extern "C" fn(sret: *mut usize, isolate: *mut c_void);
+/// v8::Local/MaybeLocal 非平凡返回的 MSVC/clang-cl ABI(全部门实测反汇编证据):
+/// - **静态函数**:sret 在 RCX,参数自 RDX 起后移(NewFromUtf8 全参验证);
+/// - **成员函数**:this 在 RCX,sret 在 RDX,其余参数自 R8 起
+///   (GetEnteredOrMicrotaskContext 读 [rcx+0x100D0] + 写 [rdx];
+///    Run 尾部 mov [rsi],rax,rsi=arg2)。第一版实弹两起事故均源于此序。
+type FnIsolateCtx = unsafe extern "C" fn(isolate: *mut c_void, sret: *mut usize);
 type FnHandleScopeCtor =
     unsafe extern "C" fn(this: *mut c_void, isolate: *mut c_void) -> *mut c_void;
 type FnScopeDtor = unsafe extern "C" fn(this: *mut c_void);
@@ -133,7 +138,8 @@ type FnStringNewFromUtf8 = unsafe extern "C" fn(
 );
 type FnScriptCompile =
     unsafe extern "C" fn(sret: *mut usize, ctx: usize, src: usize, origin: *mut c_void);
-type FnScriptRun = unsafe extern "C" fn(sret: *mut usize, this: usize, ctx: usize);
+type FnScriptRun =
+    unsafe extern "C" fn(this: usize, sret: *mut usize, ctx: usize, data: usize);
 type FnUtf8Ctor =
     unsafe extern "C" fn(this: *mut c_void, isolate: *mut c_void, value: usize) -> *mut c_void;
 type FnUtf8Deref = unsafe extern "C" fn(this: *mut c_void) -> *const u8;
@@ -143,14 +149,15 @@ fn local_empty(v: usize) -> bool {
     v == 0
 }
 
-/// 调用 sret 风格的单参(Local 返回)导出,取回 8 字节句柄值;0 = 空。
+/// 调用成员函数风格的 Local 返回导出(this 在 RCX、sret 在 RDX),取回句柄值;
+/// 0 = 空。
 unsafe fn call_sret1(
-    f: unsafe extern "C" fn(*mut usize, *mut c_void),
-    isolate: *mut c_void,
+    f: unsafe extern "C" fn(*mut c_void, *mut usize),
+    this: *mut c_void,
 ) -> usize {
     let mut ret = 0usize;
     // SAFETY: sret 槽在调用方栈上;f 来自裸读导出表。
-    unsafe { f(core::ptr::addr_of_mut!(ret), isolate) };
+    unsafe { f(this, core::ptr::addr_of_mut!(ret)) };
     ret
 }
 
@@ -461,9 +468,9 @@ unsafe fn exec_enum_script(ex: &Exports, isolate: usize, ctx: usize) -> u32 {
     if local_empty(script) {
         return 1;
     }
-    // SAFETY: 方法调用(sret 约定);script 为 Compile 产物。
+    // SAFETY: 方法调用(this, sret, ctx, data=空 Local 约定);script 为 Compile 产物。
     let mut result = 0usize;
-    unsafe { (ex.script_run)(core::ptr::addr_of_mut!(result), script, ctx) };
+    unsafe { (ex.script_run)(script, core::ptr::addr_of_mut!(result), ctx, 0) };
     if local_empty(result) {
         return 2;
     }

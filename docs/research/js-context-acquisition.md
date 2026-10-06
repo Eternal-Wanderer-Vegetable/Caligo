@@ -215,13 +215,28 @@ R-A 的第 1-2 步完全离线/只读,是下一步的开工点。
   "载荷跑在 env 自己的事件循环轮转点上"成立。
 - **mode 2 事故(进程死亡,归因闭合)**:回调延迟 ~15s 后运行,在
   `GetEnteredOrMicrotaskContext` 内部 AV,实例 9000 死亡(crashpad 90bb0b36,已归档)。
-  根因:**MSVC sret ABI**——`v8::Local/MaybeLocal` 为非平凡类,按值返回经 rcx 隐藏
-  指针写出、参数后移一位;bridge 签名缺 sret → 访问器写野指针。JSONL 原子快照
+  根因:**v8 Local/MaybeLocal 非平凡返回的 sret ABI**(详见 12.5)。JSONL 原子快照
   (isolate_match=1/has_ctx=0/RESULT_SEQ 未置位)与崩溃时序完全自洽。
-  **教训(通用)**:凡调用返回 v8::Local/MaybeLocal 的导出,一律 sret 签名;
-  envrun.rs(K2-01,冻结)同类签名同病,复活方案 d 前必须先修。
-- 事故后处置:未触碰任何存活实例(53764 为用户自启,非指定目标);
-  修复入库;复验需执行者重新指定测试实例。
+- 事故后处置:未触碰任何存活实例;修复入库;复验需执行者重新指定测试实例。
+
+### 12.2.1 第二轮实弹(PID 28532,2026-10-06;第二起事故,同根因,归因闭合)
+
+- mode 0/1 全 PASS(新实例,env=0x65CC002AD800,布局链/回调线程 25096 互证)。
+- mode 2(sret-v1 修复版)存活但 **has_ctx=0 为污染输出**:成员函数参数序仍反,
+  返回值误写进 [isolate+0](静默腐蚀)。
+- mode 3 的挂起中断在下一次 JS 执行时触发捕获回调,`[栈+0x100D0]` 不可读 →
+  **AV@QQNT+0x429A081,实例死亡**(crashpad 82337034,已归档)。
+- **最终 ABI 规则(全部反汇编实证,证据 local-evidence/k2-03/run-notes-round2.md)**:
+
+| 函数 | 类型 | 约定 |
+|---|---|---|
+| `String::NewFromUtf8` | 静态 | (sret=RCX, isolate=RDX, data=R8, type=R9d, len=栈) |
+| `Script::Compile` | 静态 | (sret=RCX, ctx=RDX, src=R8, origin=R9) |
+| `Script::Run` | 成员 | (this=RCX, sret=RDX, ctx=R8, data=R9) |
+| `GetEnteredOrMicrotaskContext` / `GetIncumbentContext` | 成员 | (isolate=RCX, sret=RDX) |
+
+- **Run 的单参导出是裸跳板**(直跳双参本体不准备 R9)——必须调用双参重载,
+  data 传空 Local。修复入库后待第三轮实弹复验。
 
 ### 12.3 mode 3 设计(已实现,待实弹)
 
