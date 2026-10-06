@@ -22,7 +22,10 @@ mod node_module_offset {
     pub const VERSION: usize = 0x00;
     pub const FLAGS: usize = 0x04;
     pub const FILENAME: usize = 0x10;
+    pub const REGISTER_FUNC: usize = 0x18;
+    pub const CONTEXT_REGISTER_FUNC: usize = 0x20;
     pub const MODNAME: usize = 0x28;
+    pub const PRIV: usize = 0x30;
     pub const LINK: usize = 0x38;
 }
 
@@ -34,6 +37,8 @@ mod limits {
     pub const MAX_STRING: usize = 512;
     /// get_linked_module 开头模式扫描窗口(字节)。
     pub const HEAD_SCAN_WINDOW: usize = 32;
+    /// 注册回调代码转储上限(字节)。
+    pub const CALLBACK_DUMP_BYTES: usize = 4096;
 }
 
 /// Node node_module.nm_flags 的已实证位。其余位保留原值输出,不解释。
@@ -64,11 +69,36 @@ pub struct ObservedNodeModule {
     pub napi_registered: bool,
 }
 
+/// 对选定模块的注册回调捕获(只读):地址、所属映像、代码字节转储。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CallbackCapture {
+    pub module_name: String,
+    pub register_func_va: Option<usize>,
+    pub context_register_func_va: Option<usize>,
+    pub register_func_image: Option<String>,
+    pub context_register_func_image: Option<String>,
+    /// context_register_func 处的代码字节(hex),上限 [`limits::CALLBACK_DUMP_BYTES`]。
+    pub context_register_code_hex: Option<String>,
+    pub image_of_module_struct: Option<String>,
+    /// node+0x30(nm_priv)指向的 napi_module 结构 VA。
+    pub napi_module_va: Option<usize>,
+    pub napi_module_image: Option<String>,
+    /// napi_module 结构原始字节(hex,0x40)。
+    pub napi_module_hex: Option<String>,
+    /// napi_module+0x10 的真正注册函数。
+    pub napi_register_func_va: Option<usize>,
+    pub napi_register_func_image: Option<String>,
+    pub napi_register_code_hex: Option<String>,
+    /// napi_module+0x18 的模块名字符串。
+    pub napi_modname: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
 pub struct ObsReport {
     pub protocol_version: u32,
     pub qqnt: Option<QqntObs>,
     pub modules: Vec<ObservedNodeModule>,
+    pub callback_captures: Vec<CallbackCapture>,
     pub notes: Vec<String>,
 }
 
@@ -169,24 +199,111 @@ unsafe fn rd_i32_bytes(p: usize) -> Option<i32> {
     rd_i32(p)
 }
 
+// --- 映像范围与回调捕获 ---
+
+struct ImageRange {
+    base: usize,
+    size: u32,
+    path: String,
+}
+
+/// 当前进程的映像列表(基址/大小/路径)。只读快照。
+unsafe fn collect_images() -> Vec<ImageRange> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
+    };
+    let pid = windows_sys::Win32::System::Threading::GetCurrentProcessId();
+    let mut out = Vec::new();
+    // SAFETY: Toolhelp 只读快照;句柄在退出前关闭。
+    unsafe {
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
+        if snap == INVALID_HANDLE_VALUE {
+            return out;
+        }
+        let mut ment: MODULEENTRY32W = std::mem::zeroed();
+        ment.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
+        if Module32FirstW(snap, &mut ment) != 0 {
+            loop {
+                out.push(ImageRange {
+                    base: ment.modBaseAddr as usize,
+                    size: ment.modBaseSize,
+                    path: u16sz(&ment.szExePath),
+                });
+                if Module32NextW(snap, &mut ment) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snap);
+    }
+    out
+}
+
+fn image_of(images: &[ImageRange], va: usize) -> Option<&ImageRange> {
+    images
+        .iter()
+        .find(|img| va >= img.base && va < img.base + img.size as usize)
+}
+
+fn short_image_name(img: &ImageRange) -> String {
+    img.path
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(&img.path)
+        .to_string()
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        s.push_str(&format!("{b:02X}"));
+    }
+    s
+}
+
+fn u16sz(buf: &[u16]) -> String {
+    let len = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..len])
+}
+
+/// 读映像代码字节(全部可读才返回,部分可读返回 None)。
+unsafe fn read_code(va: usize, len: usize) -> Option<Vec<u8>> {
+    let mut buf = Vec::with_capacity(len);
+    for i in 0..len {
+        buf.push(rd_u8(va + i)?);
+    }
+    Some(buf)
+}
+
 // --- 观测主体 ---
 
-unsafe fn observe_qqnt() -> (Option<QqntObs>, Vec<ObservedNodeModule>, Vec<String>) {
+/// observe_qqnt 的返回:(QQNT 元数据, 已注册模块, 回调捕获目标, notes)。
+type QqntObservation = (
+    Option<QqntObs>,
+    Vec<ObservedNodeModule>,
+    Vec<(String, usize)>,
+    Vec<String>,
+);
+
+unsafe fn observe_qqnt() -> QqntObservation {
     let mut notes = Vec::new();
+    let mut targets: Vec<(String, usize)> = Vec::new();
     let wide: Vec<u16> = "QQNT.dll\0".encode_utf16().collect();
     let base = windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(wide.as_ptr());
     if base.is_null() {
         notes.push("QQNT.dll not loaded in this process".to_string());
-        return (None, Vec::new(), notes);
+        return (None, Vec::new(), targets.clone(), notes);
     }
     let base = base as usize;
+    const CAPTURE_NAMES: [&str; 2] = ["major", "QQNT"];
 
     // 映像大小(SizeOfImage @ optional header +56)。
     let e_lfanew = match rd_u32(base + 0x3C) {
         Some(v) => v as usize,
         None => {
             notes.push("QQNT.dll DOS header unreadable".to_string());
-            return (None, Vec::new(), notes);
+            return (None, Vec::new(), targets.clone(), notes);
         }
     };
     let pe = base + e_lfanew;
@@ -195,7 +312,7 @@ unsafe fn observe_qqnt() -> (Option<QqntObs>, Vec<ObservedNodeModule>, Vec<Strin
         Some(v) => v,
         None => {
             notes.push("QQNT.dll optional header unreadable".to_string());
-            return (None, Vec::new(), notes);
+            return (None, Vec::new(), targets.clone(), notes);
         }
     };
     let in_image = |va: usize| va >= base && va < base + image_size as usize;
@@ -207,7 +324,7 @@ unsafe fn observe_qqnt() -> (Option<QqntObs>, Vec<ObservedNodeModule>, Vec<Strin
         Some(v) => v,
         None => {
             notes.push("get_linked_module export not found".to_string());
-            return (None, Vec::new(), notes);
+            return (None, Vec::new(), targets.clone(), notes);
         }
     };
     let magic_rva = match export_addr(base, "qq_magic_napi_register") {
@@ -232,11 +349,11 @@ unsafe fn observe_qqnt() -> (Option<QqntObs>, Vec<ObservedNodeModule>, Vec<Strin
     }
     if !ok {
         notes.push("get_linked_module bytes unreadable".to_string());
-        return (None, Vec::new(), notes);
+        return (None, Vec::new(), targets.clone(), notes);
     }
     let Some(insn) = scan_head_pattern(&window) else {
         notes.push("linked-head pattern not found (binary changed?)".to_string());
-        return (None, Vec::new(), notes);
+        return (None, Vec::new(), targets.clone(), notes);
     };
     let disp = rd_i32_bytes(glm_va + insn + 3).unwrap_or(0) as isize;
     let head_va = glm_va + insn + 7;
@@ -245,7 +362,7 @@ unsafe fn observe_qqnt() -> (Option<QqntObs>, Vec<ObservedNodeModule>, Vec<Strin
         notes.push(format!(
             "linked head {head:#x} outside QQNT image — refusing to walk"
         ));
-        return (None, Vec::new(), notes);
+        return (None, Vec::new(), targets.clone(), notes);
     }
 
     let mut modules = Vec::new();
@@ -264,6 +381,7 @@ unsafe fn observe_qqnt() -> (Option<QqntObs>, Vec<ObservedNodeModule>, Vec<Strin
                     qq_magic_napi_register_rva: magic_rva,
                 }),
                 modules,
+                targets,
                 notes,
             );
         }
@@ -293,6 +411,9 @@ unsafe fn observe_qqnt() -> (Option<QqntObs>, Vec<ObservedNodeModule>, Vec<Strin
         } else {
             None
         };
+        if CAPTURE_NAMES.contains(&name.as_str()) {
+            targets.push((name.clone(), node));
+        }
         modules.push(ObservedNodeModule {
             name,
             filename,
@@ -321,8 +442,85 @@ unsafe fn observe_qqnt() -> (Option<QqntObs>, Vec<ObservedNodeModule>, Vec<Strin
             qq_magic_napi_register_rva: magic_rva,
         }),
         modules,
+        targets,
         notes,
     )
+}
+
+/// 对捕获目标的 node_module 结构读取注册回调指针,解析所属映像并转储
+/// context_register_func 的代码字节。全部只读。
+unsafe fn capture_callbacks(
+    targets: &[(String, usize)],
+    images: &[ImageRange],
+    notes: &mut Vec<String>,
+) -> Vec<CallbackCapture> {
+    let mut out = Vec::new();
+    for (name, node) in targets {
+        let register_func_va = rd_usize(node + node_module_offset::REGISTER_FUNC);
+        let context_register_func_va = rd_usize(node + node_module_offset::CONTEXT_REGISTER_FUNC);
+        let reg_img = register_func_va.and_then(|va| image_of(images, va).map(short_image_name));
+        let ctx_img =
+            context_register_func_va.and_then(|va| image_of(images, va).map(short_image_name));
+        let node_img = image_of(images, *node).map(short_image_name);
+        let code_hex = match context_register_func_va {
+            Some(va) if va != 0 => match read_code(va, limits::CALLBACK_DUMP_BYTES) {
+                Some(bytes) => Some(to_hex(&bytes)),
+                None => {
+                    notes.push(format!("{name}: context_register_func code unreadable"));
+                    None
+                }
+            },
+            _ => None,
+        };
+
+        // nm_priv(node+0x30)= qq_magic 注册路径存放的 napi_module*。
+        // napi_module 布局(napi.h):version@0,flags@4,filename@8,
+        // register_func@0x10,modname@0x18。
+        let napi_module_va = rd_usize(node + node_module_offset::PRIV);
+        let (
+            napi_module_image,
+            napi_module_hex,
+            napi_register_func_va,
+            napi_register_func_image,
+            napi_register_code_hex,
+            napi_modname,
+        ) = match napi_module_va {
+            Some(nva) if nva != 0 => {
+                let img = image_of(images, nva).map(short_image_name);
+                let raw = read_code(nva, 0x40).map(|b| to_hex(&b));
+                let reg_va = rd_usize(nva + 0x10);
+                let reg_img = reg_va.and_then(|va| image_of(images, va).map(short_image_name));
+                let reg_code = match reg_va {
+                    Some(va) if va != 0 => {
+                        read_code(va, limits::CALLBACK_DUMP_BYTES).map(|b| to_hex(&b))
+                    }
+                    _ => None,
+                };
+                let modname =
+                    rd_usize(nva + 0x18).and_then(|p| if p != 0 { read_cstring(p) } else { None });
+                (img, raw, reg_va, reg_img, reg_code, modname)
+            }
+            _ => (None, None, None, None, None, None),
+        };
+
+        out.push(CallbackCapture {
+            module_name: name.clone(),
+            register_func_va,
+            context_register_func_va,
+            register_func_image: reg_img,
+            context_register_func_image: ctx_img,
+            context_register_code_hex: code_hex,
+            image_of_module_struct: node_img,
+            napi_module_va,
+            napi_module_image,
+            napi_module_hex,
+            napi_register_func_va,
+            napi_register_func_image,
+            napi_register_code_hex,
+            napi_modname,
+        });
+    }
+    out
 }
 
 /// 构建完整观测报告(错误都降级为 note,不 panic)。
@@ -332,9 +530,15 @@ pub fn observe() -> ObsReport {
         ..Default::default()
     };
     // SAFETY: 全部为自身进程内只读读取;指针均来自已校验的映像/Node 注册链表。
-    let (qqnt, modules, notes) = unsafe { observe_qqnt() };
+    let (qqnt, modules, targets, mut notes) = unsafe { observe_qqnt() };
     report.qqnt = qqnt;
     report.modules = modules;
+    if !targets.is_empty() {
+        // SAFETY: 同上,回调指针读取 + 映像内代码转储均为只读。
+        let images = unsafe { collect_images() };
+        let captures = unsafe { capture_callbacks(&targets, &images, &mut notes) };
+        report.callback_captures = captures;
+    }
     report.notes = notes;
     report
 }
@@ -377,6 +581,22 @@ mod tests {
                 linked_binding: false,
                 napi_registered: true,
             }],
+            callback_captures: vec![CallbackCapture {
+                module_name: "major".into(),
+                register_func_va: None,
+                context_register_func_va: Some(0x180012340),
+                register_func_image: None,
+                context_register_func_image: Some("QQNT.dll".into()),
+                context_register_code_hex: Some("4883EC28".into()),
+                image_of_module_struct: Some("major.node".into()),
+                napi_module_va: Some(0x180045000),
+                napi_module_image: Some("major.node".into()),
+                napi_module_hex: Some("FFFF0000".into()),
+                napi_register_func_va: Some(0x180050000),
+                napi_register_func_image: Some("major.node".into()),
+                napi_register_code_hex: None,
+                napi_modname: Some("major".into()),
+            }],
             notes: vec!["sample".into()],
         };
         let back: serde_json::Value =
@@ -384,6 +604,11 @@ mod tests {
         assert_eq!(back["qqnt"]["linked_head_rva"], 0x0C7092F2u64);
         assert_eq!(back["modules"][0]["name"], "NodeQQNT");
         assert_eq!(back["modules"][0]["napi_registered"], true);
+        assert_eq!(back["callback_captures"][0]["module_name"], "major");
+        assert_eq!(
+            back["callback_captures"][0]["context_register_func_image"],
+            "QQNT.dll"
+        );
         assert_eq!(back["notes"][0], "sample");
     }
 

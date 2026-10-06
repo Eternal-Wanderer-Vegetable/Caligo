@@ -49,6 +49,21 @@
   - 账号 uin 本身仍未观测(需要 JS 上下文执行或数据面观察,属下一阶段);
   - 本实验全程只读,未调用任何 QQ/Node 代码。
 
+### EXP-K1-02 补充轮(b/c:回调捕获与服务面枚举)— **已执行,2026-10-06**
+
+- 02b(并排 DLL,target-obs 构建,避免锁定冲突):捕获 QQNT/major 两个 linked binding 的注册回调。
+  发现:两者 context_register_func 指向**同一通用 thunk**(QQNT RVA 0x01C8B430,与静态解码一致);
+  真正的注册函数在 nm_priv(node+0x30)指向的 napi_module 结构内(+0x10)。
+- 02c(target-obs2 构建):捕获 napi_module 本体:
+  - major:napi_module 在 **major.node RVA 0x58000**,真注册回调在 **major.node RVA 0x22D50**,modname="major";
+  - QQNT:napi_module 与注册回调在 **wrapper.node** —— "QQNT" linked binding 由 wrapper.node 提供;
+  - node_module 结构体均为堆分配(qq_magic_napi_register 内 new,与静态解码一致)。
+- 服务面枚举(离线,identifiers 子命令):major.node 229,199 条标识符字符串
+  (local-evidence/k1-02-major-identifiers.txt),得到 nodeIKernel* 服务 30+/监听面清单;
+  wrapper.node 为纯 C++ 层(kNTOnAddSendMsg 等 NT 内部事件名)。
+- liveness:三轮注入后 PID 49148 仍 Responding=True(三份只读 bridge 共驻,随进程退出回收)。
+- 全程只读;未调用任何 QQ/Node 函数。
+
 ### EXP-K1-03 退出/重登/失效 — 未执行
 
 - 需要执行者在指定实例上做账号退出/重登操作;进程级核对工具(PID+创建时间)已就绪。

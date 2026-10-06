@@ -47,7 +47,20 @@
 - **JS 获取路径 [inferred]**:主进程 JS 经 `process._linkedBinding('major')` 取得其导出面(Node/Electron 对 NM_F_LINKED 模块的标准访问通道;`get_linked_module("major")` 可命中已实证)。
 - **构建溯源 [verified]**:链表节点 filename 字段暴露 `E:\data\landun\workspace\rx64\v8-bytecode-unified\node\electron_loader.cpp` —— major 由腾讯蓝盾 CI 构建,内置进 Electron loader 流程(v8-bytecode-unified 与 package.json `isByteCodeShell:true` 相互印证)。
 - **wrapper/qq-proton/initIpc 的差异 [verified]**:三者已加载但**不在** linked 链表 → 走 per-Environment DLOpen 注册,进程级内置面只有 QQNT + major + Electron。
-- **五类入口名仍未知 [assumed→待静态挖掘]**:入口名是 major 注册回调运行时写入导出对象的属性;下一步对 major.node 二进制做注册回调的静态字符串挖掘(离线、零风险)取得候选名单,再逐个填 §6.1 契约。
+- **五类入口的服务面已枚举 [verified 2026-10-06 补充]**:对 major.node 做标识符字符串挖掘(229,199 条,
+  local-evidence/k1-02-major-identifiers.txt),得到 QQNT 内核 JS 服务面清单:
+  - 服务:`nodeIKernelMsgService`(165 处引用,消息收发)、`nodeIKernelLoginService`(账号)、
+    `nodeIKernelProfileService`、`nodeIKernelBuddyService`(好友)、`nodeIKernelGroupService`(群)、
+    `nodeIKernelSessionService` 对应的 `nodeIKernelSessionListener`、`nodeIKernelRecentContactService`、
+    `nodeIKernelMSFService` 等 30+ 服务;
+  - 监听:`nodeIKernelMsgListener`(56 处,消息推送)、`registerNTListener` 等;
+  - 发送相关内部事件名出现在 wrapper.node(C++ 层):`kNTOnAddSendMsg`、`kNTNotifyOnRecallRichFileAfterSendMsg`。
+- **分层结论 [inferred,多项实证支撑]**:JS(字节码)→ major.node 绑定(nodeIKernel* 服务访问面)→
+  C++ IKernel 实现(wrapper.node / QQNT.dll,MSVC ABI,`__qq::std`)→ NT 内核。五类入口的
+  **服务粒度候选**由此确定:账号=LoginService/ProfileService;会话=Session/RecentContact;
+  订阅=MsgListener(+registerNTListener);发送=MsgService;结果=MsgService 回调(内部事件 kNTOnAddSendMsg 链)。
+- **仍未知 [assumed]**:各服务对象在 JS 侧的获取方式与方法的参数/返回/线程上下文(需要 JS 上下文内枚举,属 K2);
+  本轮所有证据均为静态字符串/结构证据,未调用任何服务。
 - **证据**:local-evidence/k1-02-pid49148-obs.json(运行时观测)、k1-02-static-get-linked-module.txt / k1-02-static-qq-magic-napi-register.txt(静态解码,链表头 RVA 0x0C7092F0 与运行时推导一致)。
 
 ### E-3 会话壳 C++ 导出(wrapper.node)
@@ -92,13 +105,15 @@
 ## 4. 下一步实测计划(回填本契约的唯一途径)
 
 1. ~~加载链与握手验证~~ → 已完成(EXP-K1-01,2026-10-06);
-2. ~~运行时注册面观测~~ → 已完成(EXP-K1-02:major = linked binding 实证);
-3. **当前步**:对 major.node 的注册回调(`electron_loader.cpp` 编译产物)做静态字符串挖掘——
-   napi 属性名(constraint: napi_property_descriptor 的 utf8name 字符串常量在 .rdata)离线可枚举,
-   产出五类入口的候选名清单;配合对候选名做 xref(引用它们的代码段)可粗分账号/会话/消息类别;
-4. 候选名取得后,逐个填 §6.1 契约(参数/返回/线程/生命周期);
-5. ABI/线程/生命周期闭合前不触碰发送;进入真实调用前先在 K2 设计中明确"如何取得 JS 上下文"
-   (候选:自有 context-aware linked binding 注册,等待新 Environment 创建时被回调)。
+2. ~~运行时注册面观测~~ → 已完成(EXP-K1-02:major = linked binding 实证;注册链/thunk/napi_module 三级捕获,
+   major 的真注册回调 = major.node RVA 0x22D50,napi_module 结构 = RVA 0x58000;wrapper.node 持有 "QQNT" 绑定);
+3. ~~静态服务面挖掘~~ → 已完成(nodeIKernel* 30+ 服务 / 监听面清单,见 §2 E-2);
+4. **当前步(K2 起点设计)**:确认 JS 上下文获取方式。候选方案(需先做方案评估再实验):
+   a) 注册自有 context-aware linked binding(flags=2),等待新 Environment 创建时被回调,取得 napi_env;
+   b) 复用 qq_magic_napi_register 语义注册自有 napi_module(需评估与 QQ 环境的兼容性);
+   c) 对已运行 Environment 的枚举(内存扫描,侵入性强,次选)。
+   取得 napi_env 后即可枚举 major 导出对象的真实方法名与签名,逐个填 §6.1 契约;
+5. ABI/线程/生命周期闭合前不触碰发送。
 
 ## 5. 公开资料线索登记(S13,全部未验证)
 

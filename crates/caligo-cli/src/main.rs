@@ -61,6 +61,7 @@ fn main() -> ExitCode {
         },
         Some("exports") => cmd_exports(&args[1..]),
         Some("bytes") => cmd_bytes(&args[1..]),
+        Some("identifiers") => cmd_identifiers(&args[1..]),
         Some("inject") => cmd_inject(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
@@ -398,6 +399,149 @@ fn cmd_bytes(args: &[String]) -> ExitCode {
         println!("  {:+06x}  {:<48} {ascii}", row * 16, hex);
     }
     ExitCode::SUCCESS
+}
+
+/// 离线静态挖掘:提取映像内的标识符样式 C 字符串(候选 napi 绑定名),带 RVA。
+/// 仅打印匹配 `^[A-Za-z_][A-Za-z0-9_.$-]{min-1,}$` 的串;只读文件。
+fn cmd_identifiers(args: &[String]) -> ExitCode {
+    let mut module: Option<&str> = None;
+    let mut min_len: usize = 6;
+    let mut contains: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--min" => {
+                i += 1;
+                match args.get(i).and_then(|s| s.parse().ok()) {
+                    Some(v) => min_len = v,
+                    None => {
+                        eprintln!("--min 需要数字参数");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            "--contains" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => contains = Some(v.to_ascii_lowercase()),
+                    None => {
+                        eprintln!("--contains 需要参数");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            other if module.is_none() => module = Some(other),
+            other => {
+                eprintln!("多余参数: {other}");
+                return ExitCode::FAILURE;
+            }
+        }
+        i += 1;
+    }
+    let Some(module) = module else {
+        eprintln!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+
+    let bytes = match std::fs::read(module) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("read {module}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    // RVA→文件偏移表(用段表把文件偏移映回 RVA)。
+    let e_lfanew = match u32_at(&bytes, 0x3C) {
+        Some(v) => v as usize,
+        None => {
+            eprintln!("not an MZ image");
+            return ExitCode::FAILURE;
+        }
+    };
+    let coff = e_lfanew + 4;
+    let number_of_sections = match u16_at(&bytes, coff + 2) {
+        Some(v) => v as usize,
+        None => {
+            eprintln!("truncated COFF");
+            return ExitCode::FAILURE;
+        }
+    };
+    let size_of_optional = match u16_at(&bytes, coff + 16) {
+        Some(v) => v as usize,
+        None => {
+            eprintln!("truncated COFF");
+            return ExitCode::FAILURE;
+        }
+    };
+    let sec_base = coff + 20 + size_of_optional;
+    let mut sections = Vec::with_capacity(number_of_sections);
+    for s in 0..number_of_sections {
+        let base = sec_base + s * 40;
+        let raw_size = u32_at(&bytes, base + 16).unwrap_or(0) as usize;
+        let raw_ptr = u32_at(&bytes, base + 20).unwrap_or(0) as usize;
+        let va = u32_at(&bytes, base + 12).unwrap_or(0);
+        sections.push((raw_ptr, raw_ptr + raw_size, va));
+    }
+    let file_off_to_rva = |off: usize| -> u32 {
+        for (start, end, va) in &sections {
+            if off >= *start && off < *end {
+                return va + (off - *start) as u32;
+            }
+        }
+        0
+    };
+
+    let is_ident_start = |b: u8| b.is_ascii_alphabetic() || b == b'_';
+    let is_ident =
+        |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'$' || b == b'-';
+
+    let mut count = 0usize;
+    let mut idx = 0;
+    while idx < bytes.len() {
+        // 定位一个候选串起点。
+        if is_ident_start(bytes[idx]) {
+            let start = idx;
+            let mut end = idx;
+            while end < bytes.len() && is_ident(bytes[end]) {
+                end += 1;
+            }
+            let len = end - start;
+            // 串必须以 NUL 结尾才是 C 字符串。
+            if len >= min_len && bytes.get(end) == Some(&0) {
+                let s = &bytes[start..end];
+                let ok_contains = match &contains {
+                    Some(c) => s
+                        .to_ascii_lowercase()
+                        .windows(c.len())
+                        .any(|w| w == c.as_bytes()),
+                    None => true,
+                };
+                if ok_contains {
+                    println!(
+                        "{:#010x}  {}",
+                        file_off_to_rva(start),
+                        String::from_utf8_lossy(s)
+                    );
+                    count += 1;
+                }
+            }
+            idx = end.max(start + 1);
+        } else {
+            idx += 1;
+        }
+    }
+    eprintln!("# {count} identifier-style C strings from {module}");
+    ExitCode::SUCCESS
+}
+
+fn u32_at(b: &[u8], off: usize) -> Option<u32> {
+    b.get(off..off + 4)
+        .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+}
+fn u16_at(b: &[u8], off: usize) -> Option<u16> {
+    b.get(off..off + 2)
+        .map(|s| u16::from_le_bytes([s[0], s[1]]))
 }
 
 fn cmd_inject(args: &[String]) -> ExitCode {
