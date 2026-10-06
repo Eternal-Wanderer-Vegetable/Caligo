@@ -100,6 +100,25 @@
 - 纪律核查:本次实验前已声明崩溃风险与恢复路径;崩溃后未做任何二次进程内尝试(按 §7 冻结);
   未触碰存活实例。
 
+### EXP-F1-R4 观测事故(38648 与 14092 两例)— **已执行,2026-10-06,事故归因完成**
+
+- **38648(obs v1)**:probe 完成;obs 线程挂起 20s 超时;实例随后死亡。当时假设为远程线程内
+  GetModuleHandleW 的加载器锁竞争——**该假设后被证伪**(见下)。
+- **14092(obs v2,仅裸读)**:probe 完成;obs 线程仍超时;实例死亡。裸读不存在锁竞争 →
+  推翻锁假设,转向 AV 假设。
+- **crashpad 实证**:QQ 自有 crashpad 捕获了全部三次崩溃(转储时间戳 16:24 / 18:06 / 18:28
+  = NewIsolate / obs v1 / obs v2)。obs v2 的 .json 栈:
+  `frame0 caligo_bridge+0x22EF(mov rbx,[rax],表项计算出的野指针读)← frame1 caligo_obs_run2+0x2F
+  ← KERNEL32 线程入口` —— **访问违例发生在 observe_ctx 内联体的某处裸读**,被 crashpad 全进程接管。
+- **修复(obs v3)**:全部裸读经 `checked_read`(逐页 VirtualQuery 校验 + thread_local 缓存),
+  不可读页返回 None 并记入 notes——**任何 obs 读路径已无法触发 AV**。首次运行即可由 notes
+  定位野地址的确切位置,完成归因闭环。
+- 教训:进程内观测的裸读必须做页校验;QQ crashpad 会把任何线程的 AV 放大为全进程事件。
+- 证据:local-evidence/f1r4*(v1/v2 日志与 probe)、crashpad 报告
+  `C:\Users\Vegetable\AppData\Roaming\QQ\CrashPad\reports\{843ab37e,dddfe920}*.{json,dmp,txt}`。
+- 台账:38648(F1-R4,16:53 启动,18:0x 死)、14092(F1-R4v2,18:26 启动,18:28 死)均已从
+  指定表记录;现存 38472 树未触碰。
+
 ### EXP-K1-04 安全收尾 — **已执行,2026-10-06 闭合**
 
 - 人工收发确认(计划 K1 第 6 条):执行者确认实验期间 TEST-ACCOUNT-A(私聊对象 FRIEND-B)消息收发无任何异常。
