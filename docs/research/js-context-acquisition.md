@@ -238,17 +238,22 @@ R-A 的第 1-2 步完全离线/只读,是下一步的开工点。
 - **Run 的单参导出是裸跳板**(直跳双参本体不准备 R9)——必须调用双参重载,
   data 传空 Local。修复入库后待第三轮实弹复验。
 
-### 12.3 mode 3 设计(已实现,待实弹)
+### 12.3 第三轮实弹(PID 9328,2026-10-06):**主 Environment 内 JS 执行通道闭合**
 
-- mode 2 实测证据:uv 轮转点上 `GetEnteredOrMicrotaskContext`/`GetIncumbentContext`
-  无法证实上下文可用(JS 空闲期未 entered;且该轮受 sret 缺陷污染,仅作弱证据)。
-- mode 3 改为**中断点捕获 + 循环点执行**:RequestInterrupt 只在 v8 执行间隙被处理
-  (那一刻上下文必然 entered),其回调仅读取 entered Local 槽内的 tagged Context
-  指针(纯原子写);uv_async 回调在新 HandleScope 内经 `HandleScope::CreateHandle`
-  把 tagged 指针转为合法 Local 后执行只读枚举脚本
-  (`process._linkedBinding('major')` 属性名 → JSON)。
-- 实弹前置:执行者按 test-scope §4 指定新测试实例(TEST-ACCOUNT-A 登录),
-  用修复后的 bridge(注意重新复制 DLL 文件名——旧文件名已被进程内副本占用)。
+- 修正 ABI 后 mode 2 全通:**uv 回调点上 `GetEnteredOrMicrotaskContext` 真实返回
+  主上下文(has_ctx=1)**——前两轮的 0 均为反序调用造成的假象/崩溃。枚举脚本在
+  QQ 主 Environment 内执行并取回结果,post_check=true,实例存活。
+- **指纹证据(r3-mode2b)**:node 24.11.1 / v8 14.4.258.16-electron.0 /
+  electron 40.0.0 / chrome 144;`process._linkedBinding('major')` = `{ load: [native] }`
+  ——服务面在 `load()` 之后惰性展开;**require 在该上下文为 undefined**(非全局),
+  process/Buffer/console 等标准全局在位。
+- **mode 3(中断点捕获)降为备用方案**,本轮未执行——mode 2 的轮转点已足以取得
+  entered 上下文。注意:RequestInterrupt 在空闲 QQ 上可挂起数分钟(JS 执行间隙
+  才被处理),若启用 mode 3 需 ≥120s 捕获窗。
+- **下一实验档(未开工,需方案记录)**:调用 `major.load(...)` = 首次调用 QQ 业务
+  函数,属 test-scope §3 的 K2 样本纪律范围,须独立设计与门控后进行。
+- 实例存活复验:envscan 复扫 1 命中,地址稳定;两枚惰性 uv_async 句柄遗留
+  (不 close,随进程退出回收,如实记录)。
 
 ### 12.4 纪律
 

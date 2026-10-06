@@ -39,8 +39,10 @@ pub mod async_code {
     pub const ERR_NO_CAPTURE: u32 = 6;
 }
 
-/// mode 2 的枚举脚本:只读、自包含、异常全捕获。
-pub const ENUM_SCRIPT: &str = "(function(){try{var m=process._linkedBinding('major');var k=Object.getOwnPropertyNames(m);return JSON.stringify({ok:true,count:k.length,keys:k})}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
+/// mode 2 的枚举脚本:只读(不调用任何 QQ 函数)、自包含、异常全捕获。
+/// 第二版:除顶层键外,另取 load 的类型/源码指纹、process.versions、
+/// require 可用性与 globalThis 键表(截断),全部为纯读取。
+pub const ENUM_SCRIPT: &str = "(function(){try{var m=process._linkedBinding('major');var o={ok:true,keys:Object.getOwnPropertyNames(m),loadType:typeof m.load};try{o.loadSrc=String(m.load).slice(0,300)}catch(e){o.loadSrcErr=String(e)}try{o.versions=process.versions}catch(e){}try{o.hasRequire=typeof require;o.hasProcess=typeof process}catch(e){}try{o.globalKeys=Object.getOwnPropertyNames(globalThis).slice(0,120)}catch(e){}return JSON.stringify(o)}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
 
 /// 远程调用上下文(加载器写入,#[repr(C)]).
 #[repr(C)]
