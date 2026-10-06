@@ -11,7 +11,7 @@
 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use windows_sys::Win32::Foundation::{FILETIME, HANDLE};
 
@@ -150,12 +150,26 @@ pub fn list_processes(image_name: &str) -> Result<Vec<ProcessInfo>, String> {
 ///
 /// 供 obs v2 把基址传给远程线程,避免远程线程内调用加载器锁敏感 API。
 pub fn module_bases_in(pid: u32) -> Result<std::collections::HashMap<String, usize>, String> {
+    Ok(modules_in(pid)?
+        .into_iter()
+        .map(|m| (m.name, m.base))
+        .collect())
+}
+
+pub struct ModuleInfo {
+    pub name: String,
+    pub base: usize,
+    pub size: u32,
+}
+
+/// 枚举目标进程模块(短名/基址/大小)。Toolhelp 快照在本进程执行;只读。
+pub fn modules_in(pid: u32) -> Result<Vec<ModuleInfo>, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
     };
 
-    let mut out = std::collections::HashMap::new();
+    let mut out = Vec::new();
     // SAFETY: Toolhelp 只读快照;句柄在退出前关闭。快照逻辑在本进程执行,
     // 不触碰目标进程的加载器锁。
     unsafe {
@@ -167,8 +181,11 @@ pub fn module_bases_in(pid: u32) -> Result<std::collections::HashMap<String, usi
         ment.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
         if Module32FirstW(snap, &mut ment) != 0 {
             loop {
-                let name = u16sz(&ment.szModule);
-                out.entry(name).or_insert(ment.modBaseAddr as usize);
+                out.push(ModuleInfo {
+                    name: u16sz(&ment.szModule),
+                    base: ment.modBaseAddr as usize,
+                    size: ment.modBaseSize,
+                });
                 if Module32NextW(snap, &mut ment) == 0 {
                     break;
                 }
@@ -190,6 +207,20 @@ pub struct InjectOutcome {
     pub register_exit_code: Option<u32>,
     /// `caligo_env_start` 的返回码(仅在 env_report 提供时;链路线程异步执行)。
     pub env_exit_code: Option<u32>,
+    /// `caligo_interrupt_run` 的返回码(仅在 intr 提供时;同步执行)。
+    pub intr_exit_code: Option<u32>,
+}
+
+/// WU3 RequestInterrupt 实验的请求参数(布局对应 caligo_bridge::intr::IntrCtx)。
+pub struct IntrRequest {
+    /// 候选 node::Environment*(0 = 干跑)。
+    pub env: usize,
+    /// 期望 vfptr(qqnt_base + vtable_rva;0 = 跳过核对)。
+    pub expected_vftable: usize,
+    /// JSONL 报告路径。
+    pub report: PathBuf,
+    /// 等待回调触发的毫秒数。
+    pub wait_ms: u32,
 }
 
 type RemoteThreadFn = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
@@ -219,6 +250,7 @@ pub unsafe fn inject_and_probe(
     env_report: Option<&Path>,
     register_entry: bool,
     wait_ms: u32,
+    intr: Option<&IntrRequest>,
 ) -> Result<InjectOutcome, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
@@ -260,6 +292,7 @@ pub unsafe fn inject_and_probe(
         let mut buf_report: Option<*mut core::ffi::c_void> = None;
         let mut buf_obs: Option<*mut core::ffi::c_void> = None;
         let mut buf_env: Option<*mut core::ffi::c_void> = None;
+        let mut buf_intr: Option<*mut core::ffi::c_void> = None;
 
         let result = (|| -> Result<InjectOutcome, String> {
             let alloc_and_write = |bytes: &[u16],
@@ -333,6 +366,8 @@ pub unsafe fn inject_and_probe(
 
             // 在目标模块快照中定位 bridge 基址(x64 线程退出码截断,不可靠)。
             let remote_base = {
+                // 路径分隔符规范化:执行者可能传正斜杠,快照恒为反斜杠。
+                let want = bridge_path.to_string_lossy().replace('/', "\\");
                 let msnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
                 if msnap == INVALID_HANDLE_VALUE {
                     return Err("CreateToolhelp32Snapshot(MODULE) failed after load".into());
@@ -342,8 +377,8 @@ pub unsafe fn inject_and_probe(
                 ment.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
                 if Module32FirstW(msnap, &mut ment) != 0 {
                     loop {
-                        let loaded = u16sz(&ment.szExePath);
-                        if loaded.eq_ignore_ascii_case(&bridge_path.to_string_lossy()) {
+                        let loaded = u16sz(&ment.szExePath).replace('/', "\\");
+                        if loaded.eq_ignore_ascii_case(&want) {
                             found = Some(ment.modBaseAddr as usize);
                             break;
                         }
@@ -569,12 +604,99 @@ pub unsafe fn inject_and_probe(
                 env_exit = Some(code);
             }
 
+            // 可选:WU3 RequestInterrupt 实验(caligo_interrupt_run;同步执行,
+            // ctx 含 env/期望 vfptr/QQNT 基址;env=0 为干跑)。回调侧只有原子写,
+            // 本侧只负责写路径与 ctx 缓冲的远端分配。
+            let mut intr_exit: Option<u32> = None;
+            if let Some(intr) = intr {
+                let intr_addr = match read_remote_export(proc_h, remote_base, "caligo_interrupt_run")
+                {
+                    Ok(Some(a)) => a,
+                    Ok(None) => return Err("caligo_interrupt_run not found in remote".into()),
+                    Err(e) => return Err(format!("remote export lookup (interrupt): {e}")),
+                };
+                let bases = module_bases_in(pid)?;
+                let qqnt_base = *bases.get("QQNT.dll").unwrap_or(&0);
+                if qqnt_base == 0 {
+                    return Err("QQNT.dll base unresolved in target (interrupt ctx)".into());
+                }
+                let intr_wide = to_wide(&intr.report.to_string_lossy());
+                let remote_intr_path = alloc_and_write(&intr_wide, "alloc intr report path")?;
+                buf_intr = Some(remote_intr_path);
+                // caligo_bridge::intr::IntrCtx 的进程内副本(6 字段 ×8B)。
+                let mut ctx_bytes: Vec<u8> = Vec::with_capacity(48);
+                ctx_bytes.extend_from_slice(&intr.env.to_le_bytes());
+                ctx_bytes.extend_from_slice(&intr.expected_vftable.to_le_bytes());
+                ctx_bytes.extend_from_slice(&qqnt_base.to_le_bytes());
+                ctx_bytes.extend_from_slice(&(remote_intr_path as usize).to_le_bytes());
+                ctx_bytes.extend_from_slice(&intr.wait_ms.to_le_bytes());
+                ctx_bytes.extend_from_slice(&0u32.to_le_bytes());
+                let remote_ctx = VirtualAllocEx(
+                    proc_h,
+                    std::ptr::null(),
+                    ctx_bytes.len(),
+                    MEM_COMMIT | MEM_RESERVE,
+                    PAGE_READWRITE,
+                );
+                if remote_ctx.is_null() {
+                    return Err(format!("alloc intr ctx: Win32 error {}", GetLastError()));
+                }
+                let mut written: usize = 0;
+                if WriteProcessMemory(
+                    proc_h,
+                    remote_ctx,
+                    ctx_bytes.as_ptr().cast(),
+                    ctx_bytes.len(),
+                    &mut written,
+                ) == 0
+                    || written != ctx_bytes.len()
+                {
+                    VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
+                    return Err("alloc intr ctx: WriteProcessMemory incomplete".into());
+                }
+                let intr_fn: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32 =
+                    std::mem::transmute::<
+                        usize,
+                        unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+                    >(intr_addr);
+                let start_intr: RemoteThreadFn =
+                    std::mem::transmute::<usize, RemoteThreadFn>(intr_fn as usize);
+                let intr_thread = CreateRemoteThread(
+                    proc_h,
+                    std::ptr::null(),
+                    0,
+                    Some(start_intr),
+                    remote_ctx,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if intr_thread.is_null() {
+                    VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
+                    return Err(format!(
+                        "CreateRemoteThread(interrupt): Win32 error {}",
+                        GetLastError()
+                    ));
+                }
+                // 远程线程内部自带 wait_ms 轮询;本侧等待再加 5s 余量。
+                let intr_wait = intr.wait_ms.saturating_add(5000).max(wait_ms);
+                let wait = WaitForSingleObject(intr_thread, if intr_wait > 0 { intr_wait } else { INFINITE });
+                let mut code: u32 = u32::MAX;
+                GetExitCodeThread(intr_thread, &mut code);
+                CloseHandle(intr_thread);
+                VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
+                if wait != 0 {
+                    return Err(format!("interrupt remote thread wait failed: code {wait:#x}"));
+                }
+                intr_exit = Some(code);
+            }
+
             Ok(InjectOutcome {
                 remote_base,
                 probe_exit_code: exit_code,
                 obs_exit_code: obs_exit,
                 register_exit_code: register_exit,
                 env_exit_code: env_exit,
+                intr_exit_code: intr_exit,
             })
         })();
 
@@ -588,6 +710,9 @@ pub unsafe fn inject_and_probe(
             VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
         }
         if let Some(p) = buf_env {
+            VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
+        }
+        if let Some(p) = buf_intr {
             VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
         }
         CloseHandle(proc_h);

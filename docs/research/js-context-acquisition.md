@@ -123,7 +123,7 @@
 F-3 A2 协议路线(计划 §3.2 分支,需 A1 结论先行)。
 方案 d 复活条件(不变):完成 IsolateSettings/TracingController ABI 解码并作方案变更记录。
 
-## 10. K2-02 路线细化(F-1 终局后,2026-10-06,当前有效)
+## 10. K2-02 路线细化(F-1 终局后,2026-10-06;执行结果与勘误见 §11)
 
 F-1 五轮证明 wrapper 壳接口无消息业务后,到达 nodeIKernel* 服务面的通道收敛为:
 
@@ -143,6 +143,51 @@ F-1 五轮证明 wrapper 壳接口无消息业务后,到达 nodeIKernel* 服务�
 - 维持冻结,除非 R-A 失败。
 
 R-A 的第 1-2 步完全离线/只读,是下一步的开工点。
+
+## 11. K2-02 执行结果(2026-10-06,R-A 三步全部完成,当前有效)
+
+### 11.1 第 1 步(vtable 发现)——RTTI 路线判负,ctor 推导路线成立
+
+- **勘误**:QQNT.dll / wrapper.node / major.node 均无 `.?AVEnvironment@node@@` 字节串
+  (grep -aob = 0)。Chromium 系构建 `/GR-` 关闭 RTTI;§10 与此前会话记录的
+  "5 个 RTTI 引用"实为**函数签名字符串**中的 `VEnvironment@node@@` 子串。
+- 替代路线(全离线反汇编,证据 local-evidence/k2-02/):CreateEnvironment(ord 1063)
+  → 尾调 ord 1064 → `operator new(0xB60)`(sizeof(Environment)=0xB60)→ ctor 0x1C44810
+  → `lea rax,[0xA804990]; mov [rcx],rax`。
+- **node::Environment vtable 图谱**(QQNT 9.9.33-52230):主(完整对象)vtable
+  **RVA 0x0A804990**(@+0x0);子对象 vtable 0xA8049D0@+0x540、0xA804A10@+0x5B8、
+  0xA804A90@+0x9F0、0xA804B10@+0xA60 —— 恰 5 个 vtable,多重继承五基类。
+
+### 11.2 第 2 步(内存扫描)——外部 ReadProcessMemory 实现(对 §10 的有意偏差)
+
+- §10 原文写"obs 内存扫描"(进程内 bridge);实际实现为 **CLI `envscan` 子命令,
+  外部 RPM 零注入**——坏读只是 RPM 调用失败,绝不触发目标 AV,是 checked_read
+  语义的严格超集。若未来 RPM 被拒绝再回退进程内方案。
+- 扫描 PID 9000(指定测试实例,F1 轮同款):**唯一命中 0x762C002AD800**,
+  5 个 vtable 命中相对偏移与 ctor 图谱完全一致(±0 一致性判据通过);
+  +0x2C 处 1.0f 与 ctor `mov [rcx+2Ch],3F800000h` 吻合 → 真 Environment,非巧合。
+- 扫描覆盖 0.73 GiB(image 618MB + private 177MB),1 秒级完成,read_failed=0。
+
+### 11.3 第 3 步(RequestInterrupt)——通过
+
+- 干跑(env=0)验证链路后实弹:`RequestInterrupt(env, cb, null)` 在
+  **≤10ms 内回调触发**(fired=1,回调线程 id 55832 = QQ 的 JS 线程),
+  实例存活,env 页后验可读,Environment 地址稳定。
+- 回调侧只做原子写(tid/tick/fired),遵守计划 §3.1。
+- vfptr 核对门有效:expected_vftable 不匹配时拒绝调用(intr_code=6)。
+- 口径闭合:QQNT 运行时基址 0x7FF919120000(Toolhelp)与 vfptr−0xA804990 一致;
+  RequestInterrupt 地址 0x7FF91ACD24A0 = base + RVA 0x01BB24A0(与 K1 导出表一致)。
+
+### 11.4 结论与下一步
+
+- R-A 的可行性别(发现 → 定位 → 注入回调)三层全部实证。主 Environment 的
+  **原生指针获取通道**已闭合:`envscan`(离线 vtable 图谱 + 外部扫描)+
+  `RequestInterrupt`(JS 线程执行点)。
+- 下一步(K2-03 候选):在回调上下文内安全地执行 JS/枚举 major 服务面。
+  RequestInterrupt 回调是原生中断点,在其中直接调 V8 需要HandleScope 且时机敏感;
+  候选设计:回调内只投递一个安全载荷(如向 env 的 uv_loop 提交 async 工作),
+  在 Node 自己的轮转点上运行枚举——设计前先记录方案变更。
+- 版本绑定:0xA804990 等全部 RVA 绑定 manifest 冻结版本(9.9.33-52230),换版本重测。
 
 ## 3. 纪律与生命周期
 

@@ -53,6 +53,65 @@ struct Section {
     raw_size: u32,
 }
 
+/// 已具名段信息(供 RTTI 等离线扫描使用)。
+pub struct SectionInfo {
+    pub va: u32,
+    pub raw_ptr: u32,
+    pub raw_size: u32,
+}
+
+/// PE 布局要点:机器类型、映像基址与段表(RTTI 扫描的 RVA↔文件偏移映射基础)。
+pub struct PeLayout {
+    pub machine: u16,
+    pub image_base: u64,
+    pub sections: Vec<SectionInfo>,
+}
+
+/// 解析段表与映像基址。任何结构性异常都以 Err(String) 返回,不做猜测性容错。
+pub fn parse_layout(file: &[u8]) -> Result<PeLayout, String> {
+    if file.len() < 0x40 || &file[0..2] != b"MZ" {
+        return Err("not an MZ image".into());
+    }
+    let e_lfanew = u32_at(file, 0x3C).ok_or("truncated DOS header")? as usize;
+    if file.get(e_lfanew..e_lfanew + 4) != Some(&b"PE\0\0"[..]) {
+        return Err("PE signature not found".into());
+    }
+    let coff = e_lfanew + 4;
+    let machine = u16_at(file, coff).ok_or("truncated COFF header")?;
+    let number_of_sections = u16_at(file, coff + 2).ok_or("truncated COFF header")? as usize;
+    let size_of_optional = u16_at(file, coff + 16).ok_or("truncated COFF header")? as usize;
+    let opt = coff + 20;
+    let magic = u16_at(file, opt).ok_or("truncated optional header")?;
+    let image_base = match magic {
+        0x20B => u64_at(file, opt + 24).ok_or("truncated optional header")?,
+        0x10B => u32_at(file, opt + 28).ok_or("truncated optional header")? as u64,
+        other => return Err(format!("unknown optional header magic 0x{other:04X}")),
+    };
+    let sec_base = opt + size_of_optional;
+    let mut sections = Vec::with_capacity(number_of_sections);
+    for i in 0..number_of_sections {
+        let base = sec_base + i * 40;
+        if base + 40 > file.len() {
+            return Err("section table truncated".into());
+        }
+        sections.push(SectionInfo {
+            va: u32_at(file, base + 12).unwrap_or(0),
+            raw_size: u32_at(file, base + 16).unwrap_or(0),
+            raw_ptr: u32_at(file, base + 20).unwrap_or(0),
+        });
+    }
+    Ok(PeLayout {
+        machine,
+        image_base,
+        sections,
+    })
+}
+
+fn u64_at(b: &[u8], off: usize) -> Option<u64> {
+    b.get(off..off + 8)
+        .map(|s| u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]))
+}
+
 fn rva_to_offset(sections: &[Section], rva: u32) -> Option<usize> {
     for s in sections {
         let span = s.vsize.max(s.raw_size);

@@ -32,7 +32,8 @@ pub mod env_code {
 
 // --- 阶段报告(JSONL 追加) ---
 
-fn append_stage(path: &str, stage: &str, ok: bool, detail: &str) {
+/// `pub(crate)`:intr(WU3)复用同一 JSONL 阶段报告格式。
+pub(crate) fn append_stage(path: &str, stage: &str, ok: bool, detail: &str) {
     let line = format!(
         "{{\"stage\":\"{}\",\"ok\":{},\"detail\":\"{}\"}}\n",
         stage,

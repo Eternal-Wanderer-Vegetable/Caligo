@@ -44,6 +44,7 @@ pub mod probe_code {
 }
 
 pub mod envrun;
+pub mod intr;
 pub mod obs;
 pub mod register;
 
@@ -311,6 +312,26 @@ pub unsafe extern "system" fn caligo_obs_run2(ctx: *const obs::ObsCtx) -> u32 {
         },
         Err(_) => probe_code::ERR_WRITE_FAILED,
     }
+}
+
+#[no_mangle]
+/// K2-02 WU3:对候选 Environment 调用 `node::RequestInterrupt`(详见 intr.rs)。
+/// 同步执行:解析导出 → 校验 env → 调用 → 轮询回调 → JSONL 报告。
+///
+/// 返回 [`intr::intr_code`] 结果码。
+///
+/// # Safety
+///
+/// `ctx` 必须指向本进程内有效的 [`intr::IntrCtx`](布局见 intr.rs):
+/// env/expected_vftable/qqnt_base 来自加载器侧解析与 WU2 扫描结果,
+/// report_path 指向远程已写入的 NUL 结尾 UTF-16 缓冲。
+pub unsafe extern "system" fn caligo_interrupt_run(ctx: *mut intr::IntrCtx) -> u32 {
+    if ctx.is_null() {
+        return intr::intr_code::ERR_NULL_PATH;
+    }
+    // SAFETY: ctx 由 loader 写入且位于本进程;字段按 intr::IntrCtx 布局解读。
+    let ctx_view = unsafe { &*ctx };
+    intr::interrupt_run(ctx_view)
 }
 
 #[no_mangle]

@@ -4,14 +4,20 @@
 //! - `verify-manifest <manifest.json>`:核对冻结版本模块的 SHA-256/大小(manifest 门)。
 //! - `process`:枚举 QQ 进程与已加载的 Tencent/*.node 模块(只读观察)。
 //! - `exports <module> [--all]`:解析 PE 导出表(静态调查)。
+//! - `rtti <module> --contains <substr>`:MSVC RTTI 扫描,定位类 vtable RVA(K2-02 WU1)。
+//! - `envscan --pid <n> --vtable <rva[:off]>…`:外部只读内存扫描定位 Environment
+//!   候选(K2-02 WU2;ReadProcessMemory,零注入)。
 //! - `inject --pid <n> --bridge <path> --manifest <path> --report <path>
 //!   --confirm-designated-test-instance`:门控加载 bridge 并取回探测报告。
 //!   唯一写动作入口:要求 manifest 全部核对通过 **且** 执行者显式确认该实例。
+//!   `--intr-*` 系列触发 WU3 RequestInterrupt 实验(见 docs/research §10)。
 //!
 //! 退出码:0 成功;1 用法/IO 错误;2 校验不通过(拒绝)。
 
 mod disasm;
+mod envscan;
 mod pe;
+mod rtti;
 mod winutil;
 
 use std::io::Read;
@@ -30,15 +36,22 @@ caligo-cli <K1 probe>
   caligo-cli exports <module-path> [--all]
   caligo-cli bytes <module-path> <rva-hex | export=NAME> [--len <n>]
   caligo-cli disasm <module-path> <rva-hex | export=NAME> [--len <n>]
+  caligo-cli rtti <module-path> --contains <substr>
+  caligo-cli envscan --pid <n> --vtable <rva-hex[:member-off-hex]> [--include-mapped]
+                     [--context <bytes>] [--out <report.json>]
   caligo-cli inject --pid <n> --bridge <bridge.dll> --manifest <manifest.json>
                     --report <report.json> --confirm-designated-test-instance
                     [--obs-report <obs.json>] [--env-report <env.jsonl>]
                     [--register-entry] [--wait-ms <ms>]
+                    [--intr-report <intr.jsonl> --intr-env <ptr-hex>]
+                    [--intr-vftable <va-hex>] [--intr-wait-ms <ms>]
 
 说明:
   inject 是唯一会产生加载动作的命令;它要求 manifest 核对全部通过,
   且执行者显式确认目标实例已按 docs/research/test-scope.md 指定。
-  bytes 是离线静态分析工具(读文件字节,十六进制转储)。
+  bytes/rtti 是离线静态分析工具(读文件字节)。
+  envscan 是外部只读内存扫描(ReadProcessMemory,零注入;仍须记录目标实例)。
+  --intr-env 0 为干跑(只验证链路,不调用 RequestInterrupt)。
 ";
 
 fn main() -> ExitCode {
@@ -66,6 +79,8 @@ fn main() -> ExitCode {
         Some("bytes") => cmd_bytes(&args[1..]),
         Some("disasm") => cmd_disasm(&args[1..]),
         Some("identifiers") => cmd_identifiers(&args[1..]),
+        Some("rtti") => cmd_rtti(&args[1..]),
+        Some("envscan") => cmd_envscan(&args[1..]),
         Some("inject") => cmd_inject(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
@@ -642,6 +657,224 @@ fn cmd_disasm(args: &[String]) -> ExitCode {
     }
 }
 
+/// K2-02 WU1:MSVC RTTI 离线扫描——TD → COL → vtable RVA。
+fn cmd_rtti(args: &[String]) -> ExitCode {
+    let mut module: Option<&str> = None;
+    let mut contains: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--contains" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => contains = Some(v.clone()),
+                    None => {
+                        eprintln!("--contains 需要参数");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            other if module.is_none() => module = Some(other),
+            other => {
+                eprintln!("多余参数: {other}\n{USAGE}");
+                return ExitCode::FAILURE;
+            }
+        }
+        i += 1;
+    }
+    let (Some(module), Some(contains)) = (module, contains) else {
+        eprintln!("rtti 需要 <module> 与 --contains\n{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    let bytes = match std::fs::read(module) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("read {module}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let started = std::time::Instant::now();
+    match rtti::scan(&bytes, &contains) {
+        Ok(hits) => {
+            println!(
+                "file: {module}  scan: {:.2}s  TD hits: {}",
+                started.elapsed().as_secs_f64(),
+                hits.len()
+            );
+            let mut total_vtables = 0;
+            for td in &hits {
+                println!(
+                    "TD rva={:#010x}  name={}",
+                    td.td_rva, td.name
+                );
+                for col in &td.cols {
+                    println!(
+                        "  COL rva={:#010x}  member_offset={:#x}  cd_offset={:#x}  vtables={}",
+                        col.col_rva,
+                        col.member_offset,
+                        col.cd_offset,
+                        col.vtables.len()
+                    );
+                    for vt in &col.vtables {
+                        println!(
+                            "    vtable rva={:#010x}  [-1]→COL  first_fn_rva={}",
+                            vt.vtable_rva,
+                            match vt.first_fn_rva {
+                                Some(r) => format!("{r:#010x}"),
+                                None => "n/a".into(),
+                            }
+                        );
+                        total_vtables += 1;
+                    }
+                }
+                if td.cols.is_empty() {
+                    println!("  (无结构校验通过的 COL)");
+                }
+            }
+            eprintln!("# {total_vtables} vtable(s) across {} TD(s)", hits.len());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("rtti scan: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// K2-02 WU2:外部只读内存扫描定位候选 node::Environment。
+fn cmd_envscan(args: &[String]) -> ExitCode {
+    let mut pid: Option<u32> = None;
+    let mut targets: Vec<envscan::ScanTarget> = Vec::new();
+    let mut include_mapped = false;
+    let mut context_bytes: usize = 0x100;
+    let mut out_path: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let next = |i: &mut usize| -> Option<String> {
+            *i += 1;
+            args.get(*i).cloned()
+        };
+        match args[i].as_str() {
+            "--pid" => match next(&mut i).and_then(|s| s.parse().ok()) {
+                Some(v) => pid = Some(v),
+                None => {
+                    eprintln!("--pid 需要数字参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--vtable" => {
+                let Some(spec) = next(&mut i) else {
+                    eprintln!("--vtable 需要参数 rva[:member-offset](十六进制)");
+                    return ExitCode::FAILURE;
+                };
+                let (rva_s, off_s) = match spec.split_once(':') {
+                    Some((r, o)) => (r, o),
+                    None => (spec.as_str(), "0"),
+                };
+                let parsed = (|| {
+                    let rva = u32::from_str_radix(
+                        rva_s.strip_prefix("0x").unwrap_or(rva_s),
+                        16,
+                    ).ok()?;
+                    let off = u32::from_str_radix(
+                        off_s.strip_prefix("0x").unwrap_or(off_s),
+                        16,
+                    ).ok()?;
+                    Some(envscan::ScanTarget {
+                        vtable_rva: rva,
+                        member_offset: off,
+                    })
+                })();
+                match parsed {
+                    Some(t) => targets.push(t),
+                    None => {
+                        eprintln!("--vtable 解析失败: {spec}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            "--include-mapped" => include_mapped = true,
+            "--context" => match next(&mut i).and_then(|s| s.parse().ok()) {
+                Some(v) => context_bytes = v,
+                None => {
+                    eprintln!("--context 需要数字参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--out" => match next(&mut i) {
+                Some(v) => out_path = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("--out 需要路径参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            other => {
+                eprintln!("未知参数: {other}\n{USAGE}");
+                return ExitCode::FAILURE;
+            }
+        }
+        i += 1;
+    }
+    let (Some(pid), false) = (pid, targets.is_empty()) else {
+        eprintln!("envscan 需要 --pid 与至少一个 --vtable\n{USAGE}");
+        return ExitCode::FAILURE;
+    };
+
+    println!(
+        "[envscan] pid={pid} targets={} context={context_bytes:#x} include_mapped={include_mapped}",
+        targets.len()
+    );
+    println!("[envscan] 只读外部扫描(ReadProcessMemory,零注入)…");
+    let started = std::time::Instant::now();
+    let report = match unsafe { envscan::scan_process(pid, &targets, context_bytes, include_mapped) } {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[envscan] 失败: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "[envscan] 扫描完成:{:.2}s regions={} bytes={:.2} GiB read_failed={} hits={}",
+        started.elapsed().as_secs_f64(),
+        report.regions_scanned,
+        report.bytes_scanned as f64 / (1024.0 * 1024.0 * 1024.0),
+        report.regions_read_failed,
+        report.hits.len()
+    );
+    let json = serde_json::to_string_pretty(&report).unwrap_or_default();
+    if let Some(p) = &out_path {
+        if let Some(parent) = p.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("报告目录创建失败 {}: {e}", parent.display());
+                return ExitCode::FAILURE;
+            }
+        }
+        if let Err(e) = std::fs::write(p, &json) {
+            eprintln!("报告写盘失败 {}: {e}", p.display());
+            return ExitCode::FAILURE;
+        }
+        println!("[envscan] 报告已写入 {}", p.display());
+    }
+    // 摘要输出(完整 JSON 见报告文件/重定向)。
+    for h in &report.hits {
+        println!(
+            "HIT va={:#018x} vtable_rva={:#x} member_off={:#x} candidate_env={:#018x} region={} protect={:#x} module={} ctx={}",
+            h.va,
+            h.vtable_rva,
+            h.member_offset,
+            h.candidate_env,
+            h.region_type,
+            h.protect,
+            h.in_module.as_deref().unwrap_or("-"),
+            h.context_len,
+        );
+    }
+    if report.hits.is_empty() {
+        println!("(无命中 — 检查 vtable RVA 是否来自同一冻结版本,或加 --include-mapped)");
+    }
+    ExitCode::SUCCESS
+}
+
 fn cmd_inject(args: &[String]) -> ExitCode {
     let mut pid: Option<u32> = None;
     let mut bridge: Option<PathBuf> = None;
@@ -652,6 +885,10 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut register_entry = false;
     let mut confirmed = false;
     let mut wait_ms: u32 = 20_000;
+    let mut intr_report: Option<PathBuf> = None;
+    let mut intr_env: Option<usize> = None;
+    let mut intr_vftable: usize = 0;
+    let mut intr_wait_ms: u32 = 10_000;
 
     let mut i = 0;
     while i < args.len() {
@@ -703,6 +940,38 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 }
             },
             "--register-entry" => register_entry = true,
+            "--intr-report" => match next(&mut i) {
+                Some(v) => intr_report = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("--intr-report 需要路径参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--intr-env" => match next(&mut i).as_deref().and_then(|s| {
+                usize::from_str_radix(s.strip_prefix("0x").unwrap_or(s), 16).ok()
+            }) {
+                Some(v) => intr_env = Some(v),
+                None => {
+                    eprintln!("--intr-env 需要十六进制指针参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--intr-vftable" => match next(&mut i).as_deref().and_then(|s| {
+                usize::from_str_radix(s.strip_prefix("0x").unwrap_or(s), 16).ok()
+            }) {
+                Some(v) => intr_vftable = v,
+                None => {
+                    eprintln!("--intr-vftable 需要十六进制参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--intr-wait-ms" => match next(&mut i).and_then(|s| s.parse().ok()) {
+                Some(v) => intr_wait_ms = v,
+                None => {
+                    eprintln!("--intr-wait-ms 需要数字参数");
+                    return ExitCode::FAILURE;
+                }
+            },
             "--wait-ms" => match next(&mut i).and_then(|s| s.parse().ok()) {
                 Some(v) => wait_ms = v,
                 None => {
@@ -785,6 +1054,46 @@ fn cmd_inject(args: &[String]) -> ExitCode {
         }
         None => None,
     };
+    // WU3 RequestInterrupt 实验:--intr-report 与 --intr-env 必须成对。
+    let intr = match (intr_report, intr_env) {
+        (Some(p), Some(env)) => {
+            let abs = match to_absolute(&p) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("--intr-report 路径无效: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Some(parent) = abs.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!("intr 报告目录创建失败 {}: {e}", parent.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+            if env != 0 && intr_vftable == 0 {
+                eprintln!(
+                    "[gate] --intr-env 给出了非零候选且未提供 --intr-vftable。\n\
+                     真实调用必须核对 vfptr(拒绝盲调);干跑请用 --intr-env 0。"
+                );
+                return ExitCode::from(2);
+            }
+            Some(winutil::IntrRequest {
+                env,
+                expected_vftable: intr_vftable,
+                report: abs,
+                wait_ms: intr_wait_ms,
+            })
+        }
+        (Some(_), None) => {
+            eprintln!("--intr-report 需要 --intr-env 成对出现");
+            return ExitCode::FAILURE;
+        }
+        (None, Some(_)) => {
+            eprintln!("--intr-env 需要 --intr-report 成对出现");
+            return ExitCode::FAILURE;
+        }
+        (None, None) => None,
+    };
 
     // 门 1:manifest 摘要核对(计划 §5:版本与模块摘要确认 → 接入)。
     println!("[gate 1] 核对模块基线 …");
@@ -822,6 +1131,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             env_report.as_deref(),
             register_entry,
             wait_ms,
+            intr.as_ref(),
         )
     };
     match outcome {
@@ -981,6 +1291,33 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                     }
                     Err(e) => {
                         eprintln!("env 报告读取失败 {}: {e}", env_path.display());
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            // WU3 interrupt 结果(JSONL 阶段报告)。
+            if let (Some(req), Some(code)) = (intr.as_ref(), o.intr_exit_code) {
+                println!(
+                    "[intr] caligo_interrupt_run:exit_code={} ({})",
+                    code,
+                    match code {
+                        0 => "OK(流程完成,触发与否见报告)",
+                        1 => "ERR_NULL_PATH",
+                        2 => "ERR_BAD_PATH",
+                        3 => "ERR_NO_QQNT",
+                        4 => "ERR_ENV_INVALID(候选页不可读,拒绝调用)",
+                        5 => "ERR_EXPORT_MISSING",
+                        6 => "ERR_VFTABLE_MISMATCH(vfptr 不符,拒绝调用)",
+                        _ => "UNKNOWN",
+                    }
+                );
+                match std::fs::read_to_string(&req.report) {
+                    Ok(content) => {
+                        println!("=== intr report ({}) ===", req.report.display());
+                        println!("{content}");
+                    }
+                    Err(e) => {
+                        eprintln!("intr 报告读取失败 {}: {e}", req.report.display());
                         return ExitCode::FAILURE;
                     }
                 }

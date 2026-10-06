@@ -271,7 +271,8 @@ unsafe fn read_cstring(ptr: usize) -> Option<String> {
 // --- PE 导出表解析(自身进程内,映像基址) ---
 
 /// 在映像内按导出名解析函数地址。失败返回 None(报告为 note,不猜测)。
-unsafe fn export_addr(image_base: usize, name: &str) -> Option<usize> {
+/// `pub(crate)`:intr(WU3)在远程线程内复用同一裸读导出解析。
+pub(crate) unsafe fn export_addr(image_base: usize, name: &str) -> Option<usize> {
     let e_lfanew = rd_u32(image_base + 0x3C)? as usize;
     let pe = image_base + e_lfanew;
     if rd_u32(pe)? != 0x0000_4550 {
