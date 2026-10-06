@@ -43,6 +43,7 @@ pub mod probe_code {
     pub const ERR_WRITE_FAILED: u32 = 3;
 }
 
+pub mod asyncrun;
 pub mod envrun;
 pub mod intr;
 pub mod obs;
@@ -332,6 +333,25 @@ pub unsafe extern "system" fn caligo_interrupt_run(ctx: *mut intr::IntrCtx) -> u
     // SAFETY: ctx 由 loader 写入且位于本进程;字段按 intr::IntrCtx 布局解读。
     let ctx_view = unsafe { &*ctx };
     intr::interrupt_run(ctx_view)
+}
+
+#[no_mangle]
+/// K2-03:主 Environment 事件循环点载荷(详见 asyncrun.rs 与设计记录)。
+/// 同步执行:解析导出 → env 布局链校验 → uv_async_init/send → 轮询 → JSONL。
+///
+/// 返回 [`asyncrun::async_code`] 结果码。
+///
+/// # Safety
+///
+/// `ctx` 必须指向本进程内有效的 [`asyncrun::AsyncCtx`](布局见 asyncrun.rs):
+/// env 来自 K2-02 扫描结果,report_path 指向远程已写入的 NUL 结尾 UTF-16 缓冲。
+pub unsafe extern "system" fn caligo_async_run(ctx: *mut asyncrun::AsyncCtx) -> u32 {
+    if ctx.is_null() {
+        return asyncrun::async_code::ERR_NULL_PATH;
+    }
+    // SAFETY: ctx 由 loader 写入且位于本进程;字段按 asyncrun::AsyncCtx 布局解读。
+    let ctx_view = unsafe { &*ctx };
+    asyncrun::async_run(ctx_view)
 }
 
 #[no_mangle]

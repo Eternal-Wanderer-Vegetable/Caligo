@@ -209,6 +209,8 @@ pub struct InjectOutcome {
     pub env_exit_code: Option<u32>,
     /// `caligo_interrupt_run` 的返回码(仅在 intr 提供时;同步执行)。
     pub intr_exit_code: Option<u32>,
+    /// `caligo_async_run` 的返回码(仅在 async 提供时;同步执行)。
+    pub async_exit_code: Option<u32>,
 }
 
 /// WU3 RequestInterrupt 实验的请求参数(布局对应 caligo_bridge::intr::IntrCtx)。
@@ -217,6 +219,18 @@ pub struct IntrRequest {
     pub env: usize,
     /// 期望 vfptr(qqnt_base + vtable_rva;0 = 跳过核对)。
     pub expected_vftable: usize,
+    /// JSONL 报告路径。
+    pub report: PathBuf,
+    /// 等待回调触发的毫秒数。
+    pub wait_ms: u32,
+}
+
+/// K2-03 事件循环点载荷请求(布局对应 caligo_bridge::asyncrun::AsyncCtx)。
+pub struct AsyncRequest {
+    /// 候选 node::Environment*(0 = 干跑)。
+    pub env: usize,
+    /// 0=干跑 1=原子载荷 2=JS 枚举。
+    pub mode: u32,
     /// JSONL 报告路径。
     pub report: PathBuf,
     /// 等待回调触发的毫秒数。
@@ -251,6 +265,7 @@ pub unsafe fn inject_and_probe(
     register_entry: bool,
     wait_ms: u32,
     intr: Option<&IntrRequest>,
+    async_req: Option<&AsyncRequest>,
 ) -> Result<InjectOutcome, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
@@ -293,6 +308,7 @@ pub unsafe fn inject_and_probe(
         let mut buf_obs: Option<*mut core::ffi::c_void> = None;
         let mut buf_env: Option<*mut core::ffi::c_void> = None;
         let mut buf_intr: Option<*mut core::ffi::c_void> = None;
+        let mut buf_async: Option<*mut core::ffi::c_void> = None;
 
         let result = (|| -> Result<InjectOutcome, String> {
             let alloc_and_write = |bytes: &[u16],
@@ -690,6 +706,84 @@ pub unsafe fn inject_and_probe(
                 intr_exit = Some(code);
             }
 
+            // 可选:K2-03 事件循环点载荷(caligo_async_run;同步执行,mode 0/1/2)。
+            let mut async_exit: Option<u32> = None;
+            if let Some(req) = async_req {
+                let addr = match read_remote_export(proc_h, remote_base, "caligo_async_run") {
+                    Ok(Some(a)) => a,
+                    Ok(None) => return Err("caligo_async_run not found in remote".into()),
+                    Err(e) => return Err(format!("remote export lookup (async): {e}")),
+                };
+                let req_wide = to_wide(&req.report.to_string_lossy());
+                let remote_req_path = alloc_and_write(&req_wide, "alloc async report path")?;
+                buf_async = Some(remote_req_path);
+                // caligo_bridge::asyncrun::AsyncCtx 的进程内副本(4×usize + 2×u32)。
+                let mut ctx_bytes: Vec<u8> = Vec::with_capacity(48);
+                ctx_bytes.extend_from_slice(&req.env.to_le_bytes());
+                ctx_bytes.extend_from_slice(&req.mode.to_le_bytes());
+                ctx_bytes.extend_from_slice(&0u32.to_le_bytes());
+                ctx_bytes.extend_from_slice(&(remote_req_path as usize).to_le_bytes());
+                ctx_bytes.extend_from_slice(&req.wait_ms.to_le_bytes());
+                ctx_bytes.extend_from_slice(&0u32.to_le_bytes());
+                let remote_ctx = VirtualAllocEx(
+                    proc_h,
+                    std::ptr::null(),
+                    ctx_bytes.len(),
+                    MEM_COMMIT | MEM_RESERVE,
+                    PAGE_READWRITE,
+                );
+                if remote_ctx.is_null() {
+                    return Err(format!("alloc async ctx: Win32 error {}", GetLastError()));
+                }
+                let mut written: usize = 0;
+                if WriteProcessMemory(
+                    proc_h,
+                    remote_ctx,
+                    ctx_bytes.as_ptr().cast(),
+                    ctx_bytes.len(),
+                    &mut written,
+                ) == 0
+                    || written != ctx_bytes.len()
+                {
+                    VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
+                    return Err("alloc async ctx: WriteProcessMemory incomplete".into());
+                }
+                let async_fn: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32 =
+                    std::mem::transmute::<
+                        usize,
+                        unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+                    >(addr);
+                let start_async: RemoteThreadFn =
+                    std::mem::transmute::<usize, RemoteThreadFn>(async_fn as usize);
+                let async_thread = CreateRemoteThread(
+                    proc_h,
+                    std::ptr::null(),
+                    0,
+                    Some(start_async),
+                    remote_ctx,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if async_thread.is_null() {
+                    VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
+                    return Err(format!(
+                        "CreateRemoteThread(async): Win32 error {}",
+                        GetLastError()
+                    ));
+                }
+                let async_wait = req.wait_ms.saturating_add(5000).max(wait_ms);
+                let wait =
+                    WaitForSingleObject(async_thread, if async_wait > 0 { async_wait } else { INFINITE });
+                let mut code: u32 = u32::MAX;
+                GetExitCodeThread(async_thread, &mut code);
+                CloseHandle(async_thread);
+                VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
+                if wait != 0 {
+                    return Err(format!("async remote thread wait failed: code {wait:#x}"));
+                }
+                async_exit = Some(code);
+            }
+
             Ok(InjectOutcome {
                 remote_base,
                 probe_exit_code: exit_code,
@@ -697,6 +791,7 @@ pub unsafe fn inject_and_probe(
                 register_exit_code: register_exit,
                 env_exit_code: env_exit,
                 intr_exit_code: intr_exit,
+                async_exit_code: async_exit,
             })
         })();
 
@@ -713,6 +808,9 @@ pub unsafe fn inject_and_probe(
             VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
         }
         if let Some(p) = buf_intr {
+            VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
+        }
+        if let Some(p) = buf_async {
             VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
         }
         CloseHandle(proc_h);

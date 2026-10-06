@@ -189,6 +189,60 @@ R-A 的第 1-2 步完全离线/只读,是下一步的开工点。
   在 Node 自己的轮转点上运行枚举——设计前先记录方案变更。
 - 版本绑定:0xA804990 等全部 RVA 绑定 manifest 冻结版本(9.9.33-52230),换版本重测。
 
+## 12. K2-03:主 Environment 事件循环点载荷(2026-10-06,mode 0/1 实证,mode 2 事故归因闭合,mode 3 待实弹)
+
+方案变更(记录于 local-evidence/k2-03/design.md):§11.4 原计划"RequestInterrupt
+回调内枚举"修订为 **uv_async 载荷**——RequestInterrupt 保留为 env 身份验证器
+(K2-02),枚举载荷改走主 env 自己的 uv_loop 轮转点(计划 §3.1 允许的执行点)。
+
+### 12.1 静态解码(全离线,证据 local-evidence/k2-03/design.md)
+
+- **uv_loop 链**:`env+0xB0 → IsolateData*(ctor 参数2);IsolateData+0x11E8 → uv_loop_t*`;
+  `env+0xA0 → Isolate*`;sizeof(IsolateData)=0x1258。
+- **ScriptOrigin 布局(0x28)**:+0x0 name、+0x8 line、+0xC column、+0x10 选项位域、
+  +0x14 script_id、+0x18 source_map_url、+0x20 host_defined_options;零构造安全
+  (ctor 尾调用在 host_defined 为空时短路)。
+- JS 执行面导出齐备:GetCurrent/GetEnteredOrMicrotaskContext/GetIncumbentContext/
+  HandleScope ctor+dtor+CreateHandle(1066)/Script::Compile(1026)/Run(2090)/
+  String::NewFromUtf8(1965)/Utf8Value(239/356/729)。
+
+### 12.2 实弹结果(PID 9000,指定测试实例)
+
+- **mode 0 PASS**:布局链实测 IsolateData=0x762C0037C000、loop=0x7FF925AD7670
+  (落在 QQNT 映像 .data 内,符合 node 主循环为模块内静态的预期),uv_loop_alive=1。
+- **mode 1 PASS**:uv_async_init/send r=0,回调 **0ms 内触发,线程 55832** ——
+  与 K2-02 RequestInterrupt 回调同线程(QQ 的 JS 线程),跨机制互证。
+  "载荷跑在 env 自己的事件循环轮转点上"成立。
+- **mode 2 事故(进程死亡,归因闭合)**:回调延迟 ~15s 后运行,在
+  `GetEnteredOrMicrotaskContext` 内部 AV,实例 9000 死亡(crashpad 90bb0b36,已归档)。
+  根因:**MSVC sret ABI**——`v8::Local/MaybeLocal` 为非平凡类,按值返回经 rcx 隐藏
+  指针写出、参数后移一位;bridge 签名缺 sret → 访问器写野指针。JSONL 原子快照
+  (isolate_match=1/has_ctx=0/RESULT_SEQ 未置位)与崩溃时序完全自洽。
+  **教训(通用)**:凡调用返回 v8::Local/MaybeLocal 的导出,一律 sret 签名;
+  envrun.rs(K2-01,冻结)同类签名同病,复活方案 d 前必须先修。
+- 事故后处置:未触碰任何存活实例(53764 为用户自启,非指定目标);
+  修复入库;复验需执行者重新指定测试实例。
+
+### 12.3 mode 3 设计(已实现,待实弹)
+
+- mode 2 实测证据:uv 轮转点上 `GetEnteredOrMicrotaskContext`/`GetIncumbentContext`
+  无法证实上下文可用(JS 空闲期未 entered;且该轮受 sret 缺陷污染,仅作弱证据)。
+- mode 3 改为**中断点捕获 + 循环点执行**:RequestInterrupt 只在 v8 执行间隙被处理
+  (那一刻上下文必然 entered),其回调仅读取 entered Local 槽内的 tagged Context
+  指针(纯原子写);uv_async 回调在新 HandleScope 内经 `HandleScope::CreateHandle`
+  把 tagged 指针转为合法 Local 后执行只读枚举脚本
+  (`process._linkedBinding('major')` 属性名 → JSON)。
+- 实弹前置:执行者按 test-scope §4 指定新测试实例(TEST-ACCOUNT-A 登录),
+  用修复后的 bridge(注意重新复制 DLL 文件名——旧文件名已被进程内副本占用)。
+
+### 12.4 纪律
+
+- 回调内零 IO/零分配/零锁(静态原子 + 预分配缓冲);uv_async 句柄不 close,
+  随进程退出回收,如实记录。
+- 所有偏移版本绑定 9.9.33-52230;换版本重解。
+- 事故台账:9000(2026-10-06 10:53 启动,20:26 死于 sret 缺陷)记入
+  local-evidence/k2-03/run-notes.md;crashpad 原件归档同目录。
+
 ## 3. 纪律与生命周期
 
 - `caligo_bridge` 注册**不可逆**(node_module_register 只有插入):随测试 QQ 进程退出回收;

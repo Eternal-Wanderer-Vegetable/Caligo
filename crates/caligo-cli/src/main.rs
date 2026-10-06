@@ -45,6 +45,8 @@ caligo-cli <K1 probe>
                     [--register-entry] [--wait-ms <ms>]
                     [--intr-report <intr.jsonl> --intr-env <ptr-hex>]
                     [--intr-vftable <va-hex>] [--intr-wait-ms <ms>]
+                    [--async-report <async.jsonl> --async-mode <0|1|2>
+                     --async-env <ptr-hex>] [--async-wait-ms <ms>]
 
 说明:
   inject 是唯一会产生加载动作的命令;它要求 manifest 核对全部通过,
@@ -52,6 +54,7 @@ caligo-cli <K1 probe>
   bytes/rtti 是离线静态分析工具(读文件字节)。
   envscan 是外部只读内存扫描(ReadProcessMemory,零注入;仍须记录目标实例)。
   --intr-env 0 为干跑(只验证链路,不调用 RequestInterrupt)。
+  --async-mode 0/1/2 = 干跑 / uv_async 原子载荷 / JS 枚举 major(K2-03)。
 ";
 
 fn main() -> ExitCode {
@@ -889,6 +892,10 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut intr_env: Option<usize> = None;
     let mut intr_vftable: usize = 0;
     let mut intr_wait_ms: u32 = 10_000;
+    let mut async_report: Option<PathBuf> = None;
+    let mut async_mode: Option<u32> = None;
+    let mut async_env: Option<usize> = None;
+    let mut async_wait_ms: u32 = 10_000;
 
     let mut i = 0;
     while i < args.len() {
@@ -969,6 +976,36 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => intr_wait_ms = v,
                 None => {
                     eprintln!("--intr-wait-ms 需要数字参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--async-report" => match next(&mut i) {
+                Some(v) => async_report = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("--async-report 需要路径参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--async-mode" => match next(&mut i).and_then(|s| s.parse::<u32>().ok()) {
+                Some(v @ 0..=3) => async_mode = Some(v),
+                _ => {
+                    eprintln!("--async-mode 需要 0/1/2/3");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--async-env" => match next(&mut i).as_deref().and_then(|s| {
+                usize::from_str_radix(s.strip_prefix("0x").unwrap_or(s), 16).ok()
+            }) {
+                Some(v) => async_env = Some(v),
+                None => {
+                    eprintln!("--async-env 需要十六进制指针参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--async-wait-ms" => match next(&mut i).and_then(|s| s.parse().ok()) {
+                Some(v) => async_wait_ms = v,
+                None => {
+                    eprintln!("--async-wait-ms 需要数字参数");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1094,6 +1131,49 @@ fn cmd_inject(args: &[String]) -> ExitCode {
         }
         (None, None) => None,
     };
+    // K2-03 事件循环点载荷:--async-report + --async-mode + --async-env 成组。
+    let async_req = match (async_report, async_mode, async_env) {
+        (Some(p), Some(mode), Some(env)) => {
+            let abs = match to_absolute(&p) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("--async-report 路径无效: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Some(parent) = abs.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    eprintln!("async 报告目录创建失败 {}: {e}", parent.display());
+                    return ExitCode::FAILURE;
+                }
+            }
+            if env != 0 && mode == 0 {
+                eprintln!("[gate] --async-env 与 --async-mode 0 同时给出;mode 0 忽略 env(按干跑执行)");
+            }
+            if env == 0 && mode >= 1 {
+                eprintln!("[gate] mode 1/2 需要 --async-env(K2-02 扫描的候选地址)");
+                return ExitCode::from(2);
+            }
+            if env != 0 && mode >= 1 {
+                println!(
+                    "[gate] K2-03 mode {mode}:将在指定实例上对 env {env:#x} 投递 uv_async 载荷{}",
+                    if mode == 2 { "(含 JS 枚举)" } else { "" }
+                );
+            }
+            Some(winutil::AsyncRequest {
+                env,
+                mode,
+                report: abs,
+                wait_ms: async_wait_ms,
+            })
+        }
+        (Some(_), None, _) | (_, Some(_), None) | (_, None, Some(_))
+        | (None, Some(_), Some(_)) => {
+            eprintln!("--async-report/--async-mode/--async-env 必须成组出现");
+            return ExitCode::FAILURE;
+        }
+        (None, None, None) => None,
+    };
 
     // 门 1:manifest 摘要核对(计划 §5:版本与模块摘要确认 → 接入)。
     println!("[gate 1] 核对模块基线 …");
@@ -1132,6 +1212,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             register_entry,
             wait_ms,
             intr.as_ref(),
+            async_req.as_ref(),
         )
     };
     match outcome {
@@ -1318,6 +1399,33 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                     }
                     Err(e) => {
                         eprintln!("intr 报告读取失败 {}: {e}", req.report.display());
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            // K2-03 async 结果(JSONL 阶段报告)。
+            if let (Some(req), Some(code)) = (async_req.as_ref(), o.async_exit_code) {
+                println!(
+                    "[async] caligo_async_run:exit_code={} ({})",
+                    code,
+                    match code {
+                        0 => "OK(流程完成,触发与否见报告)",
+                        1 => "ERR_NULL_PATH",
+                        2 => "ERR_BAD_PATH",
+                        3 => "ERR_ENV_INVALID(布局链断裂,拒绝继续)",
+                        4 => "ERR_BAD_MODE",
+                        5 => "ERR_UV(loop 不活/init 失败)",
+                        6 => "ERR_NO_CAPTURE(中断点未捕获 entered 上下文)",
+                        _ => "UNKNOWN",
+                    }
+                );
+                match std::fs::read_to_string(&req.report) {
+                    Ok(content) => {
+                        println!("=== async report ({}) ===", req.report.display());
+                        println!("{content}");
+                    }
+                    Err(e) => {
+                        eprintln!("async 报告读取失败 {}: {e}", req.report.display());
                         return ExitCode::FAILURE;
                     }
                 }
