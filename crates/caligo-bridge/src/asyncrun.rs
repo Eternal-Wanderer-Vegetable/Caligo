@@ -43,6 +43,8 @@ pub mod async_code {
 pub const SCRIPT_FINGERPRINT: u32 = 0;
 pub const SCRIPT_LOAD_PROBE: u32 = 1;
 pub const SCRIPT_LOAD_HARVEST: u32 = 2;
+pub const SCRIPT_GLOBAL_INTROSPECT: u32 = 3;
+pub const SCRIPT_MAINMODULE_PROBE: u32 = 4;
 
 /// mode 2 的枚举脚本:只读(不调用任何 QQ 函数)、自包含、异常全捕获。
 /// 第二版:除顶层键外,另取 load 的类型/源码指纹、process.versions、
@@ -56,6 +58,14 @@ pub const LOAD_PROBE_SCRIPT: &str = "(function(){try{var m=process._linkedBindin
 /// K2-04 v4 探针:错误收割(load 各位参喂错误类型,校验错误暴露签名)+
 /// 全量 globalThis 键表。不触发任何模块执行。
 pub const LOAD_HARVEST_SCRIPT: &str = "(function(){try{var m=process._linkedBinding('major');var o={ok:true};var probes=[['load(1)',function(){return m.load(1)}],['load(x)',function(){return m.load('x')}],['load(x,y)',function(){return m.load('x','y')}],['load(x,y,z)',function(){return m.load('x','y','z')}]];o.harvest=[];for(var i=0;i<probes.length;i++){var e={name:probes[i][0]};try{var r=probes[i][1]();e.retType=typeof r;if(r&&typeof r==='object'){e.retKeys=Object.getOwnPropertyNames(r).slice(0,80)}}catch(err){e.err=String(err).slice(0,300)}o.harvest.push(e)}try{var g=Object.getOwnPropertyNames(globalThis);o.globalCount=g.length;o.globalKeys=g}catch(e){o.globalErr=String(e)}return JSON.stringify(o)}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
+
+/// K2-05 v5 探针:QQ 全局结构(键名+类型,不取值)+ launcher 二级展开 +
+/// globalThis/process 的 Symbol 键(服务容器常藏于 Symbol 键后)。
+pub const GLOBAL_INTROSPECT_SCRIPT: &str = "(function(){try{var o={ok:true};var names=['launcher','TIMES','TIMES_LABEL','loginWin','loginWindowPid','authData','statusData','qqLocked','startSequence','isFirstWinFromPool','multiInstancePort','isAppQuitting','quitAppDirectly','scWindowPid','isGlobalDark','shortCutDataMap','hiddenPoolWindowPid','localEmojiConfigUpdated'];o.targets={};function shape(v,depth){var t=typeof v;var e={type:t};try{if(v===null){e.type='null'}else if(t==='object'||t==='function'){e.keys=Object.getOwnPropertyNames(v).slice(0,120);if(t==='function'){e.fnArity=v.length}if(depth>0){e.children={};var ks=e.keys;for(var i=0;i<ks.length&&i<40;i++){var cv;try{cv=v[ks[i]]}catch(err){continue}var ct=typeof cv;if(ct==='object'&&cv!==null){e.children[ks[i]]={type:ct,keys:Object.getOwnPropertyNames(cv).slice(0,60)}}}}}}catch(err){e.err=String(err).slice(0,150)}return e}for(var i=0;i<names.length;i++){var n=names[i];try{o.targets[n]=shape(globalThis[n],n==='launcher'?1:0)}catch(err){o.targets[n]={err:String(err).slice(0,150)}}}try{var syms=Object.getOwnPropertySymbols(globalThis);o.globalSymbols=[];for(var j=0;j<syms.length;j++){var s={desc:syms[j].description||String(syms[j])};try{var sv=globalThis[syms[j]];s.type=typeof sv;if(sv&&typeof sv==='object'){s.keys=Object.getOwnPropertyNames(sv).slice(0,60)}}catch(err){}o.globalSymbols.push(s)}}catch(err){o.symbolErr=String(err)}try{var psyms=Object.getOwnPropertySymbols(process);o.processSymbols=[];for(var k=0;k<psyms.length;k++){o.processSymbols.push(psyms[k].description||String(psyms[k]))}}catch(err){}return JSON.stringify(o)}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
+
+/// K2-05 v6 探针:process.mainModule(CJS 主模块把手)+ process 自有键表 +
+/// require.cache 键名(模块清单)。仍纯读:不调用 require。
+pub const MAINMODULE_PROBE_SCRIPT: &str = "(function(){try{var o={ok:true};try{var mm=process.mainModule;o.mainModuleExists=mm!==undefined&&mm!==null;if(mm){o.mmKeys=Object.getOwnPropertyNames(mm).slice(0,80);o.mmFilename=String(mm.filename||'').slice(0,300);o.mmRequireType=typeof mm.require;o.mmExportsKeys=(mm.exports&&typeof mm.exports==='object')?Object.getOwnPropertyNames(mm.exports).slice(0,100):undefined;o.mmCtor=mm.constructor&&mm.constructor.name}}catch(e){o.mmErr=String(e).slice(0,200)}try{o.processKeys=Object.getOwnPropertyNames(process).slice(0,250)}catch(e){o.pErr=String(e)}try{if(process.mainModule&&process.mainModule.require){var cache=process.mainModule.require.cache;o.cacheCount=Object.keys(cache||{}).length;var ck=Object.getOwnPropertyNames(cache||{});o.cachePaths=ck.slice(0,150);o.cacheTotal=ck.length}}catch(e){o.cacheErr=String(e).slice(0,200)}return JSON.stringify(o)}catch(e){return JSON.stringify({ok:false,error:String(e)})}})()";
 
 /// 远程调用上下文(加载器写入,#[repr(C)]).
 #[repr(C)]
@@ -92,7 +102,8 @@ static CB_CTX_TAG: AtomicU64 = AtomicU64::new(0);
 static CAP_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /// mode 2 结果缓冲(回调写、远程线程读;回调发布 seq=2 后读方可见)。
-const RESULT_CAP: usize = 4096;
+/// 64 KiB:introspect 类探针(launcher 二级展开 + 符号键)输出可达数十 KB。
+const RESULT_CAP: usize = 64 * 1024;
 static mut RESULT_BUF: [u8; RESULT_CAP] = [0; RESULT_CAP];
 
 // --- QQNT 导出(mangled 名;经 obs::export_addr 裸读解析) ---
@@ -462,6 +473,8 @@ unsafe fn exec_enum_script(ex: &Exports, isolate: usize, ctx: usize, script: u32
     let src_str = match script {
         SCRIPT_LOAD_PROBE => LOAD_PROBE_SCRIPT,
         SCRIPT_LOAD_HARVEST => LOAD_HARVEST_SCRIPT,
+        SCRIPT_GLOBAL_INTROSPECT => GLOBAL_INTROSPECT_SCRIPT,
+        SCRIPT_MAINMODULE_PROBE => MAINMODULE_PROBE_SCRIPT,
         _ => ENUM_SCRIPT,
     };
     // String::NewFromUtf8(kNormal=0;sret 约定)。

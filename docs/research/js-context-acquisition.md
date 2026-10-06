@@ -290,6 +290,22 @@ R-A 的第 1-2 步完全离线/只读,是下一步的开工点。
 - `AsyncCtx.script` 字段 + `--async-script <n>`:0=指纹、1=load 探针、
   2=错误收割;探针脚本可复用扩展,每次新脚本仍按纪律先改设计记录。
 
+## 14. K2-05:QQ 全局 introspect 与服务容器定位(2026-10-06,当前有效)
+
+设计/运行记录:local-evidence/k2-05/。实例 9328 全程存活。
+
+- **authData 键名确认**(仅键名):account/mainAccount/uin/uid/nickName/a2/d2/d2key
+  ——账号票据字段位置确认;值永不入报告(test-scope 隐私纪律)。
+- `process.mainModule` = `app_launcher\index.js`(字节码入口,CJS,`.require`
+  可用);**`require.cache` = 0** ——major.load 的自定义加载器不走 CJS 缓存,
+  已加载模块实例(含服务容器)在闭包内,全局/缓存均不可见。
+- process 键表含 Electron 主进程扩展全套 → 主进程 env 再证。
+- **服务容器可达路径收敛**:① renderer 桥(最优候选)——`mainModule.require('electron')`
+  → `webContents.executeJavaScript` → 窗口 renderer 的 NT 服务桥内执行只读探针
+  (两道新门槛:模块获取 + 跨上下文执行,均需设计记录);② load() 加载模块(已判
+  非必要不走);③ wrapper C++ 层(F-1 已判死)。
+- mode 2 通道 + script 选择机制继续复用;探针输出缓冲已扩至 64 KiB。
+
 ## 3. 纪律与生命周期
 
 - `caligo_bridge` 注册**不可逆**(node_module_register 只有插入):随测试 QQ 进程退出回收;

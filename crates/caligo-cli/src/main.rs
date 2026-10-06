@@ -1004,9 +1004,9 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 }
             },
             "--async-script" => match next(&mut i).and_then(|s| s.parse::<u32>().ok()) {
-                Some(v @ 0..=2) => async_script = v,
+                Some(v @ 0..=4) => async_script = v,
                 _ => {
-                    eprintln!("--async-script 需要 0(指纹)/1(load 探针)/2(错误收割)");
+                    eprintln!("--async-script 需要 0-4(指纹/load探针/收割/全局introspect/mainModule)");
                     return ExitCode::FAILURE;
                 }
             },
