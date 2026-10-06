@@ -171,6 +171,25 @@ fn page_readable(addr: usize) -> bool {
     })
 }
 
+/// 查询地址所在页的 (State, Protect),供诊断 note 使用;查询失败返回 None。
+fn page_state(addr: usize) -> Option<(u32, u32)> {
+    // SAFETY: VirtualQuery 无锁查询,同 page_readable。
+    unsafe {
+        let mut mbi: windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION =
+            std::mem::zeroed();
+        let n = windows_sys::Win32::System::Memory::VirtualQuery(
+            addr as *const core::ffi::c_void,
+            &mut mbi,
+            std::mem::size_of::<windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION>(),
+        );
+        if n == 0 {
+            None
+        } else {
+            Some((mbi.State, mbi.Protect))
+        }
+    }
+}
+
 /// 带页校验的区间读:覆盖 [p, p+len) 的每一页,任一页不可读即失败(不触发 AV)。
 ///
 /// # Safety
@@ -672,6 +691,33 @@ unsafe fn probe_dispatch_slots(
     if wrapper_base == 0 {
         notes.push("wrapper base not provided (loader-side lookup failed)".to_string());
         return out;
+    }
+    // 诊断 v3.1:活进程 PE 头核对 + 槽位页属性,定位"文件态 RVA 合法但运行时未提交"的矛盾。
+    // SAFETY: 均为裸读(页校验在 rd_* 内)。
+    unsafe {
+        match rd_u32(wrapper_base + 0x3C) {
+            Some(elf) => notes.push(format!("wrapper live e_lfanew={elf:#x}")),
+            None => notes.push("wrapper live DOS header unreadable".to_string()),
+        }
+        notes.push(format!(
+            "wrapper live SizeOfImage={:#x} (file expects 0x7419000)",
+            read_image_size(wrapper_base)
+        ));
+        match page_state(wrapper_base + 0x4910_0088) {
+            Some((state, protect)) => {
+                notes.push(format!("slot page state={state:#x} protect={protect:#x}"))
+            }
+            None => notes.push("slot page VirtualQuery failed".to_string()),
+        }
+        // 活代码核对:0x3E8AA 处应为 48 85 D2(test rdx,rdx;与文件一致)。
+        let mut code = [0u8; 8];
+        if checked_read(wrapper_base + 0x3E8AA, code.as_mut_ptr(), 8) {
+            notes.push(format!(
+                "live code@0x3E8AA={code:02X?} (file: [48,85,D2,49,89,D0,31,D2])"
+            ));
+        } else {
+            notes.push("live code@0x3E8AA unreadable".to_string());
+        }
     }
     for slot_rva in DISPATCH_SLOT_RVAS {
         let live = match rd_usize(wrapper_base + slot_rva as usize) {
