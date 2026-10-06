@@ -33,9 +33,21 @@
   (local-evidence/k1-live/exp-k1-01b-repeat-report.json)。
 - 遗留:probe 报告不含账号信息(入口契约未闭合,见 §EXP-K1-02);QQNT.dll 在快照中(它必然在),bridge 对 QQNT 导出的调用尚未发生。
 
-### EXP-K1-02 账号可见性(仅观测)— 未执行
+### EXP-K1-02 账号可见性(仅观测)— **已执行,2026-10-06,注册面观测完成**
 
-- 依赖:`qq_magic_napi_register` 语义确认与 JS 绑定枚举(native-entry-contract §4.2);probe 当前不含任何 Node 运行时调用。
+- 前置:执行者手动启动 QQ 并登录(本轮候选 49148/38472,指定 49148,记入指定表);manifest PASS;双门控注入。
+- 操作:`inject --obs-report`(新增 `caligo_obs_run`:定位 node_module 链表头 → 只读遍历,不调用任何 QQ/Node 函数)。
+- 实际结果(完整报告:local-evidence/k1-02-pid49148-obs.json):
+  - 链表头运行时推导 RVA `0x0C7092F0` 与离线静态解码**完全一致**(get_linked_module_rva 0x1C911B0、qq_magic_napi_register_rva 0x1C8B450 同样一致);image_size 218705920 与 K0 观察一致;
+  - 遍历 46 个节点,无环、无 cap、无 note;
+  - **`major` 以 linked binding 形态注册**(name="major",flags=2 NM_F_LINKED,version=-1)——即主进程 JS 可经 `process._linkedBinding('major')` 取得其导出面;节点 filename 暴露腾讯构建路径 `E:\data\landun\workspace\rx64\v8-bytecode-unified\node\electron_loader.cpp`(蓝盾 CI;v8-bytecode-unified 印证 JS 字节码化);
+  - `QQNT` 自身亦为 linked binding(version=-1);其余 44 个节点全部是 Electron 内置绑定(electron_browser_*/electron_common_*,Node ABI version 143 = Electron 40);
+  - wrapper.node / qq-proton.node / initIpc_x64.node **不在** linked 列表(已加载但走 per-Environment DLOpen 注册路径)——主进程进程级内置面 = QQNT + major + Electron。
+  - liveness:注入后 PID 49148 Responding=True。
+- 结论与边界:
+  - **A1 入口门找到**:`process._linkedBinding('major')` 是五类入口(账号/会话/接收/发送/结果)候选所在的确定位置;入口**名**仍未知,下一步对 major.node 的注册回调做静态字符串挖掘(离线、零风险)取得候选绑定名;
+  - 账号 uin 本身仍未观测(需要 JS 上下文执行或数据面观察,属下一阶段);
+  - 本实验全程只读,未调用任何 QQ/Node 代码。
 
 ### EXP-K1-03 退出/重登/失效 — 未执行
 
@@ -56,13 +68,11 @@
 
 ## 3. 台账小结(对计划"你现在的第一轮执行清单"第 6 条的回应)
 
-- **G1 通过?部分——不宣称通过。** 加载链已实现"源码可重建 + 真实实例加载 + 握手"(EXP-K1-01,2026-10-06:
-  干跑验证 → 指定 QQ 实例 PID 27992 注入成功,QQ 存活无异常);但 G1 的"重复获得真实账号与有效会话"
-  无实测证据,五类入口契约(native-entry-contract §3)仍无一闭合。
-- **已补的证据**:EXP-K1-01 全部(含注入器干跑、manifest 门、握手、liveness)。
-- **缺的证据**:EXP-K1-02(账号可见性,依赖 E-1 `qq_magic_napi_register` 语义确认)、EXP-K1-03(退出/重登/失效)、
-  EXP-K1-04 收尾核对(待实例正常退出)。
-- **A1→A2 判定?不触发。** 静态证据表明入口大概率在 Node 运行时层内(E-1/E-2),尚不构成
-  "消息订阅/发送入口缺失"的结论;需先完成 EXP-K1-02 的观测实验。
-- **不执行的动作**:不盲目试偏移、不升级 QQ 版本、不对未指定实例做任何写实验;EXP-K1-01 的 probe
-  为只读(无钩挂、无 QQNT 调用),符合"加载+握手+无副作用观察"的 K1 第 5 条边界。
+- **G1 通过?不宣称。** 加载链(EXP-K1-01)与运行时注册面(EXP-K1-02)均已实测;G1 的
+  "重复获得真实账号与有效会话"仍缺账号级证据。
+- **已补的证据**:EXP-K1-01(加载/握手/重复性/liveness)、EXP-K1-04(收尾/无残留)、
+  EXP-K1-02(注册面:major = linked binding 实证,链表头三方交叉验证一致)。
+- **缺的证据**:major 的绑定函数名清单(下一步:major.node 注册回调静态字符串挖掘,离线零风险)、
+  每个 §6.1 契约字段、账号 uin 观测(需 JS 上下文)。
+- **A1→A2 判定?不触发。** major 入口门已实证存在,五类入口候选位置确定;A1 仍是主路线。
+- **不执行的动作**:不调用任何 major 绑定函数;不在 JS 上下文做任何写实验;不试偏移、不升版本。

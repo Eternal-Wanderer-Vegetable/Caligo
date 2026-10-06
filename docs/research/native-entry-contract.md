@@ -41,14 +41,14 @@
   - 错误行为/版本拒绝:未知 [assumed]。
 - **未知项**:`qq_magic_napi_register` 签名与语义;从外部加载的 DLL 获取有效 `napi_env` 的途径;AddLinkedBinding 在启动完成后是否仍可安全调用。
 
-### E-2 业务 JS 模块(major.node)
+### E-2 业务 JS 模块(major.node)— **2026-10-06 EXP-K1-02 实测更新**
 
-- **职责** [inferred]:核心业务(账号、会话、消息)所在的 JS 原生模块;与公开资料(S13)描述一致,但**职责本身尚需实测确认**。
-- **关键静态事实** [verified]:**PE 导出表为空**(0 named / 0 total)。
-- **§6.1 契约字段**:
-  - 账号状态/会话取得/消息订阅/发送/结果五类入口:**静态不可见** [verified-by-absence]。注册只能发生在运行时(经 E-1 的 `qq_magic_napi_register` 或 node_module 构造链) [assumed];
-  - 其余字段全部未知 [assumed]。
-- **结论**:A1 的五个入口契约在 E-2 上**无一可静态闭合**;必须通过运行时观察(JS 内省、napi 注册拦截、或 E-1 实验通道)取得候选名,再回填本契约。
+- **注册形态 [verified]**:以 linked binding 注册进 node_module 进程级链表——name=**"major"**,flags=2(NM_F_LINKED),version=-1(NODE_MODULE_VERSION 语义的 -1,即 context-aware 注册);其余 44 个链表节点全部为 Electron 内置绑定(version=143)与 `QQNT`。
+- **JS 获取路径 [inferred]**:主进程 JS 经 `process._linkedBinding('major')` 取得其导出面(Node/Electron 对 NM_F_LINKED 模块的标准访问通道;`get_linked_module("major")` 可命中已实证)。
+- **构建溯源 [verified]**:链表节点 filename 字段暴露 `E:\data\landun\workspace\rx64\v8-bytecode-unified\node\electron_loader.cpp` —— major 由腾讯蓝盾 CI 构建,内置进 Electron loader 流程(v8-bytecode-unified 与 package.json `isByteCodeShell:true` 相互印证)。
+- **wrapper/qq-proton/initIpc 的差异 [verified]**:三者已加载但**不在** linked 链表 → 走 per-Environment DLOpen 注册,进程级内置面只有 QQNT + major + Electron。
+- **五类入口名仍未知 [assumed→待静态挖掘]**:入口名是 major 注册回调运行时写入导出对象的属性;下一步对 major.node 二进制做注册回调的静态字符串挖掘(离线、零风险)取得候选名单,再逐个填 §6.1 契约。
+- **证据**:local-evidence/k1-02-pid49148-obs.json(运行时观测)、k1-02-static-get-linked-module.txt / k1-02-static-qq-magic-napi-register.txt(静态解码,链表头 RVA 0x0C7092F0 与运行时推导一致)。
 
 ### E-3 会话壳 C++ 导出(wrapper.node)
 
@@ -79,19 +79,26 @@
 
 | 计划要求的入口 | 当前候选 | 状态 |
 |---|---|---|
-| 账号状态 | E-2(JS 绑定,名字未知)/ E-1 qq_magic_napi_register | 候选未验证 |
-| 会话取得 | E-3 INTSessionShell(C++ ABI,未确认)/ E-2 | 候选未验证 |
-| 消息订阅 | E-2 / E-4 | 候选未验证 |
-| 发送 | E-2 / E-3 | 候选未验证;E-3 被 ABI 警戒阻断 |
-| 发送结果关联 | 无候选 | 空缺 |
+| 账号状态 | `major` linked binding 内的绑定函数(名字待静态挖掘) | 位置已实证,候选名未取得 |
+| 会话取得 | 同上(E-3 C++ 路线降级为备选) | 位置已实证,候选名未取得 |
+| 消息订阅 | 同上(E-4 转为 A2 线索) | 位置已实证,候选名未取得 |
+| 发送 | 同上 | 位置已实证,候选名未取得 |
+| 发送结果关联 | 同上 | 空缺 |
 
-**A1 关卡判定(G1)**:不通过 —— 五类入口契约无一实测闭合。缺的不是"能不能加载"(加载机制已就绪,见 loading-route-decision),而是"加载后调用什么"。下一步是运行时观察实验,不是写发送代码。
+**A1 关卡判定(G1)**:仍不通过,但已从"入口在哪都不知道"推进到"入口门已实证定位":
+五类入口大概率全部位于 `process._linkedBinding('major')` 暴露的导出面之后。剩余缺口 = 绑定函数名清单 +
+每个函数的 §6.1 契约字段。**仍不得调用任何 major 绑定函数**(ABI/线程/生命周期未闭合)。
 
 ## 4. 下一步实测计划(回填本契约的唯一途径)
 
-1. 在指定测试实例上加载 K1 probe(只读),验证加载链与握手(补齐 §2 E-1 的线程/生命周期字段);
-2. 观测实验:在 probe 内经 E-1 导出(优先尝试 `qq_magic_napi_register` 语义确认;不行则 `napi_*` 环境探测)取得 JS 运行时可见面,枚举 major.node 已注册的绑定名 —— 只枚举,不调用;
-3. 以枚举结果回填 §3 表格,再逐个填 §6.1 契约;ABI/线程/生命周期闭合前不触碰发送。
+1. ~~加载链与握手验证~~ → 已完成(EXP-K1-01,2026-10-06);
+2. ~~运行时注册面观测~~ → 已完成(EXP-K1-02:major = linked binding 实证);
+3. **当前步**:对 major.node 的注册回调(`electron_loader.cpp` 编译产物)做静态字符串挖掘——
+   napi 属性名(constraint: napi_property_descriptor 的 utf8name 字符串常量在 .rdata)离线可枚举,
+   产出五类入口的候选名清单;配合对候选名做 xref(引用它们的代码段)可粗分账号/会话/消息类别;
+4. 候选名取得后,逐个填 §6.1 契约(参数/返回/线程/生命周期);
+5. ABI/线程/生命周期闭合前不触碰发送;进入真实调用前先在 K2 设计中明确"如何取得 JS 上下文"
+   (候选:自有 context-aware linked binding 注册,等待新 Environment 创建时被回调)。
 
 ## 5. 公开资料线索登记(S13,全部未验证)
 
