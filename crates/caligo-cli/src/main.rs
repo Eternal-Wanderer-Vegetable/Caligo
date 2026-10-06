@@ -10,6 +10,7 @@
 //!
 //! 退出码:0 成功;1 用法/IO 错误;2 校验不通过(拒绝)。
 
+mod disasm;
 mod pe;
 mod winutil;
 
@@ -28,6 +29,7 @@ caligo-cli <K1 probe>
   caligo-cli process
   caligo-cli exports <module-path> [--all]
   caligo-cli bytes <module-path> <rva-hex | export=NAME> [--len <n>]
+  caligo-cli disasm <module-path> <rva-hex | export=NAME> [--len <n>]
   caligo-cli inject --pid <n> --bridge <bridge.dll> --manifest <manifest.json>
                     --report <report.json> --confirm-designated-test-instance
                     [--obs-report <obs.json>] [--env-report <env.jsonl>]
@@ -62,6 +64,7 @@ fn main() -> ExitCode {
         },
         Some("exports") => cmd_exports(&args[1..]),
         Some("bytes") => cmd_bytes(&args[1..]),
+        Some("disasm") => cmd_disasm(&args[1..]),
         Some("identifiers") => cmd_identifiers(&args[1..]),
         Some("inject") => cmd_inject(&args[1..]),
         _ => {
@@ -543,6 +546,90 @@ fn u32_at(b: &[u8], off: usize) -> Option<u32> {
 fn u16_at(b: &[u8], off: usize) -> Option<u16> {
     b.get(off..off + 2)
         .map(|s| u16::from_le_bytes([s[0], s[1]]))
+}
+
+/// 离线静态分析:反汇编模块内指定 RVA 或导出函数的代码(iced-x86,只读文件)。
+fn cmd_disasm(args: &[String]) -> ExitCode {
+    let mut module: Option<&str> = None;
+    let mut target: Option<&str> = None;
+    let mut len: usize = 160;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--len" => {
+                i += 1;
+                match args.get(i).and_then(|s| s.parse().ok()) {
+                    Some(v) => len = v,
+                    None => {
+                        eprintln!("--len 需要数字参数");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            other if module.is_none() => module = Some(other),
+            other if target.is_none() => target = Some(other),
+            other => {
+                eprintln!("多余参数: {other}\n{USAGE}");
+                return ExitCode::FAILURE;
+            }
+        }
+        i += 1;
+    }
+    let (Some(module), Some(target)) = (module, target) else {
+        eprintln!("{USAGE}");
+        return ExitCode::FAILURE;
+    };
+    let bytes = match std::fs::read(module) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("read {module}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let rva: u32 = if let Some(name) = target.strip_prefix("export=") {
+        match pe::parse_export_table(&bytes) {
+            Ok(table) => match table.exports.iter().find(|e| e.name == name) {
+                Some(e) => e.function_rva,
+                None => {
+                    eprintln!("导出 {name} 未找到于 {module}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            Err(e) => {
+                eprintln!("解析导出表: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else if let Some(hex) = target.strip_prefix("0x").or(target.strip_prefix("0X")) {
+        match u32::from_str_radix(hex, 16) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("RVA 解析失败: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        eprintln!("目标须为 rva-hex 或 export=NAME");
+        return ExitCode::FAILURE;
+    };
+    let offset = match pe::rva_to_file_offset(&bytes, rva) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("file: {module}  rva: {rva:#010x}  len: {len}");
+    match disasm::disasm_at(&bytes, offset, rva, len) {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("disasm: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn cmd_inject(args: &[String]) -> ExitCode {

@@ -13,6 +13,7 @@
 | S3 | [Microsoft PE Format 文档](https://learn.microsoft.com/windows/win32/debug/pe-format) | 官方文档 | 抓取时间 2026-10-06 | 2026-10-06 | reference | caligo-cli 的 PE 导出表解析实现依据 |
 | S4 | Rust 标准库 / cargo / rustup 文档(随工具链 1.97.1 发行) | 工具链文档 | rustc 1.97.1 (8bab26f4f) | 2026-10-06 | reference | 工程基础 |
 | S5 | windows-sys crate([microsoft/windows-rs](https://github.com/microsoft/windows-rs)) | 公开 Rust 依赖 | Cargo.lock 锁定(见仓库根 Cargo.lock) | 2026-10-06 采用 | adopted | caligo-cli 进程/模块枚举与(受门控的)加载器 Win32 调用 |
+| S15 | iced-x86 crate([icedland/iced](https://github.com/icedland/iced),Apache-2.0) | 公开 Rust 依赖 | 1.21.0,Cargo.lock 锁定 | 2026-10-06 采用 | adopted | caligo-cli `disasm` 子命令,F-1 路线的 x64 离线反汇编 |
 | S6 | sha2 crate([RustCrypto/hashes](https://github.com/RustCrypto/hashes)) | 公开 Rust 依赖 | Cargo.lock 锁定 | 2026-10-06 采用 | adopted | caligo-cli 模块指纹(SHA-256) |
 | S7 | serde / serde_json crate([serde-rs](https://github.com/serde-rs)) | 公开 Rust 依赖 | Cargo.lock 锁定 | 2026-10-06 采用 | adopted | version-adapter-manifest.json 读取与 probe 报告输出 |
 | S8 | Stella 归档研究报告 `2026-10-06-snowluma-rust-native-reimplementation-research.md`(归档仓库 HEAD eb5a135b) | 内部研究报告 | 归档仓库 HEAD eb5a135b890fd7876ca1f15b9eab03fe881f6cf0 | 2026-10-06 | reference | 只作背景与范围台账;不是实现输入,不提供 Caligo 代码 pin |

@@ -63,18 +63,27 @@
   本轮所有证据均为静态字符串/结构证据,未调用任何服务。
 - **证据**:local-evidence/k1-02-pid49148-obs.json(运行时观测)、k1-02-static-get-linked-module.txt / k1-02-static-qq-magic-napi-register.txt(静态解码,链表头 RVA 0x0C7092F0 与运行时推导一致)。
 
-### E-3 会话壳 C++ 导出(wrapper.node)
+### E-3 会话壳 C++ 导出(wrapper.node)— **2026-10-06 F-1 首轮解码更新**
 
-- **职责** [inferred]:NT 会话壳/业务包装层,与渲染层桥接。
-- **可静态确认的导出** [verified](66 个):
-  - `wrapper::nt::INTSessionShell` / `wrapper::nt::IGProSessionShell` 类:构造、析构、vtable;
-  - 静态工厂 `CreateNTSessionShell(const __qq::std::string&) -> __qq::std::shared_ptr<nt::ntc::INTCSessionShellBase>`;
-  - OpenCV `cv::Mat` 部分方法;llhttp_* 全套 HTTP 解析器。
-- **§6.1 契约字段**:
-  - **ABI 警戒** [verified]:导出签名使用腾讯自建 STL 命名空间 `__qq::std`(如 `__qq::std::shared_ptr`、`__qq::std::basic_string`),不是 MSVC 标准 STL 布局;任何跨语言调用都要先确认其 string/shared_ptr 的内存布局与构造方式 [assumed];
-  - 对象拥有者/有效期:未知 [assumed];
-  - 调用线程:未知 [assumed]。
-- **结论**:ABI 与对象生命周期未确认 → 按计划纪律**不得**进入发送调用。仅登记为候选。
+- **调用约定 [verified]**:MSVC x64;返回 `__qq::std::shared_ptr` 的函数使用隐藏返回槽
+  (`rcx`=sret,实际首参顺移至 `rdx`),实证于 CreateNTSessionShell(失败路径向 sret 写 16 字节零 =
+  空 shared_ptr)。
+- **`__qq::std::shared_ptr` 布局 [verified]**:`{T* ptr@0, control*@8}`;引用计数位于 `control+0x10`,
+  原子递增(`lock inc dword [rax+10h]`)。定制 STL 但 shared_ptr 与主流布局同构。
+- **会话对象布局 [verified]**:构造函数将 `{vtable@0, field8@8=0, field10@0x10=0}` 写入对象
+  (0x18 字节对象);**vtable @ RVA 0x3EBEA48**。
+- **vtable/接口表内容 [verified,语义未定]**:0x3EBEA48 处 4 个函数指针
+  (RVA 0x44078 / 0x1FD70 / 0x63EC0 / 0x4409E,前两者与构造器 0x43FAC 相邻,疑似 dtor 对),
+  后接自引用 RVA 元数据块;+0x90 处存在第二组 4 方法表(0x44998 / 0x449BE / 0x63EC0 / 0x49D2)。
+  结构形态像 QQ 自定义接口描述符,不是裸 C++ vtable —— 完整语义待解码。
+- **构造链 [verified]**:CreateNTSessionShell(0x275FA)→ 内层工厂 0x27773 → 实际构造 0x43F02
+  → 对象构造 0x43FAC;全链静态可达。
+- **仍未知 [assumed]**:`__qq::std::string` 精确布局(SSO 判定位未定);各 vtable 方法签名;
+  对象生命周期归属(谁释放、线程要求)。
+- **工具**:caligo-cli `disasm` 子命令(iced-x86,Apache-2.0,已登记 source-register)。
+  证据:local-evidence/f1-*.txt。
+- **结论**:E-3 从"候选"升级为"部分契约"——调用约定与对象布局已实证;string 布局与方法签名
+  是进入调用实验前的最后两块拼图。
 
 ### E-4 跨进程 IPC 模块(ipc.node)
 
