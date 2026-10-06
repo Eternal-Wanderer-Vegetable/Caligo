@@ -87,7 +87,17 @@
 - **string 布局 [inferred-strong]**:成员初始化模式(16 字节清零 + 单字节 0,24 字节跨度,如 +0x98 处)
   与 libc++ 短形态空串吻合(byte0=size<<1,内联缓冲 +1);`__qq::std` 疑为运行时 libc++(`__Cr::std`)
   的同源分支。**SSO 判定位尚需一条 data()/append 模式的直接实证**。
-- **仍未知 [assumed]**:各方法槽的签名(参数/sret/string 位);字符串成员在壳对象内的确切偏移。
+- **方法签名(F-1 三轮,2026-10-06)[verified]**:
+  - 表1:槽0 = 转发器(`jmp 0x28384(rdx,0)`);槽8 = 业务方法(操作 `this->member8`,经 0x56C3E/0x168CE 链,
+    尾调 0x3FAA 释放);0x3BECC = 4 参大方法(this,rdx,r8,r9,栈帧 0x98);0x3C0C4 = check-then-act
+    (3 参,先 `0x57046(member8,r8)→bool`);**0x3C110 = `string method(this)` —— rdx 为 24 字节 string 的
+    sret,初始化为 24 字节全零 → libc++ 短空串的直接实证(SSO 布局确认)**;
+  - 表2(五个方法)全部是**运行时绑定转发器**:`jmp qword ptr [0x4910088/0xA8/0xB8/0xC0]` 穿过 .data
+    间接槽,空指针守卫后操作 `this->member8`;
+  - **架构结论 [verified]**:wrapper.node 的会话壳接口是转发壳,真实实现指针由 QQ 内核在运行时注册——
+    静态文件态无法继续追踪调用目标(槽位文件值指向数据区),**round-4 需活进程 obs 读实时指针**。
+- **SSO 布局 [verified→闭合]**:0x3C110 的 24 字节零初始化 + 0x29252 中 24 字节成员的短形态初始化模式,
+  确认 `__qq::std::string` = libc++ 同源 24 字节布局(byte0=size<<1 短形态,长形态 {cap|1@0, size@8, data*@0x10})。
 - **工具**:caligo-cli `disasm` 子命令(iced-x86,Apache-2.0,已登记 source-register)。
   证据:local-evidence/f1-*.txt(全部本轮 dump)。
 - **结论**:E-3 从"候选"升级为"部分契约"——调用约定、对象布局、接口方法表全部实证;
