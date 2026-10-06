@@ -76,8 +76,8 @@ impl FrameDecoder {
             if magic != FRAME_MAGIC {
                 return Err(FrameError::MagicMismatch(magic));
             }
-            let len = u32::from_le_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]])
-                as usize;
+            let len =
+                u32::from_le_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]]) as usize;
             if len > MAX_FRAME_SIZE {
                 return Err(FrameError::FrameTooLarge(len));
             }

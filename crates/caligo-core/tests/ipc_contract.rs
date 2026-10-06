@@ -4,8 +4,8 @@
 //! K4 加入队列满、迟到回执、core 崩溃重连等场景)。
 
 use caligo_core::ipc::{
-    encode_frame, validate_hello, FrameDecoder, FrameError, HandshakeExpectation, Hello,
-    HelloAck, MAX_FRAME_SIZE, PROTOCOL_VERSION,
+    encode_frame, validate_hello, FrameDecoder, FrameError, HandshakeExpectation, Hello, HelloAck,
+    MAX_FRAME_SIZE, PROTOCOL_VERSION,
 };
 use caligo_core::CORE_BUILD;
 
@@ -41,14 +41,14 @@ fn frame_roundtrip_preserves_payload() {
 #[test]
 fn half_frame_is_buffered_until_rest_arrives() {
     // T12 场景(半帧):先给一半,不应产出也不应报错;补齐后应产出完整帧。
-    let frame = encode_frame(&vec![0xABu8; 64]).unwrap();
+    let frame = encode_frame(&[0xABu8; 64]).unwrap();
     let split = 5; // 落在帧头中间
     let mut dec = FrameDecoder::new();
     let mut out = Vec::new();
     dec.push(&frame[..split], &mut out).unwrap();
     assert!(out.is_empty());
     dec.push(&frame[split..], &mut out).unwrap();
-    assert_eq!(out, vec![vec![0xABu8; 64]]);
+    assert_eq!(out, [vec![0xABu8; 64]]);
 }
 
 #[test]

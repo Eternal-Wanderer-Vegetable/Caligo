@@ -131,8 +131,7 @@ fn sha256_file(path: &Path) -> Result<(String, u64), String> {
 
 /// 核对 manifest;返回 true 表示全部 hash_checked 模块匹配。
 fn verify_manifest(path: &Path) -> Result<bool, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let manifest: Manifest =
         serde_json::from_str(&raw).map_err(|e| format!("parse manifest: {e}"))?;
     println!("baseline_id: {}", manifest.baseline_id);
@@ -168,10 +167,7 @@ fn verify_manifest(path: &Path) -> Result<bool, String> {
                     println!("         actual   sha256 {hex}");
                 }
                 if !size_ok {
-                    println!(
-                        "         expected size {} actual size {size}",
-                        m.size_bytes
-                    );
+                    println!("         expected size {} actual size {size}", m.size_bytes);
                 }
                 all_ok &= hash_ok && size_ok;
             }
@@ -200,7 +196,12 @@ fn cmd_process() -> Result<(), String> {
     }
     println!("QQ 进程数: {}", procs.len());
     for p in &procs {
-        println!("PID={} path={} started={}", p.pid, p.exe_path, p.started_utc.as_deref().unwrap_or("?"));
+        println!(
+            "PID={} path={} started={}",
+            p.pid,
+            p.exe_path,
+            p.started_utc.as_deref().unwrap_or("?")
+        );
         let mut shown = 0;
         for m in &p.modules {
             let lower = m.to_ascii_lowercase();
@@ -250,8 +251,11 @@ fn cmd_exports(args: &[String]) -> ExitCode {
             );
             let interesting = |name: &str| {
                 let l = name.to_ascii_lowercase();
-                l.contains("napi") || l.contains("node_") || l.contains("nodeget")
-                    || l.contains("registermodule") || l.starts_with("caligo")
+                l.contains("napi")
+                    || l.contains("node_")
+                    || l.contains("nodeget")
+                    || l.contains("registermodule")
+                    || l.starts_with("caligo")
             };
             let filtered: Vec<_> = table
                 .exports
@@ -280,6 +284,15 @@ fn cmd_exports(args: &[String]) -> ExitCode {
             eprintln!("parse export table: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn to_absolute(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        let cwd = std::env::current_dir().map_err(|e| format!("current_dir: {e}"))?;
+        Ok(cwd.join(path))
     }
 }
 
@@ -342,12 +355,34 @@ fn cmd_inject(args: &[String]) -> ExitCode {
         i += 1;
     }
 
-    let (Some(pid), Some(bridge), Some(manifest), Some(report)) =
-        (pid, bridge, manifest, report)
+    let (Some(pid), Some(bridge), Some(manifest), Some(report)) = (pid, bridge, manifest, report)
     else {
         eprintln!("inject 需要 --pid/--bridge/--manifest/--report\n{USAGE}");
         return ExitCode::FAILURE;
     };
+
+    // 路径必须绝对化:相对路径会在目标进程的工作目录下解析(LoadLibraryW 与
+    // bridge 内的 std::fs::write 都按目标进程 CWD 解释),导致加载失败或写错位置。
+    let bridge = match to_absolute(&bridge) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("--bridge 路径无效: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let report = match to_absolute(&report) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("--report 路径无效: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Some(parent) = report.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!("报告目录创建失败 {}: {e}", parent.display());
+            return ExitCode::FAILURE;
+        }
+    }
 
     // 门 1:manifest 摘要核对(计划 §5:版本与模块摘要确认 → 接入)。
     println!("[gate 1] 核对模块基线 …");
@@ -427,9 +462,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
         }
         Err(e) => {
             eprintln!("[inject] 失败:{e}");
-            eprintln!(
-                "恢复:以正常退出该测试 QQ 实例收尾(docs/research/recovery-notes.md §2)。"
-            );
+            eprintln!("恢复:以正常退出该测试 QQ 实例收尾(docs/research/recovery-notes.md §2)。");
             ExitCode::FAILURE
         }
     }

@@ -107,8 +107,13 @@ pub fn list_processes(image_name: &str) -> Result<Vec<ProcessInfo>, String> {
                 let mut exit_t: FILETIME = std::mem::zeroed();
                 let mut kernel_t: FILETIME = std::mem::zeroed();
                 let mut user_t: FILETIME = std::mem::zeroed();
-                if GetProcessTimes(proc_h, &mut created, &mut exit_t, &mut kernel_t, &mut user_t)
-                    != 0
+                if GetProcessTimes(
+                    proc_h,
+                    &mut created,
+                    &mut exit_t,
+                    &mut kernel_t,
+                    &mut user_t,
+                ) != 0
                 {
                     started_utc = filetime_to_utc(&created);
                 }
@@ -148,52 +153,6 @@ pub struct InjectOutcome {
     pub probe_exit_code: u32,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn filetime_conversion_known_value() {
-        // 2026-01-01T00:00:00Z = 1_767_225_600 unix 秒。
-        // FILETIME 基准用硬编码正确值,避免与实现共用同一常量形成循环验证。
-        let raw: u64 = 134_116_992_000_000_000;
-        let ft = FILETIME {
-            dwLowDateTime: (raw & 0xFFFF_FFFF) as u32,
-            dwHighDateTime: (raw >> 32) as u32,
-        };
-        assert_eq!(filetime_to_utc(&ft).as_deref(), Some("2026-01-01T00:00:00Z"));
-    }
-
-    #[test]
-    fn own_process_creation_time_is_plausible() {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{
-            GetCurrentProcessId, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        };
-        unsafe {
-            let h = OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION,
-                0,
-                GetCurrentProcessId(),
-            );
-            assert!(!h.is_null(), "OpenProcess(self) failed");
-            let mut created: FILETIME = std::mem::zeroed();
-            let mut exit_t: FILETIME = std::mem::zeroed();
-            let mut kernel_t: FILETIME = std::mem::zeroed();
-            let mut user_t: FILETIME = std::mem::zeroed();
-            let ok = GetProcessTimes(h, &mut created, &mut exit_t, &mut kernel_t, &mut user_t);
-            CloseHandle(h);
-            assert_eq!(ok, 1, "GetProcessTimes(self) failed");
-            let started = filetime_to_utc(&created).expect("creation time parseable");
-            let year: i64 = started[0..4].parse().unwrap();
-            assert!(
-                (2024..=2036).contains(&year),
-                "implausible creation year {year} in {started}"
-            );
-        }
-    }
-}
-
 type RemoteThreadFn = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
 
 /// 把 bridge 装入指定进程并调用其 `caligo_probe_run`。
@@ -221,8 +180,7 @@ pub unsafe fn inject_and_probe(
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W,
-        TH32CS_SNAPMODULE,
+        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
     };
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows_sys::Win32::System::Memory::{
@@ -253,44 +211,37 @@ pub unsafe fn inject_and_probe(
             pid,
         );
         if proc_h.is_null() {
-            return Err(format!(
-                "OpenProcess: Win32 error {}",
-                GetLastError()
-            ));
+            return Err(format!("OpenProcess: Win32 error {}", GetLastError()));
         }
         let mut buf_bridge: Option<*mut core::ffi::c_void> = None;
         let mut buf_report: Option<*mut core::ffi::c_void> = None;
 
         let result = (|| -> Result<InjectOutcome, String> {
-            let alloc_and_write =
-                |bytes: &[u16], step: &str| -> Result<*mut core::ffi::c_void, String> {
-                    let size = bytes.len() * 2;
-                    let remote = VirtualAllocEx(
-                        proc_h,
-                        std::ptr::null(),
-                        size,
-                        MEM_COMMIT | MEM_RESERVE,
-                        PAGE_READWRITE,
-                    );
-                    if remote.is_null() {
-                        return Err(format!("{step}: Win32 error {}", GetLastError()));
-                    }
-                    let mut written: usize = 0;
-                    let ok = WriteProcessMemory(
-                        proc_h,
-                        remote,
-                        bytes.as_ptr().cast(),
-                        size,
-                        &mut written,
-                    );
-                    if ok == 0 || written != size {
-                        VirtualFreeEx(proc_h, remote, 0, MEM_RELEASE);
-                        return Err(format!(
-                            "{step}: WriteProcessMemory incomplete ({written}/{size})"
-                        ));
-                    }
-                    Ok(remote)
-                };
+            let alloc_and_write = |bytes: &[u16],
+                                   step: &str|
+             -> Result<*mut core::ffi::c_void, String> {
+                let size = bytes.len() * 2;
+                let remote = VirtualAllocEx(
+                    proc_h,
+                    std::ptr::null(),
+                    size,
+                    MEM_COMMIT | MEM_RESERVE,
+                    PAGE_READWRITE,
+                );
+                if remote.is_null() {
+                    return Err(format!("{step}: Win32 error {}", GetLastError()));
+                }
+                let mut written: usize = 0;
+                let ok =
+                    WriteProcessMemory(proc_h, remote, bytes.as_ptr().cast(), size, &mut written);
+                if ok == 0 || written != size {
+                    VirtualFreeEx(proc_h, remote, 0, MEM_RELEASE);
+                    return Err(format!(
+                        "{step}: WriteProcessMemory incomplete ({written}/{size})"
+                    ));
+                }
+                Ok(remote)
+            };
 
             let remote_bridge_path = alloc_and_write(&bridge_wide, "alloc bridge path")?;
             buf_bridge = Some(remote_bridge_path);
@@ -365,19 +316,17 @@ pub unsafe fn inject_and_probe(
             // 解析远程 PE 导出表,找 caligo_probe_run。
             let probe_addr = match read_remote_export(proc_h, remote_base, "caligo_probe_run") {
                 Ok(Some(a)) => a,
-                Ok(None) => {
-                    return Err("caligo_probe_run not found in remote export table".into())
-                }
+                Ok(None) => return Err("caligo_probe_run not found in remote export table".into()),
                 Err(e) => return Err(format!("remote export lookup: {e}")),
             };
 
             let remote_report_path = alloc_and_write(&report_wide, "alloc report path")?;
             buf_report = Some(remote_report_path);
 
-            let probe_fn: unsafe extern "system" fn(*const u16) -> u32 =
-                std::mem::transmute::<usize, unsafe extern "system" fn(*const u16) -> u32>(
-                    probe_addr,
-                );
+            let probe_fn: unsafe extern "system" fn(*const u16) -> u32 = std::mem::transmute::<
+                usize,
+                unsafe extern "system" fn(*const u16) -> u32,
+            >(probe_addr);
             let start_probe: RemoteThreadFn =
                 std::mem::transmute::<usize, RemoteThreadFn>(probe_fn as usize);
             let probe_thread = CreateRemoteThread(
@@ -395,10 +344,8 @@ pub unsafe fn inject_and_probe(
                     GetLastError()
                 ));
             }
-            let wait = WaitForSingleObject(
-                probe_thread,
-                if wait_ms > 0 { wait_ms } else { INFINITE },
-            );
+            let wait =
+                WaitForSingleObject(probe_thread, if wait_ms > 0 { wait_ms } else { INFINITE });
             let mut exit_code: u32 = u32::MAX;
             GetExitCodeThread(probe_thread, &mut exit_code);
             CloseHandle(probe_thread);
@@ -475,9 +422,11 @@ unsafe fn read_remote_export(
     if data_dir_offset + 8 > hdr.len() {
         return Err("remote header read too small for data directories".into());
     }
-    let export_rva =
-        u32::from_le_bytes(hdr[data_dir_offset..data_dir_offset + 4].try_into().unwrap())
-            as usize;
+    let export_rva = u32::from_le_bytes(
+        hdr[data_dir_offset..data_dir_offset + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
     let export_size = u32::from_le_bytes(
         hdr[data_dir_offset + 4..data_dir_offset + 8]
             .try_into()
@@ -499,11 +448,16 @@ unsafe fn read_remote_export(
         let va = u32::from_le_bytes(hdr[off + 12..off + 16].try_into().unwrap()) as usize;
         sections.push((va, va + vsize));
     }
-    let rva_in_image =
-        |rva: usize| sections.iter().any(|(start, end)| rva >= *start && rva < *end);
+    let rva_in_image = |rva: usize| {
+        sections
+            .iter()
+            .any(|(start, end)| rva >= *start && rva < *end)
+    };
 
     if !rva_in_image(export_rva) {
-        return Err(format!("export dir rva {export_rva:#x} outside mapped sections"));
+        return Err(format!(
+            "export dir rva {export_rva:#x} outside mapped sections"
+        ));
     }
 
     let dir_remote = base + export_rva;
@@ -540,4 +494,48 @@ unsafe fn read_remote_export(
         }
     }
     Ok(None)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filetime_conversion_known_value() {
+        // 2026-01-01T00:00:00Z = 1_767_225_600 unix 秒。
+        // FILETIME 基准用硬编码正确值,避免与实现共用同一常量形成循环验证。
+        let raw: u64 = 134_116_992_000_000_000;
+        let ft = FILETIME {
+            dwLowDateTime: (raw & 0xFFFF_FFFF) as u32,
+            dwHighDateTime: (raw >> 32) as u32,
+        };
+        assert_eq!(
+            filetime_to_utc(&ft).as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn own_process_creation_time_is_plausible() {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcessId, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, GetCurrentProcessId());
+            assert!(!h.is_null(), "OpenProcess(self) failed");
+            let mut created: FILETIME = std::mem::zeroed();
+            let mut exit_t: FILETIME = std::mem::zeroed();
+            let mut kernel_t: FILETIME = std::mem::zeroed();
+            let mut user_t: FILETIME = std::mem::zeroed();
+            let ok = GetProcessTimes(h, &mut created, &mut exit_t, &mut kernel_t, &mut user_t);
+            CloseHandle(h);
+            assert_eq!(ok, 1, "GetProcessTimes(self) failed");
+            let started = filetime_to_utc(&created).expect("creation time parseable");
+            let year: i64 = started[0..4].parse().unwrap();
+            assert!(
+                (2024..=2036).contains(&year),
+                "implausible creation year {year} in {started}"
+            );
+        }
+    }
 }

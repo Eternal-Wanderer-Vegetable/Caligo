@@ -11,7 +11,10 @@
 - bridge:`crates/caligo-bridge`(cdylib)。DllMain 最小化(不建线程、不等待);探测由 loader 显式触发;报告含协议版本/自身路径/PID/模块快照,作为"已加载、可握手"证据。
 - 门控(T01/T02 逻辑):manifest 摘要核对通过 + 执行者显式 `--confirm-designated-test-instance`,两者缺一不可;实现于 `caligo-cli` 的 inject 命令。
 
-**状态:机制已构建并通过单元测试;注入序列未经真实验证(K1 实测待执行者按 test-scope 指定实例后进行)。**
+**状态:已验证(2026-10-06)。** 注入器先在自建牺牲进程完成干跑,随后按双门控加载进指定测试实例
+(PID 27992):远程加载成功、远程导出解析定位 `caligo_probe_run`、探测报告回读、握手 PASS,
+QQ 进程存活且响应正常(证据:identity-invalidation-observations §EXP-K1-01、local-evidence/k1-live/)。
+会话入口层的调查继续按 §3 进行,probe 仍为只读。
 
 ## 2. 已评估的分支与拒绝理由
 

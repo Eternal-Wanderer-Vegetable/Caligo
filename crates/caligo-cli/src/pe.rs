@@ -22,7 +22,8 @@ pub struct ExportTable {
 }
 
 fn u16_at(b: &[u8], off: usize) -> Option<u16> {
-    b.get(off..off + 2).map(|s| u16::from_le_bytes([s[0], s[1]]))
+    b.get(off..off + 2)
+        .map(|s| u16::from_le_bytes([s[0], s[1]]))
 }
 
 fn u32_at(b: &[u8], off: usize) -> Option<u32> {
@@ -89,8 +90,7 @@ pub fn parse_export_table(file: &[u8]) -> Result<ExportTable, String> {
         other => return Err(format!("unknown optional header magic 0x{other:04X}")),
     };
     let export_dir_rva = u32_at(file, data_dir_offset).ok_or("truncated data directories")?;
-    let export_dir_size = u32_at(file, data_dir_offset + 4)
-        .ok_or("truncated data directories")?;
+    let export_dir_size = u32_at(file, data_dir_offset + 4).ok_or("truncated data directories")?;
 
     let sec_base = opt + size_of_optional;
     let mut sections = Vec::with_capacity(number_of_sections);
@@ -102,7 +102,7 @@ pub fn parse_export_table(file: &[u8]) -> Result<ExportTable, String> {
         let raw_ptr = u32_at(file, base + 20).unwrap_or(0);
         sections.push(Section {
             va,
-            vsize: vsize,
+            vsize,
             raw_ptr,
             raw_size,
         });
@@ -124,32 +124,29 @@ pub fn parse_export_table(file: &[u8]) -> Result<ExportTable, String> {
         .ok_or("export directory RVA not mapped to file")?;
     let dll_name_rva = u32_at(file, dir_off + 12).ok_or("truncated export directory")?;
     let name_ordinal_base = u32_at(file, dir_off + 16).ok_or("truncated export directory")?;
-    let number_of_functions =
-        u32_at(file, dir_off + 20).ok_or("truncated export directory")?;
+    let number_of_functions = u32_at(file, dir_off + 20).ok_or("truncated export directory")?;
     let number_of_names = u32_at(file, dir_off + 24).ok_or("truncated export directory")?;
     let addr_functions = u32_at(file, dir_off + 28).ok_or("truncated export directory")?;
     let addr_names = u32_at(file, dir_off + 32).ok_or("truncated export directory")?;
     let addr_ordinals = u32_at(file, dir_off + 36).ok_or("truncated export directory")?;
 
-    let fn_off = rva_to_offset(&sections, addr_functions)
-        .ok_or("AddressOfFunctions not mapped")?;
+    let fn_off = rva_to_offset(&sections, addr_functions).ok_or("AddressOfFunctions not mapped")?;
     let names_off = rva_to_offset(&sections, addr_names).ok_or("AddressOfNames not mapped")?;
-    let ord_off = rva_to_offset(&sections, addr_ordinals)
-        .ok_or("AddressOfNameOrdinals not mapped")?;
+    let ord_off =
+        rva_to_offset(&sections, addr_ordinals).ok_or("AddressOfNameOrdinals not mapped")?;
 
     // 转发器判定:函数 RVA 落在导出目录自身范围内即为转发字符串。
     let mut exports = Vec::with_capacity(number_of_names as usize);
     for i in 0..number_of_names as usize {
-        let name_rva = u32_at(file, names_off + i * 4)
-            .ok_or("names array truncated")?;
-        let ordinal_index = u16_at(file, ord_off + i * 2)
-            .ok_or("ordinals array truncated")? as usize;
-        let function_rva = u32_at(file, fn_off + ordinal_index * 4)
-            .ok_or("functions array truncated")?;
+        let name_rva = u32_at(file, names_off + i * 4).ok_or("names array truncated")?;
+        let ordinal_index =
+            u16_at(file, ord_off + i * 2).ok_or("ordinals array truncated")? as usize;
+        let function_rva =
+            u32_at(file, fn_off + ordinal_index * 4).ok_or("functions array truncated")?;
         let name_off = rva_to_offset(&sections, name_rva).ok_or("export name not mapped")?;
         let name = cstring_at(file, name_off).ok_or("export name unreadable")?;
-        let forwarded = function_rva >= export_dir_rva
-            && function_rva < export_dir_rva + export_dir_size;
+        let forwarded =
+            function_rva >= export_dir_rva && function_rva < export_dir_rva + export_dir_size;
         exports.push(Export {
             ordinal: name_ordinal_base + ordinal_index as u32,
             name,

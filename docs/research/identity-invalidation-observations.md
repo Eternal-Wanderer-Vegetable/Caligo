@@ -17,37 +17,44 @@
 
 按计划 K1 第 6、7 条设计,逐条记录预期/实际(实验时回填):
 
-### EXP-K1-01 加载与握手(probe 无副作用验证)
+### EXP-K1-01 加载与握手(probe 无副作用验证)— **已执行,2026-10-06 通过(加载/握手/探测范围)**
 
-- 前置:manifest PASS;指定实例;隔离复查(无第三方协议端模块)。
-- 操作:`caligo-cli inject --pid <指定> --bridge ... --manifest ... --report ... --confirm-designated-test-instance`。
-- 预期:probe 报告返回 host_pid=指定 PID;协议版本握手 PASS;probe 期间 QQ 人工收发正常(第 6 条)。
-- 资源归属记录:loader 拥有的句柄/远程内存必须在退出时全部释放(代码路径已实现,实测核对)。
-- 状态:未执行。
+- 前置:manifest PASS(5/5 模块 SHA-256 与冻结基线一致);指定实例 PID 27992(创建时间 2026-10-05T13:33:25+08:00,详见 local-evidence/test-scope-local.md 指定表);隔离复查通过(模块快照无第三方协议端)。
+- 干跑先行:注入器先在自建牺牲进程(cmd 哨兵)上完成全链路验证(远程加载 → 远程导出解析 → 探测调用 → 报告回读 → 资源释放),QQ 不参与。
+- 操作:`caligo-cli inject --pid 27992 --bridge <release caligo_bridge.dll> --manifest ... --report ... --confirm-designated-test-instance`。
+- 实际结果:
+  - probe_exit_code=0(OK);remote_base=0x7ff96e9e0000;握手 PASS(protocol_version=1,bridge_build "caligo-bridge 0.1.0")。
+  - probe 报告从 QQ 进程内部取得:host_pid=27992,module_snapshot 30 项 Tencent/.node 模块,快照完整。
+  - 注入后 liveness:进程存活且 Responding=True,主窗口在;QQ 总进程数 18 无变化;`caligo_bridge.dll`(139264 字节)出现在 27992 的模块列表。
+  - **人工收发确认(计划 K1 第 6 条的"正常人工收发")待执行者复核** —— 进程/窗口层面无异常,消息层面由用户日常使用确认。
+- 证据:local-evidence/k1-live/exp-k1-01-pid27992-{log,report,liveness}.txt、dryrun-cmd-report.json。
+- **重复性(同会话内)**:EXP-K1-01b 二次注入同实例 —— LoadLibraryW 幂等(同基址 0x7ff96e9e0000),
+  probe 再次执行成功,报告与首次一致(host_pid 相同),QQ 仍 Responding=True
+  (local-evidence/k1-live/exp-k1-01b-repeat-report.json)。
+- 遗留:probe 报告不含账号信息(入口契约未闭合,见 §EXP-K1-02);QQNT.dll 在快照中(它必然在),bridge 对 QQNT 导出的调用尚未发生。
 
-### EXP-K1-02 账号可见性(仅观测)
+### EXP-K1-02 账号可见性(仅观测)— 未执行
 
-- 操作:probe 报告 + 无副作用枚举(native-entry-contract §4.2),不调用任何业务入口。
-- 预期:能取得"登录账号存在"的观测证据(账号 uin 不落库,记 local-evidence)。
-- 状态:未执行(依赖 EXP-K1-01 与 E-1 语义确认)。
+- 依赖:`qq_magic_napi_register` 语义确认与 JS 绑定枚举(native-entry-contract §4.2);probe 当前不含任何 Node 运行时调用。
 
-### EXP-K1-03 退出/重登/失效
+### EXP-K1-03 退出/重登/失效 — 未执行
 
-- 操作:账号退出 → 重新登录 → 观察旧会话对象失效信号;QQ 重启 → PID 与创建时间必须变化。
-- 预期(判据):旧 run_id/旧 PID 的任何缓存标识不得通过新会话的核对;进程级以 PID+创建时间双重核对。
-- 状态:未执行。
+- 需要执行者在指定实例上做账号退出/重登操作;进程级核对工具(PID+创建时间)已就绪。
 
-### EXP-K1-04 安全收尾
+### EXP-K1-04 安全收尾 — 部分(按设计进行中)
 
-- 操作:probe 完成后正常退出测试 QQ;确认无悬挂句柄、无 QQ 异常退出。
-- 预期:bridge 不做热卸载;随进程退出回收;崩溃转储路径核实(recovery-notes §4)。
-- 状态:未执行。
+- bridge 按加载路线决定不做热卸载,当前随 PID 27992 常驻(只读,无钩挂);实例正常退出时随进程回收。
+- 待执行者按 recovery-notes §5 正常退出该实例后,记录"退出后无残留"核对结果,本项闭合。
 
 ## 3. 台账小结(对计划"你现在的第一轮执行清单"第 6 条的回应)
 
-- **G1 通过?否。** 加载链源码可重建(已构建)、握手协议已实现并测试;但"重复获得真实账号与有效会话"无实测证据,
-  ABI/线程/生命周期证据不足以支撑发送调用(五类入口契约无一闭合,见 native-entry-contract §3)。
-- **缺的证据**:EXP-K1-01~04 全部;E-1 `qq_magic_napi_register` 语义;JS 绑定枚举结果。
+- **G1 通过?部分——不宣称通过。** 加载链已实现"源码可重建 + 真实实例加载 + 握手"(EXP-K1-01,2026-10-06:
+  干跑验证 → 指定 QQ 实例 PID 27992 注入成功,QQ 存活无异常);但 G1 的"重复获得真实账号与有效会话"
+  无实测证据,五类入口契约(native-entry-contract §3)仍无一闭合。
+- **已补的证据**:EXP-K1-01 全部(含注入器干跑、manifest 门、握手、liveness)。
+- **缺的证据**:EXP-K1-02(账号可见性,依赖 E-1 `qq_magic_napi_register` 语义确认)、EXP-K1-03(退出/重登/失效)、
+  EXP-K1-04 收尾核对(待实例正常退出)。
 - **A1→A2 判定?不触发。** 静态证据表明入口大概率在 Node 运行时层内(E-1/E-2),尚不构成
-  "消息订阅/发送入口缺失"的结论;需先完成 §2 实验。
-- **不执行的动作**:不盲目试偏移、不升级 QQ 版本、不在未指定实例上做任何写实验。
+  "消息订阅/发送入口缺失"的结论;需先完成 EXP-K1-02 的观测实验。
+- **不执行的动作**:不盲目试偏移、不升级 QQ 版本、不对未指定实例做任何写实验;EXP-K1-01 的 probe
+  为只读(无钩挂、无 QQNT 调用),符合"加载+握手+无副作用观察"的 K1 第 5 条边界。

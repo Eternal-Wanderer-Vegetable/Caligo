@@ -84,8 +84,7 @@ fn wide_string_len(ptr: *const u16) -> Option<usize> {
 
 fn collect_host_snapshot() -> (Vec<String>, bool) {
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W,
-        TH32CS_SNAPMODULE,
+        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, MODULEENTRY32W, TH32CS_SNAPMODULE,
     };
     // SAFETY: Toolhelp 快照为只读枚举;句柄在所有路径上都会被 CloseHandle 释放。
     unsafe {
@@ -137,7 +136,11 @@ pub extern "system" fn caligo_bridge_protocol_version() -> u32 {
 /// 构建 probe 报告并写入 `report_path`(UTF-16,NUL 结尾;由 loader 提供)。
 ///
 /// 返回 [`probe_code`] 中的结果码。只读宿主信息;不做其他副作用。
-pub extern "system" fn caligo_probe_run(report_path: *const u16) -> u32 {
+///
+/// # Safety
+///
+/// `report_path` 必须指向有效的 NUL 结尾 UTF-16 缓冲区(由 loader 写入)。
+pub unsafe extern "system" fn caligo_probe_run(report_path: *const u16) -> u32 {
     let len = match wide_string_len(report_path) {
         Some(len) => len,
         None => return probe_code::ERR_NULL_PATH,
@@ -222,7 +225,10 @@ mod tests {
         let json = build_report_json(&report).unwrap();
         let back: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(back["host_pid"], 4242);
-        assert!(back["bridge_build"].as_str().unwrap().starts_with("caligo-bridge"));
+        assert!(back["bridge_build"]
+            .as_str()
+            .unwrap()
+            .starts_with("caligo-bridge"));
         assert_eq!(back["protocol_version"], 1);
         assert_eq!(back["module_snapshot_complete"], true);
         assert_eq!(back["bridge_abi_version"], BRIDGE_ABI_VERSION);

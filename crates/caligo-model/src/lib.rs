@@ -87,20 +87,17 @@ pub enum Direction {
 ///
 /// K1 阶段唯一确认有效的字段是会话键。原生标识组合待 K2/K3 调查;在此之前
 /// 不提供任何可用于去重、关联或排序的字段,防止上游误用。
+/// `#[non_exhaustive]`:未来补入原生标识字段时,外部构造与匹配不破坏编译。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NativeMessageRef {
     pub session: SessionKey,
-    _opaque: (),
 }
 
 impl NativeMessageRef {
-    /// 占位构造。K2/K3 调查确认实际原生标识后,此构造与 `_opaque` 占位将被
-    /// 具体字段替换。
+    /// 占位构造。K2/K3 调查确认实际原生标识后,此构造将被具体字段替换。
     pub fn placeholder(session: SessionKey) -> Self {
-        Self {
-            session,
-            _opaque: (),
-        }
+        Self { session }
     }
 }
 

@@ -16,12 +16,14 @@
 | `cargo test --workspace` | **17 通过 / 0 失败** |
 | `cargo build --release --workspace` | 通过 |
 
-产物(release):
+产物(release,2026-10-06 clippy 修复后最终状态):
 
-| 产物 | SHA-256 |
-|---|---|
-| `target/release/caligo-cli.exe` | 52139379FEDFA7CB7DCD3304D15A785C929C6D6E8DB4E6B40DB3391479B52071 |
-| `target/release/caligo_bridge.dll` | 4C6ADD00D5DD725A1B44915E839F1150C984D1D2B49FC689682669170232FC9B |
+| 产物 | SHA-256 | 说明 |
+|---|---|---|
+| `target/release/caligo-cli.exe` | 7E72D2B97E5E3C9A0B72C762F7A9D59DD3A3DA7EAC9BB2D30F49B831BCD47296 | |
+| `target/release/caligo_bridge.dll` | 7DE9E72E1D808E9EFF4E30D416266FEACA97EAC23CE59C1AECD2A185CCB73918 | 被 PID 27992 加载锁定;源码后续 `unsafe extern` 签名修正(仅 Rust 侧元数据,机器码与导出符号不变)待实例退出后重建生效 |
+
+质量关卡(2026-10-06 最终):`cargo clippy --workspace --all-targets -- -D warnings` 0 警告;`cargo fmt --all -- --check` 通过;`cargo test --workspace` 17/17。
 
 ## 3. 测试覆盖(与本计划验收项的对应)
 
@@ -53,6 +55,9 @@
 
 ## 5. 未验证事项(如实记录)
 
-- `caligo-cli inject` 的远程加载/远程导出解析序列**未在真实 QQ 实例上运行过**;
-  首次运行须满足两道门(manifest PASS + `--confirm-designated-test-instance`),并按 recovery-notes §2 收尾。
+- ~~`caligo-cli inject` 的远程加载/远程导出解析序列未在真实 QQ 实例上运行过~~ →
+  **2026-10-06 已验证**:先在自建牺牲进程干跑,再按双门控加载进指定测试实例 PID 27992,
+  握手 PASS、QQ 存活(证据:identity-invalidation-observations §EXP-K1-01;local-evidence/k1-live/)。
+  代码同期修复:inject 的 bridge/report 路径强制绝对化(相对路径会在目标进程 CWD 下解析)。
 - bridge 的握手报告仅覆盖"已加载"层;真实账号与会话观察依赖入口契约闭合(native-entry-contract §3)。
+- ~~`cargo clippy -D warnings` 尚未运行~~ → **2026-10-06 已运行并通过**(0 警告);`cargo fmt --all` 已执行。
