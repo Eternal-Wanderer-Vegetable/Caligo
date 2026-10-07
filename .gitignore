@@ -8,3 +8,4 @@
 *.local.json
 *.local.md
 js/*.report.jsonl
+.dbg.py
