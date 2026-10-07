@@ -1,7 +1,7 @@
 # K4 第一批阶段报告:入口契约状态 + LAB 测试结果 + 剩余缺项
 
 > 计划 §7.2 规定交付物。报告日期:2026-10-07,Asia/Shanghai。
-> 范围:D0–D4 全部离线完成 + D5 前置修复;**全程零 QQ 现场动作**
+> 范围:D0–D4 + **D5(LAB 全链接线)** 全部离线完成;**全程零 QQ 现场动作**
 > (未注入、未扫描存活进程内存、未发送任何消息;仅对磁盘上安装构建做
 > 只读哈希核对,对进程列表做只读枚举)。首次阶段报告不要求真实 QQ 发新消息 —— 已满足。
 
@@ -13,11 +13,12 @@
 | loader 超时资源缺陷(§5.3) | **已修** | 7 处等待点改为先判 wait;超时留存账本,不释放、不 TerminateThread |
 | B0 bootstrap 契约 | **OFFLINE-CANDIDATE;B0-FIELD = BLOCKED(待 D7)** | 候选 B(RequestInterrupt 首入 → owner 线程初始化)为唯一有现场证据的路线;候选 A(Node-API addon)无可用装载点,判 BLOCKED;十项契约表与开放点见 k4-bootstrap-contract §3 |
 | 事故结论修正 | **完成** | "stack 无 caligo 帧"被原始 dump 证伪(frame6 = caligo_bridge_diag2.dll);六例损失全部入账,机制分类与未知项分离(k4-incident-register §2) |
-| 生产链路(k4 路线) | **离线已接线,LAB 层可运行** | model 三代次 → core actor/journal → bridge resident(自建宿主);真实命名管道与 caligod 属 D5,未开工 |
+| 生产链路(k4 路线) | **离线全链接线并验收(K4-LAB)** | `resident(host harness)→ 命名管道 → caligod daemon(账号 actor)→ journal → 控制客户端`,全程零 CLI inject;D5 验收:持续通信不启动 inject、断连恢复不重复初始化、限额/拒绝显式呈现 |
 
 ## 2. LAB 测试结果
 
-`cargo test --workspace --offline`:**83 通过 / 0 失败 / 0 警告**(工具链 1.97.1,MSVC)。
+`cargo test --workspace --offline`:**90 通过 / 0 失败 / 0 警告**(工具链 1.97.1,MSVC)。
+D5 新增 7 项(transport_contract 3、daemon_chain 3、caligod_smoke 1)。
 
 | 套件 | 数量 | 覆盖 |
 |---|---:|---|
@@ -29,6 +30,9 @@
 | recovery_contract(D3) | 6 | L09 dispatch_intent 前后崩溃不重发(重启后仅 QueryRequest)、native 后崩溃 → unknown 非失败、L13 尾截断保守恢复/中段损坏拒绝且原文件不动、去重与游标跨重启、ACK 依据持久账本 |
 | ipc_contract(含 D5 前置) | 12 | 原 9 项回归保留 + L12(逐字节喂入、百帧大 chunk 缓存有界、超长声明仅读头拒绝) |
 | journal 单元 | 6 | CRC32 标准向量、roundtrip、尾截断、中段损坏、容量上限 |
+| transport_contract(D5) | 3 | 真实命名管道:逐字节分片还原、错误 token 拒绝不降级、阻塞读及时取消(不悬挂)、client PID 校验 |
+| daemon_chain(D5) | 3 | **全链**:resident→管道→actor→journal→客户端;发送确认并关联原生 ID、重复 ID 查询语义不重派发、payload 冲突拒绝;事件经管道持久化 + 去重 + 交付游标;伪造 token 无会话副作用;journal 重开终态可审计、phase 回 Detached(身份须重核) |
+| caligod_smoke(D5) | 1 | 子进程启动、stdout 首行交付管道名/token、Health、Stop 真实 Stopping 协议、退出码 0 |
 | onebotd + gate | 4 | 旧 runner 退出码 3、不进入 ARM/poll |
 | caligo-model | 7 | 三代次、RunId 迁移、payload hash 绑定、终态分类 |
 
@@ -38,14 +42,26 @@ F01–F04 全部为现场项,未被任何 LAB 结果替代。
 
 ## 3. 剩余缺项与下一步
 
-**D5(下一个工作批,纯离线)**:
-1. IPC v2 语义(Hello/Ack 携带三代次 + 认证 + 恢复游标;消息类型固定集);
-2. Windows 命名管道 transport(SID ACL、认证、指定进程校验、I/O 取消);
-3. `caligod` 常驻 core + 测试客户端;`harness → resident → pipe → actor → journal → client` 全链接线;
-4. L15(慢消费者/replay 超限 → 显式 Gap)与 L02 完整面。
+**D5 状态:LAB 完成(2026-10-07,提交 267a7f7 / 1d9fe9e)。** 实现事实:
+- 命名管道:当前用户 SID DACL、`PIPE_REJECT_REMOTE_CLIENTS`、OS 随机 32 字节
+  token(不进命令行/日志)、指定进程 PID 校验、`CancelIoEx` 读取消
+  (取消后先回收 OVERLAPPED —— 计划 §5.3 语义)、断开前 200ms 排水窗;
+- IPC v2:固定消息集(Bridge/Control 双角色)、认证/版本/角色门控、
+  EventAck 仅在持久化后前移、receipt 三分类;
+- caligod:journal 打开失败不静默重建(退出码 3);Ctrl+C 与 control Stop
+  走同一 Stopping 协议(actor.stop→close,退出码 0);
+- 全链:重复 ID 查询语义、冲突拒绝、事件去重跨管道、交付游标持久。
+
+D5 遗留(如实,不影响 LAB 验收):
+1. bridge 断连恢复路径在 daemon 中为 Degraded + 会话幂等重绑定;跨进程
+   "core 重启不重复派发"的端到端演示目前由 recovery_contract(L09)在
+   journal 层覆盖,子进程级 kill/restart 演练属 D10 现场轮次的 LAB 预演;
+2. 控制面事件交付为拉取式(DrainEvents);push 推送在 K5 OneBot 层实现;
+3. 单帧/队列/heartbeat 参数沿用计划建议初值,实测调优记录在 D11。
 
 **现场前置(需执行者参与)**:
-- D6 准入核对表(`docs/acceptance/k4-field-entry.md`)—— D5 LAB 通过后逐项填写;
+- D6 准入核对表(`docs/acceptance/k4-field-entry.md`)—— K4-LAB 已具备
+  填写条件:D0 封闭、D1 事实核对、D2 候选合法来源、D4/D5 LAB 通过均已成立;
 - D7 首次接入:B0-FIELD 十项中全部 [assumed] 项的现场实测;**在此之前
   现场保持暂停,final-boundary 铁律继续有效**;
 - D8–D11:收发样本、三轮恢复、2 小时运行 —— 全部需要执行者指定测试实例与对端观察。
@@ -66,6 +82,9 @@ F01–F04 全部为现场项,未被任何 LAB 结果替代。
 | 23cc9f4 | D3 模型/journal/actor + 20 项契约测试 |
 | b8b688d | D4 resident + 自建宿主 11 项生命周期测试 |
 | 8765fac | D5 前置 FrameDecoder 增量有界修复 |
+| d5bc91e | 阶段报告 01(首版) |
+| 267a7f7 | D5a 命名管道 transport + IPC v2 |
+| 1d9fe9e | D5b caligod daemon + 全链测试(90 全绿) |
 
 ## 5. 纪律声明
 
