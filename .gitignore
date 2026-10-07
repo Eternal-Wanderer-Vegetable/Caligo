@@ -9,3 +9,5 @@
 *.local.md
 js/*.report.jsonl
 .dbg.py
+.d8*.py
+.fix*.py
