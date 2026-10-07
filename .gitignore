@@ -7,3 +7,4 @@
 # Local-only overrides
 *.local.json
 *.local.md
+js/*.report.jsonl
