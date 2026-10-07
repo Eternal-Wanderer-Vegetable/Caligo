@@ -1004,7 +1004,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 }
             },
             "--async-script" => match next(&mut i).and_then(|s| s.parse::<u32>().ok()) {
-                Some(v @ 0..=80) => async_script = v,
+                Some(v @ 0..=83) => async_script = v,
                 _ => {
                     eprintln!("--async-script 需要 0-27(…26 DOM 侦察 27 DOM 注入)");
                     return ExitCode::FAILURE;
