@@ -231,6 +231,10 @@ pub struct IntrRequest {
 pub struct ExecRequest {
     /// 候选 node::Environment*(0 = 干跑)。
     pub env: usize,
+    /// QQNT.dll 基址(加载器侧解析)。
+    pub qqnt_base: usize,
+    /// 上下文钉扎 hint(非零优先;来自 start 轮报告)。
+    pub ctx_hint: usize,
     /// UTF-8 JS 源码(CLI 侧已读入)。
     pub js: Vec<u8>,
     /// JSONL 报告路径。
@@ -251,6 +255,8 @@ pub struct AsyncRequest {
     pub report: PathBuf,
     /// 等待回调触发的毫秒数。
     pub wait_ms: u32,
+    /// K3-F 参数区 UTF-8 JSON(仅 PARAM_SEND 需要;空=无)。
+    pub params: Vec<u8>,
 }
 
 type RemoteThreadFn = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
@@ -751,12 +757,13 @@ pub unsafe fn inject_and_probe(
                 }
                 let rep_wide = to_wide(&ex.report.to_string_lossy());
                 let remote_rep = alloc_and_write(&rep_wide, "alloc exec report path")?;
-                // caligo_bridge::exec::ExecCtx 副本(env, qqnt_base, js, js_len,
-                // report, wait, pad)。
-                let mut ctx_bytes: Vec<u8> = Vec::with_capacity(48);
+                // caligo_bridge::exec::ExecCtx 副本(env, qqnt_base, ctx_hint, js,
+                // js_len, report, wait, pad)。
+                let mut ctx_bytes: Vec<u8> = Vec::with_capacity(56);
                 let qqnt_base = *module_bases_in(pid)?.get("QQNT.dll").unwrap_or(&0);
                 ctx_bytes.extend_from_slice(&ex.env.to_le_bytes());
                 ctx_bytes.extend_from_slice(&qqnt_base.to_le_bytes());
+                ctx_bytes.extend_from_slice(&ex.ctx_hint.to_le_bytes());
                 ctx_bytes.extend_from_slice(&(remote_js as usize).to_le_bytes());
                 ctx_bytes.extend_from_slice(&ex.js.len().to_le_bytes());
                 ctx_bytes.extend_from_slice(&(remote_rep as usize).to_le_bytes());
@@ -825,14 +832,39 @@ pub unsafe fn inject_and_probe(
                 let req_wide = to_wide(&req.report.to_string_lossy());
                 let remote_req_path = alloc_and_write(&req_wide, "alloc async report path")?;
                 buf_async = Some(remote_req_path);
+                // K3-F 参数区(可选;PARAM_SEND 需要)。
+                let mut remote_params: Option<*mut core::ffi::c_void> = None;
+                if !req.params.is_empty() {
+                    let rp = VirtualAllocEx(
+                        proc_h,
+                        std::ptr::null(),
+                        req.params.len(),
+                        MEM_COMMIT | MEM_RESERVE,
+                        PAGE_READWRITE,
+                    );
+                    if rp.is_null() {
+                        return Err(format!("alloc async params: Win32 error {}", GetLastError()));
+                    }
+                    let mut wp: usize = 0;
+                    if WriteProcessMemory(proc_h, rp, req.params.as_ptr().cast(), req.params.len(), &mut wp) == 0
+                        || wp != req.params.len()
+                    {
+                        VirtualFreeEx(proc_h, rp, 0, MEM_RELEASE);
+                        return Err("alloc async params: WriteProcessMemory incomplete".into());
+                    }
+                    remote_params = Some(rp);
+                }
                 // caligo_bridge::asyncrun::AsyncCtx 的进程内副本(env,mode,script,
-                // report_path,wait_ms,pad)。
-                let mut ctx_bytes: Vec<u8> = Vec::with_capacity(48);
+                // report_path,wait_ms,pad,params_ptr,params_len,pad2)。
+                let mut ctx_bytes: Vec<u8> = Vec::with_capacity(56);
                 ctx_bytes.extend_from_slice(&req.env.to_le_bytes());
                 ctx_bytes.extend_from_slice(&req.mode.to_le_bytes());
                 ctx_bytes.extend_from_slice(&req.script.to_le_bytes());
                 ctx_bytes.extend_from_slice(&(remote_req_path as usize).to_le_bytes());
                 ctx_bytes.extend_from_slice(&req.wait_ms.to_le_bytes());
+                ctx_bytes.extend_from_slice(&0u32.to_le_bytes());
+                ctx_bytes.extend_from_slice(&(remote_params.unwrap_or(std::ptr::null_mut()) as usize).to_le_bytes());
+                ctx_bytes.extend_from_slice(&(req.params.len() as u32).to_le_bytes());
                 ctx_bytes.extend_from_slice(&0u32.to_le_bytes());
                 let remote_ctx = VirtualAllocEx(
                     proc_h,
@@ -887,6 +919,9 @@ pub unsafe fn inject_and_probe(
                 GetExitCodeThread(async_thread, &mut code);
                 CloseHandle(async_thread);
                 VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
+                if let Some(rp) = remote_params {
+                    VirtualFreeEx(proc_h, rp, 0, MEM_RELEASE);
+                }
                 if wait != 0 {
                     return Err(format!("async remote thread wait failed: code {wait:#x}"));
                 }

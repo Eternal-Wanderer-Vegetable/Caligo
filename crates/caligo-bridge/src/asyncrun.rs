@@ -37,6 +37,8 @@ pub mod async_code {
     pub const ERR_UV: u32 = 5;
     /// mode 3 phase A:中断点未捕获到 entered 上下文(JS 间隙未出现/上下文空)。
     pub const ERR_NO_CAPTURE: u32 = 6;
+    /// K3-F 参数区无效/JSON 解析失败。
+    pub const ERR_BAD_PARAMS: u32 = 7;
 }
 
 /// mode 2 脚本选择(ctx.script):0 = 只读指纹(v2),1 = load 探针(v3,K2-04)。
@@ -112,6 +114,29 @@ pub const SCRIPT_K3_SEND2: u32 = 68;
 pub const SCRIPT_K3_SENDLADDER: u32 = 69;
 pub const SCRIPT_K3_SEND3: u32 = 70;
 pub const SCRIPT_K3_ARITY: u32 = 71;
+/// K3-F 参数化发送:AsyncCtx.params_ptr 指向的 JSON 参数模板进 send 脚本。
+pub const SCRIPT_K3_PARAM_SEND: u32 = 84;
+/// K3-F 发送结果读取:__caligo_sendres(Promise resolve 落点)。
+pub const SCRIPT_K3_SENDRES_READ: u32 = 85;
+
+/// K3-F 发送模板(NapCat 同款四参,活会话直调):占位符由 async_run 以参数
+/// JSON 填充后经 DYN_JS 静态发布给回调。
+pub const PARAM_SEND_TEMPLATE: &str = "(function(){try{var q=process._linkedBinding('QQNT');var S=q.NodeIQQNTWrapperSession;var live=null;for(var i=0;i<10;i++){try{var ls=S.getNTWrapperSession('nt_'+i);if(ls&&typeof ls==='object'){var sid=ls.getSessionId();if(sid&&String(sid)!=='0'){var ms=ls.getMsgService();if(ms&&ms.sendMsg){live=ls;break}}}}catch(e){}}if(!live)return JSON.stringify({err:'no live session'});var ms=live.getMsgService();var sv=0;try{sv=live.getMSFService().getServerTime()}catch(e){}var mid=String(ms.generateMsgUniqueId(__CHAT__,sv));var peer={chatType:__CHAT__,guildId:mid,peerUid:__PEER__};var elems=[{elementType:1,textElement:{content:__TEXT__}}];var r=ms.sendMsg('0',peer,elems,new Map());var out={mid:mid,sendType:typeof r};if(r&&typeof r.then==='function'){out.promise=true;r.then(function(res){try{globalThis.__caligo_sendres=JSON.stringify(res).slice(0,2000)}catch(e){}})}return JSON.stringify(out).slice(0,2000)}catch(e){return JSON.stringify({fatal:String(e).slice(0,300)})}})()";
+
+/// K3-F 发送结果读取:__caligo_sendres(Promise resolve 落点)。
+pub const SENDRES_READ_SCRIPT: &str = "(function(){return JSON.stringify({r:globalThis.__caligo_sendres||null})})()";
+
+/// 动态 JS 源(异步回调前由 async_run 发布;进程生命周期有效)。
+static DYN_JS: AtomicUsize = AtomicUsize::new(0);
+static DYN_JS_LEN: AtomicU32 = AtomicU32::new(0);
+
+/// K3-F 参数(加载器写入的 JSON 反序列化目标)。
+#[derive(serde::Deserialize)]
+pub struct SendParams {
+    pub peer: String,
+    pub chat: u32,
+    pub text: String,
+}
 pub const SCRIPT_K3_SEND5: u32 = 72;
 pub const SCRIPT_K3_PROTOARITY: u32 = 73;
 pub const SCRIPT_K3_NAPSEND: u32 = 74;
@@ -243,6 +268,11 @@ pub struct AsyncCtx {
     /// 等待回调触发的毫秒数。
     pub wait_ms: u32,
     pub _pad: u32,
+    /// K3-F 参数区指针(UTF-8 JSON:{"peer":"...","chat":2,"text":"..."};0=无)。
+    pub params_ptr: usize,
+    /// 参数区字节长度。
+    pub params_len: u32,
+    pub _pad2: u32,
 }
 
 // --- 回调侧状态(仅原子;缓冲在回调前就绪) ---
@@ -632,7 +662,17 @@ unsafe extern "system" fn intr_capture_cb(_ctx: *mut c_void) {
 /// 在给定 isolate/context 上执行选定脚本并落结果缓冲。
 /// 返回 js_err 码(0=成功)。须在有效 HandleScope 内调用。
 unsafe fn exec_enum_script(ex: &Exports, isolate: usize, ctx: usize, script: u32) -> u32 {
-    let src_str = match script {
+    let src_str: &str = if script == SCRIPT_K3_PARAM_SEND {
+        // 动态源:async_run 已将参数化 JS 发布至 DYN_JS。
+        let p = DYN_JS.load(Ordering::Acquire);
+        let l = DYN_JS_LEN.load(Ordering::Acquire) as usize;
+        if p == 0 || l == 0 || l > RESULT_CAP * 4 {
+            return 1;
+        }
+        // SAFETY: leaked Box<str>,进程生命周期有效;UTF-8 由构造保证。
+        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(p as *const u8, l)) }
+    } else {
+        match script {
         SCRIPT_LOAD_PROBE => LOAD_PROBE_SCRIPT,
         SCRIPT_LOAD_HARVEST => LOAD_HARVEST_SCRIPT,
         SCRIPT_GLOBAL_INTROSPECT => GLOBAL_INTROSPECT_SCRIPT,
@@ -715,7 +755,9 @@ unsafe fn exec_enum_script(ex: &Exports, isolate: usize, ctx: usize, script: u32
         SCRIPT_K3_RECV_ARM => K3_RECV_ARM_SCRIPT,
         SCRIPT_K3_RECV_ARM2 => K3_RECV_ARM2_SCRIPT,
         SCRIPT_K3_C2CSEND => K3_C2CSEND_SCRIPT,
+        SCRIPT_K3_SENDRES_READ => SENDRES_READ_SCRIPT,
         _ => ENUM_SCRIPT,
+        }
     };
     // String::NewFromUtf8(kNormal=0;sret 约定)。
     let script_bytes = src_str.as_bytes();
@@ -907,6 +949,46 @@ pub unsafe fn async_run(ctx: &AsyncCtx) -> u32 {
         return async_code::OK;
     }
 
+    // K3-F 参数化发送:读参数 JSON → 模板填充 → DYN_JS 发布(回调取用)。
+    if ctx.script == SCRIPT_K3_PARAM_SEND {
+        if ctx.params_ptr == 0 || ctx.params_len == 0 || ctx.params_len > 64 * 1024 {
+            append_stage(&report, "params", false, "params ptr/len invalid");
+            return async_code::ERR_BAD_PARAMS;
+        }
+        if !page_readable_span(ctx.params_ptr, ctx.params_len as usize) {
+            append_stage(&report, "params", false, "params buffer unreadable");
+            return async_code::ERR_BAD_PARAMS;
+        }
+        // SAFETY: 页已校验;UTF-8 由加载器保证(JSON 由本仓库 CLI 构造)。
+        let raw = unsafe {
+            core::slice::from_raw_parts(ctx.params_ptr as *const u8, ctx.params_len as usize)
+        };
+        let parsed: SendParams = match serde_json::from_slice(raw) {
+            Ok(p) => p,
+            Err(e) => {
+                append_stage(&report, "params", false, &format!("parse: {e}"));
+                return async_code::ERR_BAD_PARAMS;
+            }
+        };
+        let text_json = match serde_json::to_string(&parsed.text) {
+            Ok(t) => t,
+            Err(_) => return async_code::ERR_BAD_PARAMS,
+        };
+        let js = PARAM_SEND_TEMPLATE
+            .replace("__CHAT__", &parsed.chat.to_string())
+            .replace("__PEER__", &serde_json::to_string(&parsed.peer).unwrap_or_else(|_| "\"\"".into()))
+            .replace("__TEXT__", &text_json);
+        append_stage(
+            &report,
+            "params",
+            true,
+            &format!("peer={} chat={} textLen={}", parsed.peer, parsed.chat, parsed.text.len()),
+        );
+        let leaked: &'static str = Box::leak(js.into_boxed_str());
+        DYN_JS.store(leaked.as_ptr() as usize, Ordering::Release);
+        DYN_JS_LEN.store(leaked.len() as u32, Ordering::Release);
+    }
+
     // mode 3 phase A:中断点捕获上下文(JS 间隙必然 entered)。
     if ctx.mode == 3 {
         let Some(ri) = ex.request_interrupt else {
@@ -1043,8 +1125,11 @@ mod tests {
 
     #[test]
     fn ctx_layout_is_fixed() {
-        // repr(C) 布局核对:env/mode/script/report/wait —— 与加载器写入序列一致。
-        assert_eq!(std::mem::size_of::<AsyncCtx>(), std::mem::size_of::<usize>() * 3 + 8);
+        // repr(C) 布局核对:env/mode/script/report/wait/params_ptr/params_len —— 与加载器写入序列一致。
+        assert_eq!(
+            std::mem::size_of::<AsyncCtx>(),
+            std::mem::size_of::<usize>() * 3 + 24
+        );
         let c = AsyncCtx {
             env: 0x11,
             mode: 2,
@@ -1052,6 +1137,9 @@ mod tests {
             report_path: 0x22,
             wait_ms: 33,
             _pad: 0,
+            params_ptr: 0x44,
+            params_len: 9,
+            _pad2: 0,
         };
         let base = &c as *const AsyncCtx as *const u8;
         // SAFETY: 读自身结构体字段。
@@ -1069,6 +1157,14 @@ mod tests {
             assert_eq!(
                 *base.add(std::mem::size_of::<usize>() * 3).cast::<u32>(),
                 33
+            );
+            assert_eq!(
+                *base.add(std::mem::size_of::<usize>() * 4).cast::<usize>(),
+                0x44
+            );
+            assert_eq!(
+                *base.add(std::mem::size_of::<usize>() * 4 + 8).cast::<u32>(),
+                9
             );
         }
     }

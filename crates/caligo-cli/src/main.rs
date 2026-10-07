@@ -897,8 +897,12 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut async_env: Option<usize> = None;
     let mut async_script: u32 = 0;
     let mut async_wait_ms: u32 = 10_000;
+    let mut send_peer: Option<String> = None;
+    let mut send_chat: u32 = 2;
+    let mut send_text: Option<String> = None;
     let mut exec_js: Option<PathBuf> = None;
     let mut exec_env: Option<usize> = None;
+    let mut exec_ctx_hint: Option<usize> = None;
     let mut exec_wait_ms: u32 = 30_000;
 
     let mut i = 0;
@@ -1007,7 +1011,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 }
             },
             "--async-script" => match next(&mut i).and_then(|s| s.parse::<u32>().ok()) {
-                Some(v @ 0..=83) => async_script = v,
+                Some(v @ 0..=85) => async_script = v,
                 _ => {
                     eprintln!("--async-script 需要 0-27(…26 DOM 侦察 27 DOM 注入)");
                     return ExitCode::FAILURE;
@@ -1017,6 +1021,27 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => async_wait_ms = v,
                 None => {
                     eprintln!("--async-wait-ms 需要数字参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--send-peer" => match next(&mut i) {
+                Some(v) => send_peer = Some(v),
+                None => {
+                    eprintln!("--send-peer 需要参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--send-chat" => match next(&mut i).and_then(|s| s.parse::<u32>().ok()) {
+                Some(v @ 1..=2) => send_chat = v,
+                _ => {
+                    eprintln!("--send-chat 需要 1(私聊)或 2(群聊)");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--send-text" => match next(&mut i) {
+                Some(v) => send_text = Some(v),
+                None => {
+                    eprintln!("--send-text 需要参数");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1033,6 +1058,15 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => exec_env = Some(v),
                 None => {
                     eprintln!("--exec-env 需要十六进制指针参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--exec-ctx" => match next(&mut i).as_deref().and_then(|s| {
+                usize::from_str_radix(s.strip_prefix("0x").unwrap_or(s), 16).ok()
+            }) {
+                Some(v) => exec_ctx_hint = Some(v),
+                None => {
+                    eprintln!("--exec-ctx 需要十六进制参数");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1204,12 +1238,31 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             if async_script == 1 && mode == 2 {
                 println!("[gate] K2-04:load 探针为首次调用 QQ 业务函数,按设计记录 local-evidence/k2-04/design.md 执行");
             }
+            // K3-F 参数化发送:PARAM_SEND 需要 --send-* 三件套。
+            let params: Vec<u8> = if async_script == caligo_bridge::asyncrun::SCRIPT_K3_PARAM_SEND {
+                match (&send_peer, &send_text) {
+                    (Some(p), Some(t)) => serde_json::json!({
+                        "peer": p, "chat": send_chat, "text": t
+                    })
+                    .to_string()
+                    .into_bytes(),
+                    _ => {
+                        eprintln!(
+                            "[gate] PARAM_SEND 需要 --send-peer/--send-chat/--send-text 三件套"
+                        );
+                        return ExitCode::from(2);
+                    }
+                }
+            } else {
+                Vec::new()
+            };
             Some(winutil::AsyncRequest {
                 env,
                 mode,
                 script: async_script,
                 report: abs,
                 wait_ms: async_wait_ms,
+                params,
             })
         }
         (Some(_), None, _) | (_, Some(_), None) | (_, None, Some(_))
@@ -1237,9 +1290,11 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 }
             };
             let rep = abs.with_extension("report.jsonl");
-            println!("[gate] K3-E exec:JS {} 字节 → env {env:#x}", src.len());
+            println!("[gate] K3-E exec:JS {} 字节 → env {env:#x}{}", src.len(), match exec_ctx_hint { Some(c) => format!(" ctxhint {c:#x}"), None => String::new() });
             Some(winutil::ExecRequest {
                 env,
+                qqnt_base: 0,
+                ctx_hint: exec_ctx_hint.unwrap_or(0),
                 js: src,
                 report: rep,
                 wait_ms: exec_wait_ms,
