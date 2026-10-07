@@ -23,6 +23,10 @@ use caligo_core::runtime::RuntimeConfig;
 
 static LAB_SENDS: AtomicU64 = AtomicU64::new(0);
 
+/// 两用例共享进程级全局计数器与计时敏感的管道时序:串行执行消除
+/// 并行互扰(单测内语义已各自覆盖;串行不减弱断言)。
+static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct LabHost;
 
 impl HostAdapter for LabHost {
@@ -83,7 +87,29 @@ fn start_daemon(
         expect_client_pid: 0, // LAB worker 与测试同进程;PID 校验在此禁用
         runtime: RuntimeConfig::default(),
     };
-    let daemon = Daemon::start(config).unwrap();
+    {
+        let probe = dir.join("probe-write.txt");
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&probe)
+        {
+            Ok(_) => eprintln!("[dbg] probe open OK: {}", probe.display()),
+            Err(e) => eprintln!("[dbg] probe open FAILED: {e}; path={}", probe.display()),
+        }
+    }
+    let journal_dbg = config.journal_path.clone();
+    let daemon = match Daemon::start(config) {
+        Ok(d) => d,
+        Err(e) => panic!(
+            "daemon start failed: {e}; dir={:?} exists={} journal={:?}",
+            dir,
+            dir.exists(),
+            journal_dbg
+        ),
+    };
     (
         daemon.clone(),
         move || {
@@ -107,6 +133,7 @@ fn worker_config(prefix: &str, auth: &str) -> DaemonClientConfig {
 
 #[test]
 fn reconnect_then_hello_then_clean_stop_without_bootstrap() {
+    let _g = TEST_SERIAL.lock().unwrap();
     let prefix = unique_prefix("reconnect");
     // daemon start(journal 就绪,管道未创建)→ worker 先行 → 服务端延迟就绪。
     let (daemon, make_runner) = start_daemon(&prefix);
@@ -149,7 +176,13 @@ fn reconnect_then_hello_then_clean_stop_without_bootstrap() {
     // Stop:daemon 真实停止协议 → worker 收 Stopped → 干净退出。
     let r = control.request(caligo_core::ipc::ControlMsg::Stop {}).unwrap();
     assert!(matches!(r, CoreToControlMsg::Stopped { .. }));
-    let (counters, exit) = w_rx.recv_timeout(Duration::from_secs(5)).expect("worker exit");
+    let (counters, exit) = match w_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(v) => v,
+        Err(_) => {
+            let snap = caligo_bridge::daemon_client::counters_snapshot();
+            panic!("worker exit timeout; snapshot={snap:?}");
+        }
+    };
     runner.join().unwrap().unwrap();
     assert_eq!(exit, WorkerExit::CoreStopped);
     assert!(counters.hellos_accepted >= 1, "至少一次接入成功");
@@ -165,6 +198,7 @@ fn reconnect_then_hello_then_clean_stop_without_bootstrap() {
 
 #[test]
 fn dispatch_roundtrip_through_real_worker() {
+    let _g = TEST_SERIAL.lock().unwrap();
     let prefix = unique_prefix("dispatch");
     let (daemon, make_runner) = start_daemon(&prefix);
     let auth = daemon.auth_token().to_string();
@@ -240,11 +274,21 @@ fn dispatch_roundtrip_through_real_worker() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(confirmed, "R1 未在窗口内确认成功(NM-1)");
+    assert!(
+        confirmed,
+        "R1 未在窗口内确认成功(NM-1); snapshot={:?}",
+        caligo_bridge::daemon_client::counters_snapshot()
+    );
 
     // 收尾:Stop → worker CoreStopped。
     control.request(caligo_core::ipc::ControlMsg::Stop {}).unwrap();
-    let (counters, exit) = w_rx.recv_timeout(Duration::from_secs(5)).expect("worker exit");
+    let (counters, exit) = match w_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(v) => v,
+        Err(_) => {
+            let snap = caligo_bridge::daemon_client::counters_snapshot();
+            panic!("worker exit timeout; snapshot={snap:?}");
+        }
+    };
     runner.join().unwrap().unwrap();
     assert_eq!(exit, WorkerExit::CoreStopped);
     assert!(counters.dispatches >= 1);

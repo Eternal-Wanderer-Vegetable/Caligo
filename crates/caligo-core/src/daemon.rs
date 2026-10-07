@@ -95,7 +95,7 @@ pub struct DaemonConfig {
 /// 常驻 core(LAB 形态;计划 §7-D5)。
 pub struct Daemon {
     pub config: DaemonConfig,
-    auth_hex: String,
+    auth_hex: std::sync::Mutex<String>,
     core_nonce: u64,
     pub(crate) actor: Mutex<AccountActor>,
     pub(crate) stop: Arc<AtomicBool>,
@@ -118,7 +118,7 @@ impl Daemon {
             ))
         })?;
         Ok(Arc::new(Self {
-            auth_hex: token_hex(&token),
+            auth_hex: std::sync::Mutex::new(token_hex(&token)),
             core_nonce: u64::from_le_bytes(token[0..8].try_into().unwrap()),
             actor: Mutex::new(actor),
             stop: Arc::new(AtomicBool::new(false)),
@@ -130,23 +130,37 @@ impl Daemon {
         }))
     }
 
-    /// (bridge, control) 管道名。
+    /// (bridge, control) 管道名。前缀可以是短名(自动补 `\.\pipe\`)
+    /// 或完整路径 —— 规避跨 shell 传参的反斜杠转换问题。
     pub fn pipe_names(&self) -> (String, String) {
-        (
-            format!("{}-bridge", self.config.pipe_prefix),
-            format!("{}-control", self.config.pipe_prefix),
-        )
+        // 前缀可以是短名(自动补 Win32 命名管道根)或完整路径;
+        // 规避跨 shell 传参的反斜杠转换问题。
+        const ROOT: &str = "\\\\.\\pipe\\";
+        let raw = self.config.pipe_prefix.as_str();
+        let prefix = if raw.starts_with(ROOT) {
+            raw.to_string()
+        } else {
+            format!("{ROOT}{}", raw.trim_start_matches('\\'))
+        };
+        (format!("{prefix}-bridge"), format!("{prefix}-control"))
     }
 
-    pub fn auth_token(&self) -> &str {
-        &self.auth_hex
+    /// 认证凭据(启动时随机;token-file 模式下以文件内容为准)。
+    pub fn auth_token(&self) -> String {
+        self.auth_hex.lock().unwrap().clone()
     }
 
-    pub fn stop_flag(&self) -> Arc<AtomicBool> {
+    /// token-file 模式:以文件内容为准(caligod 重启连续性;§6.4 私有通道)。
+    pub fn set_auth_token(&self, token: &str) {
+        *self.auth_hex.lock().unwrap() = token.to_string();
+    }
+
+    /// 停止标志(Ctrl+C 与 control Stop 汇合)。
+    pub fn stop_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         self.stop.clone()
     }
 
-    /// 阻塞运行:双 accept 循环;停止后收尾 actor(stop→close)。
+/// 阻塞运行:双 accept 循环;停止后收尾 actor(stop→close)。
     pub fn run(self: &Arc<Self>) -> Result<(), SessionError> {
         let (bridge_name, control_name) = self.pipe_names();
         let bridge_srv = PipeServer::create(&bridge_name).map_err(|e| {
@@ -255,7 +269,8 @@ impl Daemon {
             reject(e.to_string());
             return Ok(());
         }
-        if !validate_auth(&auth_token, &self.auth_hex) {
+        let expected = self.auth_hex.lock().unwrap().clone();
+        if !validate_auth(&auth_token, &expected) {
             reject("auth failed".into());
             return Ok(());
         }
@@ -434,7 +449,8 @@ impl Daemon {
             ack(false, Some(e.to_string()), &conn)?;
             return Ok(());
         }
-        if !validate_auth(&auth_token, &self.auth_hex) {
+        let expected = self.auth_hex.lock().unwrap().clone();
+        if !validate_auth(&auth_token, &expected) {
             ack(false, Some("auth failed".into()), &conn)?;
             return Ok(());
         }

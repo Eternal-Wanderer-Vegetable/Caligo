@@ -27,6 +27,9 @@ struct Args {
     account: String,
     expect_pid: u32,
     core_build: String,
+    /// 凭据文件:存在则读取(重启连续性),不存在则生成并写入(user-only)。
+    /// 计划 §6.4:凭据不进 argv/日志 —— 文件是本地私有通道。
+    token_file: Option<String>,
 }
 
 fn parse_args() -> Option<Args> {
@@ -38,6 +41,7 @@ fn parse_args() -> Option<Args> {
         account: String::new(),
         expect_pid: 0,
         core_build: caligo_core::CORE_BUILD.to_string(),
+        token_file: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -52,6 +56,7 @@ fn parse_args() -> Option<Args> {
             "--account" => a.account = next(&mut i)?,
             "--expect-pid" => a.expect_pid = next(&mut i)?.parse().ok()?,
             "--core-build" => a.core_build = next(&mut i)?,
+            "--token-file" => a.token_file = next(&mut i),
             _ => {}
         }
         i += 1;
@@ -78,6 +83,8 @@ fn main() {
         expect_client_pid: args.expect_pid,
         runtime: Default::default(),
     };
+    // 凭据:token-file 优先(重启连续性;文件 user-only,不进 argv/日志)。
+    // Daemon::start 自身生成随机 token —— token-file 模式下用文件内容覆盖。
     let daemon = match caligo_core::daemon::Daemon::start(config) {
         Ok(d) => d,
         Err(e) => {
@@ -85,6 +92,17 @@ fn main() {
             std::process::exit(3);
         }
     };
+    if let Some(tf) = &args.token_file {
+        let token = match std::fs::read_to_string(tf) {
+            Ok(t) if t.trim().len() == 64 => t.trim().to_string(),
+            _ => {
+                let t = daemon.auth_token();
+                let _ = std::fs::write(tf, &t);
+                t
+            }
+        };
+        daemon.set_auth_token(&token);
+    }
     let (bridge_name, control_name) = daemon.pipe_names();
     // 启动信息首行(JSON):管道名 + 认证 token。启动方读取后应立即吞掉该输出。
     println!(

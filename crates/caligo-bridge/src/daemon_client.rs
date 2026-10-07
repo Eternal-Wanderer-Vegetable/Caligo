@@ -15,7 +15,7 @@
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
@@ -72,6 +72,108 @@ pub struct WorkerCounters {
     pub protocol_errors: u64,
     pub clean_stops: u64,
     pub bootstraps_attempted: u64,
+}
+
+/// 进程级原子计数(worker 在 QQ 内运行,导出侧可随时取证)。
+#[derive(Debug, Default)]
+pub struct AtomicCounters {
+    pub connects: AtomicU64,
+    pub connect_failures: AtomicU64,
+    pub reconnects: AtomicU64,
+    pub hellos_accepted: AtomicU64,
+    pub hello_rejected: AtomicU64,
+    pub dispatches: AtomicU64,
+    pub results_sent: AtomicU64,
+    pub events_sent: AtomicU64,
+    pub events_acked: AtomicU64,
+    pub events_gap_dropped: AtomicU64,
+    pub heartbeats_sent: AtomicU64,
+    pub heartbeat_timeouts: AtomicU64,
+    pub protocol_errors: AtomicU64,
+    pub clean_stops: AtomicU64,
+    pub bootstraps_attempted: AtomicU64,
+}
+
+static GLOBAL_COUNTERS: AtomicCounters = AtomicCounters {
+    connects: AtomicU64::new(0),
+    connect_failures: AtomicU64::new(0),
+    reconnects: AtomicU64::new(0),
+    hellos_accepted: AtomicU64::new(0),
+    hello_rejected: AtomicU64::new(0),
+    dispatches: AtomicU64::new(0),
+    results_sent: AtomicU64::new(0),
+    events_sent: AtomicU64::new(0),
+    events_acked: AtomicU64::new(0),
+    events_gap_dropped: AtomicU64::new(0),
+    heartbeats_sent: AtomicU64::new(0),
+    heartbeat_timeouts: AtomicU64::new(0),
+    protocol_errors: AtomicU64::new(0),
+    clean_stops: AtomicU64::new(0),
+    bootstraps_attempted: AtomicU64::new(0),
+};
+
+/// 计数快照(导出侧取证;字段与顺序即 JSONL 输出顺序)。
+pub fn counters_snapshot() -> WorkerCounters {
+    let g = &GLOBAL_COUNTERS;
+    WorkerCounters {
+        connects: g.connects.load(Ordering::Relaxed),
+        connect_failures: g.connect_failures.load(Ordering::Relaxed),
+        reconnects: g.reconnects.load(Ordering::Relaxed),
+        hellos_accepted: g.hellos_accepted.load(Ordering::Relaxed),
+        hello_rejected: g.hello_rejected.load(Ordering::Relaxed),
+        dispatches: g.dispatches.load(Ordering::Relaxed),
+        results_sent: g.results_sent.load(Ordering::Relaxed),
+        events_sent: g.events_sent.load(Ordering::Relaxed),
+        events_acked: g.events_acked.load(Ordering::Relaxed),
+        events_gap_dropped: g.events_gap_dropped.load(Ordering::Relaxed),
+        heartbeats_sent: g.heartbeats_sent.load(Ordering::Relaxed),
+        heartbeat_timeouts: g.heartbeat_timeouts.load(Ordering::Relaxed),
+        protocol_errors: g.protocol_errors.load(Ordering::Relaxed),
+        clean_stops: g.clean_stops.load(Ordering::Relaxed),
+        bootstraps_attempted: g.bootstraps_attempted.load(Ordering::Relaxed),
+    }
+}
+
+impl WorkerCounters {
+    fn publish(&self) {
+        let g = &GLOBAL_COUNTERS;
+        g.connects.store(self.connects, Ordering::Relaxed);
+        g.connect_failures.store(self.connect_failures, Ordering::Relaxed);
+        g.reconnects.store(self.reconnects, Ordering::Relaxed);
+        g.hellos_accepted.store(self.hellos_accepted, Ordering::Relaxed);
+        g.hello_rejected.store(self.hello_rejected, Ordering::Relaxed);
+        g.dispatches.store(self.dispatches, Ordering::Relaxed);
+        g.results_sent.store(self.results_sent, Ordering::Relaxed);
+        g.events_sent.store(self.events_sent, Ordering::Relaxed);
+        g.events_acked.store(self.events_acked, Ordering::Relaxed);
+        g.events_gap_dropped.store(self.events_gap_dropped, Ordering::Relaxed);
+        g.heartbeats_sent.store(self.heartbeats_sent, Ordering::Relaxed);
+        g.heartbeat_timeouts.store(self.heartbeat_timeouts, Ordering::Relaxed);
+        g.protocol_errors.store(self.protocol_errors, Ordering::Relaxed);
+        g.clean_stops.store(self.clean_stops, Ordering::Relaxed);
+        g.bootstraps_attempted.store(self.bootstraps_attempted, Ordering::Relaxed);
+    }
+
+    pub fn as_json(&self) -> String {
+        let mut out = String::with_capacity(256);
+        out.push_str("{\"connects\":"); out.push_str(&self.connects.to_string());
+        out.push_str(",\"connect_failures\":"); out.push_str(&self.connect_failures.to_string());
+        out.push_str(",\"reconnects\":"); out.push_str(&self.reconnects.to_string());
+        out.push_str(",\"hellos_accepted\":"); out.push_str(&self.hellos_accepted.to_string());
+        out.push_str(",\"hello_rejected\":"); out.push_str(&self.hello_rejected.to_string());
+        out.push_str(",\"dispatches\":"); out.push_str(&self.dispatches.to_string());
+        out.push_str(",\"results_sent\":"); out.push_str(&self.results_sent.to_string());
+        out.push_str(",\"events_sent\":"); out.push_str(&self.events_sent.to_string());
+        out.push_str(",\"events_acked\":"); out.push_str(&self.events_acked.to_string());
+        out.push_str(",\"events_gap_dropped\":"); out.push_str(&self.events_gap_dropped.to_string());
+        out.push_str(",\"heartbeats_sent\":"); out.push_str(&self.heartbeats_sent.to_string());
+        out.push_str(",\"heartbeat_timeouts\":"); out.push_str(&self.heartbeat_timeouts.to_string());
+        out.push_str(",\"protocol_errors\":"); out.push_str(&self.protocol_errors.to_string());
+        out.push_str(",\"clean_stops\":"); out.push_str(&self.clean_stops.to_string());
+        out.push_str(",\"bootstraps_attempted\":"); out.push_str(&self.bootstraps_attempted.to_string());
+        out.push('}');
+        out
+    }
 }
 
 /// worker 退出原因。
@@ -199,11 +301,15 @@ impl PipeConn {
                 }
                 if w == 0x00000102 {
                     // WAIT_TIMEOUT:轮询 cancel;置位 → 取消并回收(计划 §5.3)。
+                    // 部分读必须交付(同 core::transport 的帧流撕毁修复)。
                     if cancel.load(Ordering::Relaxed) {
                         windows_sys::Win32::System::IO::CancelIoEx(self.handle, &mut ov);
                         let mut t = 0u32;
-                        let _ = windows_sys::Win32::System::IO::GetOverlappedResult(self.handle, &mut ov, &mut t, 1);
+                        let ok = windows_sys::Win32::System::IO::GetOverlappedResult(self.handle, &mut ov, &mut t, 1);
                         windows_sys::Win32::Foundation::CloseHandle(event);
+                        if ok != 0 && t > 0 {
+                            return Ok(t as usize);
+                        }
                         return Err(PipeError::TimedOut);
                     }
                     continue;
@@ -316,9 +422,15 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
 ) -> (WorkerCounters, WorkerExit) {
     let mut c = WorkerCounters::default();
     let mut backoff = cfg.reconnect_backoff_ms.max(100);
+    macro_rules! publish {
+        () => {
+            c.publish();
+        };
+    }
     loop {
+        publish!(); // 实时计数:导出侧快照随时可取证(退出时再终发布)
         if stop.load(Ordering::Relaxed) {
-            c.clean_stops += 0; // 本侧停止不经 Stopped 消息
+            publish!();
             return (c, WorkerExit::LocalStop);
         }
         // —— 连接 ——
@@ -384,11 +496,16 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
         match session {
             SessionEnd::CoreStopped => {
                 c.clean_stops += 1;
+                publish!();
                 return (c, WorkerExit::CoreStopped);
             }
-            SessionEnd::LocalStop => return (c, WorkerExit::LocalStop),
+            SessionEnd::LocalStop => {
+                publish!();
+                return (c, WorkerExit::LocalStop);
+            }
             SessionEnd::HelloRejected => {
                 c.hello_rejected += 1;
+                publish!();
                 return (c, WorkerExit::HelloRejected);
             }
             SessionEnd::Broken => {

@@ -89,7 +89,7 @@ fn connect_bridge(daemon: &Arc<Daemon>) -> BridgeClient {
     for _ in 0..100 {
         match BridgeClient::connect(
             &bridge_name,
-            daemon.auth_token(),
+            &daemon.auth_token(),
             "chain-bridge 0.1.0",
             1,
             "10001",
@@ -105,7 +105,7 @@ fn connect_bridge(daemon: &Arc<Daemon>) -> BridgeClient {
 fn connect_control(daemon: &Arc<Daemon>) -> ControlClient {
     let (_, control_name) = daemon.pipe_names();
     for _ in 0..100 {
-        match ControlClient::connect(&control_name, daemon.auth_token(), "chain-client 0.1.0") {
+        match ControlClient::connect(&control_name, &daemon.auth_token(), "chain-client 0.1.0") {
             Ok(c) => return c,
             Err(_) => std::thread::sleep(Duration::from_millis(20)),
         }

@@ -262,8 +262,13 @@ impl PipeConnection {
                         if flag.load(std::sync::atomic::Ordering::Relaxed) {
                             CancelIoEx(self.handle, ov);
                             // 取消后等待真正完成,回收 OVERLAPPED(计划 §5.3)。
+                            // **部分读必须交付**:取消竞态中已完成 n>0 字节时
+                            // 返回 Ok(n) —— 丢弃会撕毁帧流(并行负载实capture)。
                             let mut transferred = 0u32;
-                            let _ = GetOverlappedResult(self.handle, ov, &mut transferred, 1);
+                            let ok = GetOverlappedResult(self.handle, ov, &mut transferred, 1);
+                            if ok != 0 && transferred > 0 {
+                                return Ok(transferred as usize);
+                            }
                             return Err(TransportError::TimedOut);
                         }
                     }

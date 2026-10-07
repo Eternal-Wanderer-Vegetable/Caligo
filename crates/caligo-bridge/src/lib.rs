@@ -670,6 +670,16 @@ fn leaked_wide(mut wide: Vec<u16>) -> &'static [u16] {
     Box::leak(wide.into_boxed_slice())
 }
 
+/// daemon worker 计数取证(写入 bootstrap 登记的报告 JSONL)。
+/// 单参占位(CreateRemoteThread 需要参数;导出不读它)。
+#[cfg(feature = "research")]
+#[no_mangle]
+pub extern "system" fn caligo_qq_daemon_status(_reserved: usize) -> u32 {
+    let counters = daemon_client::counters_snapshot();
+    qq_entry::append_stage_simple("daemon_counters", true, &counters.as_json());
+    daemon_client_code::OK
+}
+
 /// 把 NUL 结尾 UTF-16 指针读为 String(上限 32 KiB;失败返回 None)。
 #[cfg(feature = "research")]
 fn wide_ptr_to_string(p: *const u16) -> Option<String> {

@@ -88,6 +88,7 @@ fn main() -> ExitCode {
         Some("inject") => cmd_inject(&args[1..]),
         Some("qq-entry") => qqentry::cmd_qq_entry(&args[1..]),
         Some("qq-entry-stop") => qqentry::cmd_qq_entry_stop(&args[1..]),
+        Some("daemon-control") => cmd_daemon_control(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             ExitCode::FAILURE
@@ -1611,3 +1612,82 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     }
 }
 
+
+
+// ---------------------------------------------------------------------------
+// K4-D7b:caligod 控制面客户端(纯 IPC,无 QQ 访问;不门控)。
+// daemon-control --pipe <control-pipe> --auth <token> <health|stop|query <id>>
+// ---------------------------------------------------------------------------
+
+fn cmd_daemon_control(args: &[String]) -> ExitCode {
+    let mut pipe: Option<String> = None;
+    let mut auth = String::new();
+    let mut cmd: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let next = |i: &mut usize| -> Option<String> {
+            *i += 1;
+            args.get(*i).cloned()
+        };
+        match args[i].as_str() {
+            "--pipe" => pipe = next(&mut i),
+            "--auth" => auth = next(&mut i).unwrap_or_default(),
+            other => cmd.push(other.to_string()),
+        }
+        i += 1;
+    }
+    let (Some(pipe), action) = (pipe, cmd.first().map(String::as_str)) else {
+        eprintln!("daemon-control --pipe <control-pipe> --auth <token> <health|stop|query <id>|drain [n]>");
+        return ExitCode::FAILURE;
+    };
+    // 连接 + Hello(重试等待 server 就绪)。
+    let mut client = None;
+    for _ in 0..100 {
+        match caligo_core::daemon::ControlClient::connect(&pipe, &auth, "caligo-cli daemon-control") {
+            Ok(c) => {
+                client = Some(c);
+                break;
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+    let mut client = match client {
+        Some(c) => c,
+        None => {
+            eprintln!("connect failed(server 未就绪或认证拒绝)");
+            return ExitCode::FAILURE;
+        }
+    };
+    use caligo_core::ipc::{ControlMsg, CoreToControlMsg};
+    let req = match action {
+        Some("health") => ControlMsg::Health {},
+        Some("stop") => ControlMsg::Stop {},
+        Some("query") => ControlMsg::QueryRequest {
+            request_id: cmd.get(1).cloned().unwrap_or_default(),
+        },
+        Some("drain") => ControlMsg::DrainEvents {
+            max: cmd.get(1).and_then(|s| s.parse().ok()).unwrap_or(16),
+        },
+        _ => {
+            eprintln!("未知动作: {action:?}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match client.request(req) {
+        Ok(reply) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&reply).unwrap_or_else(|_| format!("{reply:?}"))
+            );
+            match action {
+                Some("stop") if matches!(reply, CoreToControlMsg::Stopped { .. }) => ExitCode::SUCCESS,
+                Some("health") if matches!(reply, CoreToControlMsg::HealthAck { .. }) => ExitCode::SUCCESS,
+                _ => ExitCode::SUCCESS,
+            }
+        }
+        Err(e) => {
+            eprintln!("request: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
