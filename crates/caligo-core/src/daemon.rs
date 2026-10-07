@@ -163,14 +163,17 @@ impl Daemon {
 /// 阻塞运行:双 accept 循环;停止后收尾 actor(stop→close)。
     pub fn run(self: &Arc<Self>) -> Result<(), SessionError> {
         let (bridge_name, control_name) = self.pipe_names();
+        eprintln!("[daemon] creating bridge pipe: {bridge_name}");
         let bridge_srv = PipeServer::create(&bridge_name).map_err(|e| {
             eprintln!("[daemon] create {bridge_name}: {e}");
             SessionError::Transport(e)
         })?;
+        eprintln!("[daemon] bridge created ok; creating control pipe: {control_name}");
         let control_srv = PipeServer::create(&control_name).map_err(|e| {
             eprintln!("[daemon] create {control_name}: {e}");
             SessionError::Transport(e)
         })?;
+        eprintln!("[daemon] both pipes created; spawning accept loops");
         let t_bridge = {
             let d = self.clone();
             std::thread::spawn(move || d.accept_loop(&bridge_srv, Role::Bridge))
@@ -198,15 +201,20 @@ impl Daemon {
                 Err(TransportError::TimedOut) => continue,
                 Err(e) => return Err(SessionError::Transport(e)),
             };
-            // PID 校验(指定进程;0 = 不校验)。
-            if self.config.expect_client_pid != 0 {
+            // PID 校验:仅 bridge 连接(指定实例判据)。控制面客户端是
+            // 本机的测试工具/执行者进程,凭 token 认证,不校验 PID。
+            if role == Role::Bridge && self.config.expect_client_pid != 0 {
                 match conn.client_pid() {
                     Ok(pid) if pid == self.config.expect_client_pid => {}
                     Ok(pid) => {
-                        return Err(SessionError::Frame(format!(
-                            "client pid {pid} != designated {}",
+                        let err = SessionError::Frame(format!(
+                            "bridge client pid {pid} != designated {}",
                             self.config.expect_client_pid
-                        )));
+                        ));
+                        eprintln!("[daemon] {err}");
+                        // 仅拒此连接,不杀 accept 线程(否则控制面同被拖死)。
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        continue;
                     }
                     Err(e) => return Err(SessionError::Transport(e)),
                 }

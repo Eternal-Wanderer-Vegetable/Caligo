@@ -1640,7 +1640,13 @@ fn cmd_daemon_control(args: &[String]) -> ExitCode {
         eprintln!("daemon-control --pipe <control-pipe> --auth <token> <health|stop|query <id>|drain [n]>");
         return ExitCode::FAILURE;
     };
-    // 连接 + Hello(重试等待 server 就绪)。
+    // 连接 + Hello(重试等待 server 就绪)。短名自动补管道根(规避跨 shell
+    // 反斜杠转换;与 daemon 侧 pipe_names 同规则)。
+    let pipe = if pipe.starts_with("\\\\.\\pipe\\") {
+        pipe
+    } else {
+        format!("\\\\.\\pipe\\{}", pipe.trim_start_matches('\\'))
+    };
     let mut client = None;
     for _ in 0..100 {
         match caligo_core::daemon::ControlClient::connect(&pipe, &auth, "caligo-cli daemon-control") {

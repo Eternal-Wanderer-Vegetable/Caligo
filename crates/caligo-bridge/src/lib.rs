@@ -564,6 +564,7 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
     use daemon_client_code as c;
     use qq_entry::QqOwnerAdapter;
     use resident::{Resident, ResidentLimits};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
     if cfg_json_ptr.is_null() {
         return c::ERR_NULL_CFG;
@@ -619,16 +620,23 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
     };
     let stop = handle.daemon_stop_flag();
     let resident = Arc::new(Resident::new(QqOwnerAdapter::new(handle), ResidentLimits::default()));
-    // resident 初始化(每代次一次;监听器延迟模式 —— D8 接线)。
-    if resident.bootstrap().is_err() {
-        return c::ERR_ALREADY_STARTED;
-    }
     let (tx, rx) = std::sync::mpsc::channel::<resident::SendOutcome>();
-    // drain 钩子:owner pump 执行 drain + 结果回传通道(自由函数安装,
-    // 句柄已 move 进 adapter)。
+    // resident 初始化必须在 owner 线程执行(计划 §5.1:宿主 API 前的
+    // owner 检查不是形式 —— 远程线程调用会被正确拒绝,D7-b 现场实证)。
+    // 因此挂在 drain 钩子里,由 owner pump 的首次 tick 完成;失败即
+    // Quarantined(写阶段日志,worker 退出)。
     {
         let r = resident.clone();
         qq_entry::install_drain_hook(Box::new(move || {
+            static OWNER_INIT: AtomicBool = AtomicBool::new(false);
+            if !OWNER_INIT.swap(true, Ordering::Relaxed) {
+                if let Err(e) = r.bootstrap() {
+                    eprintln!(
+                        "[qq-daemon] resident bootstrap failed on owner: {e:?} -> quarantine"
+                    );
+                    return 0;
+                }
+            }
             let _ = r.drain();
             for outcome in r.take_results() {
                 let _ = tx.send(outcome);
