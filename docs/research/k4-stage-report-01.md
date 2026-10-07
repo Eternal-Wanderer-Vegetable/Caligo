@@ -60,8 +60,15 @@ D5 遗留(如实,不影响 LAB 验收):
 3. 单帧/队列/heartbeat 参数沿用计划建议初值,实测调优记录在 D11。
 
 **现场前置(需执行者参与)**:
-- D6 准入核对表(`docs/acceptance/k4-field-entry.md`)—— K4-LAB 已具备
-  填写条件:D0 封闭、D1 事实核对、D2 候选合法来源、D4/D5 LAB 通过均已成立;
+- D6 准入核对表**已建立**(`docs/acceptance/k4-field-entry.md`):离线项
+  1.1–1.6、2.1–2.4、3.1–3.6 均为 PASS;唯一 UNKNOWN = 2.5(执行者在 D7
+  当日指定并登记新测试实例);
+- 候选 B 首入机器**已实现并通过 LAB**(`crates/caligo-bridge/src/qq_entry.rs`,
+  仅 research 构建):RequestInterrupt 首入 → owner 线程核 current(零不放行)
+  → owner 线程 uv_async_init 常驻句柄 → uv_async_send 唤醒面 → CLOSE_REQ
+  关闭协议(超时保留句柄);qq_entry_lab 5 项(含零 current 拒绝、陈旧 env
+  拒绝、关闭协议、D8/D9 面显式拒绝/延迟);真实 QQNT 地址/ABI 仍属 D7 现场
+  证据(B0-FIELD),LAB 假符号不构成现场证明;
 - D7 首次接入:B0-FIELD 十项中全部 [assumed] 项的现场实测;**在此之前
   现场保持暂停,final-boundary 铁律继续有效**;
 - D8–D11:收发样本、三轮恢复、2 小时运行 —— 全部需要执行者指定测试实例与对端观察。

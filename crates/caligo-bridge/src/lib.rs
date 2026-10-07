@@ -50,6 +50,8 @@ pub mod gate;
 pub mod host_adapter;
 pub mod intr;
 pub mod obs;
+#[cfg(feature = "research")]
+pub mod qq_entry;
 pub mod register;
 pub mod resident;
 

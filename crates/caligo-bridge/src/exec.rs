@@ -449,7 +449,8 @@ pub(crate) unsafe fn env_is_fresh_pub(qqnt_base: usize, env: usize) -> bool {
     }
 }
 
-#[cfg(test)]
+// 研究构建下无门控断言可测(门控恒放行);测试体仅在普通构建编译。
+#[cfg(all(test, not(feature = "research")))]
 mod tests {
     use super::*;
 

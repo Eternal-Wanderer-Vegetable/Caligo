@@ -28,6 +28,9 @@ pub enum HostOp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostOpResult {
     ListenerAdded { token: u64 },
+    /// 该宿主代次暂无消息监听(D7 面向 Health/身份/停止;监听器属 D8)。
+    /// resident 记录为延迟模式:关闭时不执行对称移除。
+    ListenerDeferred,
     ListenerRemoved,
     ProbeDone,
     Sent,

@@ -52,6 +52,7 @@ K4 起生产路线为宿主合法初始化 + 常驻 bridge + 命名管道 + 常�
 mod tests {
     use super::*;
 
+    #[cfg(not(feature = "research"))]
     #[test]
     fn research_feature_is_off_by_default() {
         // K4-D0 验收:普通构建研究路线关闭。research 构建下本测试编译不进。

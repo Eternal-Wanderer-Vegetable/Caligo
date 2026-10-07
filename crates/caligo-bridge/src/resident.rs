@@ -178,6 +178,10 @@ impl<A: HostAdapter> Resident<A> {
             HostOpResult::ListenerAdded { token: ltoken } => {
                 c.listener_token = Some(ltoken);
             }
+            // 延迟模式(D7):无消息监听可注册;关闭时不做对称移除。
+            HostOpResult::ListenerDeferred => {
+                c.listener_token = None;
+            }
             _ => return Err(HostError::Native { code: 2 }),
         }
         c.counters.listener_adds += 1;
