@@ -68,6 +68,11 @@ impl fmt::Display for SessionKey {
 }
 
 /// 会话代次:QQ 退出、重登或会话失效后递增,用于使旧回调与旧请求失效(计划 §6.3)。
+///
+/// K4 迁移说明:本类型不再同时代表宿主代次与连接代次 —— 三者已分离为
+/// [`HostIdentity`] / `SessionIdentity::session_generation` / [`ConnectionIdentity`]。
+/// 旧 `RunId(g)` 数值原值迁移为 `session_generation`(见
+/// [`SessionIdentity::from_run_id`])。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RunId(pub u64);
 
@@ -110,6 +115,200 @@ pub struct TextMessage {
     pub native_ref: NativeMessageRef,
 }
 
+// ---------------------------------------------------------------------------
+// K4-D3:三代次身份、事件与动作状态(计划 §6.2/§6.5/§6.6)。
+// 纯数据:不含地址、JS handle 或线程原语。
+// ---------------------------------------------------------------------------
+
+/// 宿主代次身份:QQ 进程级。QQ 新进程或旧环境销毁即更换;同 PID 重用
+/// 仍算新宿主(creation time / nonce 参与判定)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostIdentity {
+    pub pid: u32,
+    /// 进程创建时间(RFC3339 UTC;空串 = 取不到,取不到时必须如实为空)。
+    pub process_created_utc: String,
+    /// manifest 基线标识(如 "qq-9.9.33-52230")。
+    pub module_baseline: String,
+    pub bridge_build: String,
+    /// 宿主随机 nonce:PID 数字重用也无法与旧宿主混淆。
+    pub host_nonce: u64,
+}
+
+/// 账号会话代次身份:登录/登出、原生会话失效或重新绑定时更换;
+/// 不能跨账号沿用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionIdentity {
+    pub host: HostIdentity,
+    pub account: AccountId,
+    pub session_generation: u64,
+}
+
+impl SessionIdentity {
+    /// 迁移映射:K1–K3 的 `RunId(g)` 语义 = `session_generation`(g 原值迁移)。
+    pub fn from_run_id(host: HostIdentity, account: AccountId, run: RunId) -> Self {
+        Self {
+            host,
+            account,
+            session_generation: run.0,
+        }
+    }
+}
+
+/// core 连接代次身份:core 重启或管道重新认证时更换;**不会**自动让 QQ
+/// 重新初始化(重连只换连接代次,不重注册监听器、不重发动作)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionIdentity {
+    pub core_instance_nonce: u64,
+    pub connection_epoch: u64,
+    pub protocol_version: u32,
+}
+
+/// 原生消息 ID:不损失精度的 opaque 字符串(原生字段的精确组合待 D8 实测
+/// 回填;在确认前禁止把它解析成数值或按正文/时间猜关联)。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NativeMessageId(pub String);
+
+/// 事件来源:接收 / 更新(同消息的编辑、回应等后续通知)/ 历史回补。
+/// 去重语义各不相同,必须区分(计划 §6.5)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EventSource {
+    Recv,
+    Update,
+    HistoryBackfill,
+}
+
+/// 常驻接收事件(计划 §6.5 字段集)。`event_seq` 由 core 在持久化时分配。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MsgEvent {
+    pub event_seq: u64,
+    pub session_generation: u64,
+    pub session: SessionKey,
+    pub direction: Direction,
+    /// 发送者标识(原生 sender 字段; opaque)。
+    pub sender: String,
+    pub native_id: NativeMessageId,
+    /// 完整 UTF-8 正文,无裁剪。
+    pub text: String,
+    /// 平台时间(若有;来源单独记录,不猜)。
+    pub platform_time: Option<u64>,
+    /// 本地观察时间(unix ms,单调性不作保证,仅展示)。
+    pub observed_at_unix_ms: u64,
+    pub source: EventSource,
+}
+
+/// 发送动作(计划 §6.6)。`payload_hash` 覆盖全部语义参数;
+/// 相同 request_id + 不同 payload → 拒绝;相同 request_id 重查 → 只查询。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendTextRequest {
+    pub request_id: String,
+    pub session_identity: SessionIdentity,
+    pub target: SessionKey,
+    pub text: String,
+    pub payload_hash: u64,
+    /// 用户等待策略(建议 30s);不是资源释放时刻。
+    pub deadline_ms: u64,
+}
+
+impl SendTextRequest {
+    /// FNV-1a(64):覆盖 request_id 之外的全部语义参数。
+    pub fn compute_payload_hash(
+        session_generation: u64,
+        target: &SessionKey,
+        text: &str,
+        deadline_ms: u64,
+    ) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut mix = |bytes: &[u8]| {
+            for b in bytes {
+                h ^= u64::from(*b);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            h ^= 0xff; // 域分隔
+        };
+        mix(&session_generation.to_le_bytes());
+        mix(target.to_string().as_bytes());
+        mix(text.as_bytes());
+        mix(&deadline_ms.to_le_bytes());
+        h
+    }
+}
+
+/// 动作状态机(计划 §6.6)。`DispatchIntent` 是 core 内部持久标记:
+/// "已决定派发给 bridge、尚未收到 bridge 确认"的窗口显式化。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionState {
+    Accepted,
+    Queued,
+    DispatchIntent,
+    NativeStarted,
+    /// QQ 服务明确成功且已关联实际原生消息身份(若本版本拿不到关联,
+    /// 不得进入此态 —— 见 §6.6 的契约约束)。
+    ConfirmedSuccess { native_id: Option<NativeMessageId> },
+    ConfirmedFailure { reason: String },
+    /// 仅 bridge 确认从未开始调用才允许;core 单方面超时不得断言。
+    CancelledUnsent,
+    /// native 是否执行不确定(崩溃窗口/结果丢失/迟到未回)。
+    DeliveryUnknown,
+}
+
+impl ActionState {
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            ActionState::ConfirmedSuccess { .. }
+                | ActionState::ConfirmedFailure { .. }
+                | ActionState::CancelledUnsent
+                | ActionState::DeliveryUnknown
+        )
+    }
+}
+
+/// 动作拒绝/未受理原因。与"发送失败"严格区分(计划 §6.6)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RejectReason {
+    /// 生命周期未到 Active。
+    NotActive { phase: Phase },
+    /// 会话身份过期/不匹配(宿主代次、账号或 session_generation)。
+    SessionStale,
+    /// 连接代次过期(旧连接上的请求)。
+    ConnectionStale,
+    /// 同 request_id 已存在但 payload 不同 → 冲突拒绝,不执行。
+    RequestIdPayloadConflict,
+    /// 队列/字节限额到达,明确未受理。
+    CapacityExhausted { queue: &'static str },
+    /// journal 不可写/损坏 → 拒绝发送(Degraded)。
+    JournalFailure,
+}
+
+/// 账号生命周期(计划 §6.2)。owner(core actor)串行控制全部迁移。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    Detached,
+    Bootstrapping,
+    Bound,
+    Active,
+    Degraded,
+    Stopping,
+    Closed,
+    Quarantined,
+}
+
+impl core::fmt::Display for Phase {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let s = match self {
+            Phase::Detached => "detached",
+            Phase::Bootstrapping => "bootstrapping",
+            Phase::Bound => "bound",
+            Phase::Active => "active",
+            Phase::Degraded => "degraded",
+            Phase::Stopping => "stopping",
+            Phase::Closed => "closed",
+            Phase::Quarantined => "quarantined",
+        };
+        f.write_str(s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +338,57 @@ mod tests {
         let r1 = NativeMessageRef::placeholder(key.clone());
         let r2 = NativeMessageRef::placeholder(key);
         assert_eq!(r1, r2);
+    }
+
+    // ---- K4-D3 ----
+
+    #[test]
+    fn host_nonce_distinguishes_reused_pid() {
+        let h1 = HostIdentity {
+            pid: 4242,
+            process_created_utc: "2026-10-07T01:00:00Z".into(),
+            module_baseline: "qq-9.9.33-52230".into(),
+            bridge_build: "caligo-bridge 0.1.0".into(),
+            host_nonce: 1,
+        };
+        let mut h2 = h1.clone();
+        h2.host_nonce = 2; // PID 重用、创建时间相同(极端)也要可区分
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn run_id_migrates_to_session_generation_verbatim() {
+        use crate::*;
+        let host = HostIdentity {
+            pid: 1,
+            process_created_utc: String::new(),
+            module_baseline: "qq-9.9.33-52230".into(),
+            bridge_build: "b".into(),
+            host_nonce: 7,
+        };
+        let s = SessionIdentity::from_run_id(host, AccountId("10001".into()), RunId(42));
+        assert_eq!(s.session_generation, 42);
+    }
+
+    #[test]
+    fn payload_hash_binds_all_semantic_params() {
+        use crate::*;
+        let t1 = SessionKey::new("10001", SessionKind::Private, "123456");
+        let t2 = SessionKey::new("10001", SessionKind::Group, "123456"); // 同数字不同种类
+        let a = SendTextRequest::compute_payload_hash(1, &t1, "hi", 30_000);
+        assert_ne!(a, SendTextRequest::compute_payload_hash(1, &t2, "hi", 30_000));
+        assert_ne!(a, SendTextRequest::compute_payload_hash(1, &t1, "hi ", 30_000));
+        assert_ne!(a, SendTextRequest::compute_payload_hash(2, &t1, "hi", 30_000));
+        assert_eq!(a, SendTextRequest::compute_payload_hash(1, &t1, "hi", 30_000));
+    }
+
+    #[test]
+    fn action_state_terminal_classification() {
+        use crate::*;
+        assert!(!ActionState::Queued.is_terminal());
+        assert!(!ActionState::NativeStarted.is_terminal());
+        assert!(ActionState::DeliveryUnknown.is_terminal());
+        assert!(ActionState::CancelledUnsent.is_terminal());
+        assert!(ActionState::ConfirmedSuccess { native_id: None }.is_terminal());
     }
 }

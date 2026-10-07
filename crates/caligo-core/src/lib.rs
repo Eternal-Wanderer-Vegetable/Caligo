@@ -1,9 +1,13 @@
-//! Caligo core:进程外核心(library 形态,K1 最小形态)。
+//! Caligo core:进程外核心(library 形态)。
 //!
-//! K1 范围:IPC 帧编解码与握手校验([`ipc`])。会话状态、动作队列、消息映射
-//! 按 K2-K4 计划逐步落地;K1 不实现任何 QQ 调用。
+//! K1 范围:IPC 帧编解码与握手校验([`ipc`])。
+//! K4-D3 范围:请求 journal 与事件账本([`journal`])、账号 actor
+//! ([`runtime`]) —— 生命周期、代次身份、请求状态机与恢复;不实现任何
+//! QQ 调用,native 侧由 bridge/夹具经显式 API 驱动。
 
 pub mod ipc;
+pub mod journal;
+pub mod runtime;
 
 /// core 构建标识,进入握手 HelloAck。
 pub const CORE_BUILD: &str = concat!("caligo-core ", env!("CARGO_PKG_VERSION"));
