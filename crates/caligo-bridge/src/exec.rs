@@ -48,6 +48,7 @@ static JS_PTR: AtomicUsize = AtomicUsize::new(0);
 static JS_LEN: AtomicUsize = AtomicUsize::new(0);
 static EXEC_ISOLATE: AtomicUsize = AtomicUsize::new(0);
 static EXEC_CTXV: AtomicUsize = AtomicUsize::new(0);
+static EXEC_ENV_ISOLATE: AtomicUsize = AtomicUsize::new(0);
 static EXPORTS: AtomicUsize = AtomicUsize::new(0);
 
 const RESULT_CAP: usize = 64 * 1024;
@@ -199,20 +200,40 @@ unsafe fn resolve_exports(qqnt: usize, report: &str) -> Option<ExecExports> {
     })
 }
 
-/// uv_async 回调:主 env 轮转点上执行 JS_PTR/JS_LEN 指向的源码。
+/// uv_async 回调:主 env 轮转点上执行上下文阶梯 + JS_PTR/JS_LEN 源码。
+/// 阶梯必须在主循环线程(此处)执行——远程线程直调 v8 方法会死锁(49688 事故)。
 unsafe extern "C" fn exec_cb(_handle: *mut c_void) {
     // SAFETY: 全路径页校验 + 错误码化,无异常外泄。
     unsafe {
         let js_ptr = JS_PTR.load(Ordering::Acquire);
         let js_len = JS_LEN.load(Ordering::Acquire);
         let ex_ptr = EXPORTS.load(Ordering::Acquire);
-        let isolate = EXEC_ISOLATE.load(Ordering::Acquire);
-        let ctxv = EXEC_CTXV.load(Ordering::Acquire);
-        if js_ptr == 0 || js_len == 0 || !page_span_ok(js_ptr, js_len) || ex_ptr == 0 || isolate == 0 || ctxv == 0 {
+        let env_isolate = EXEC_ENV_ISOLATE.load(Ordering::Acquire);
+        if js_ptr == 0 || js_len == 0 || !page_span_ok(js_ptr, js_len) || ex_ptr == 0 || env_isolate == 0 {
             RESULT_SEQ.store(9, Ordering::Release);
             return;
         }
         let ex: &ExecExports = &*(ex_ptr as *const ExecExports);
+        // 上下文阶梯(本线程 = 主循环线程,与 async_cb 同位;asyncrun 已证安全)。
+        // SAFETY: GetCurrent 无参静态;entered/incumbent 为纯读访问器。
+        let current = (ex.isolate_get_current)() as usize;
+        let isolate = if current != 0 { current } else { env_isolate };
+        let entered = call_sret1(ex.entered_ctx, isolate as *mut c_void);
+        let mut ctxv = 0usize;
+        if !local_empty(entered) {
+            ctxv = entered;
+        } else {
+            let incumbent = call_sret1(ex.incumbent_ctx, isolate as *mut c_void);
+            if !local_empty(incumbent) {
+                ctxv = incumbent;
+            }
+        }
+        if ctxv == 0 {
+            RESULT_SEQ.store(5, Ordering::Release);
+            return;
+        }
+        EXEC_ISOLATE.store(isolate, Ordering::Release);
+        EXEC_CTXV.store(ctxv, Ordering::Release);
         let mut scope = [0usize; 8];
         (ex.hs_ctor)(scope.as_mut_ptr().cast(), isolate as *mut c_void);
         let mut src = 0usize;
@@ -346,31 +367,11 @@ pub unsafe fn exec_run(ctx: &ExecCtx) -> u32 {
             );
             return exec_code::ERR_NO_QQNT;
         }
-        let Some(env_isolate) = read_usize(ctx.env + 0xA0) else {
+        let Some(_env_isolate_check) = read_usize(ctx.env + 0xA0) else {
             append_stage(&report, "validate_env", false, "env+0xA0 unreadable");
             return exec_code::ERR_NO_QQNT;
         };
-        let current = (ex.isolate_get_current)() as usize;
-        let isolate = if current != 0 { current } else { env_isolate };
-        let entered = call_sret1(ex.entered_ctx, isolate as *mut c_void);
-        let mut ctxv = 0usize;
-        if !local_empty(entered) {
-            ctxv = entered;
-        } else {
-            let inc = call_sret1(ex.incumbent_ctx, isolate as *mut c_void);
-            if !local_empty(inc) {
-                ctxv = inc;
-            }
-        }
-        if ctxv == 0 {
-            append_stage(&report, "context", false, "no entered/incumbent context");
-            return exec_code::ERR_NO_CONTEXT;
-        }
-        EXEC_ISOLATE.store(isolate, Ordering::Release);
-        EXEC_CTXV.store(ctxv, Ordering::Release);
-        JS_PTR.store(ctx.js, Ordering::Release);
-        JS_LEN.store(ctx.js_len, Ordering::Release);
-        append_stage(&report, "context", true, &format!("isolate={isolate:#x} ctx={ctxv:#x}"));
+        // 阶梯已在 exec_cb(主循环线程)执行——49688 死锁修复。
 
         let size = (ex.uv_handle_size)(1); // UV_ASYNC
         if size == 0 || size > 0x1000 {
@@ -410,7 +411,7 @@ pub unsafe fn exec_run(ctx: &ExecCtx) -> u32 {
         let len = RESULT_LEN.load(Ordering::Acquire) as usize;
         let ok = seq == 2;
         // SAFETY: 回调已发布;长度受上限。
-        let text = unsafe {
+        let text = {
             core::slice::from_raw_parts(core::ptr::addr_of!(RESULT_BUF).cast::<u8>(), len)
         };
         append_stage(&report, "result", ok, &format!("seq={seq} {}", String::from_utf8_lossy(text)));
