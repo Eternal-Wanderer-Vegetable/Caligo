@@ -108,6 +108,10 @@ unsafe extern "C" fn fake_uv_async_init(
     0
 }
 
+unsafe extern "C" fn fake_uv_loop_alive(_loop_: *mut core::ffi::c_void) -> i32 {
+    1
+}
+
 unsafe extern "C" fn fake_uv_async_send(_h: *mut core::ffi::c_void) -> i32 {
     FAKE_SEND_CALLS.fetch_add(1, Ordering::Relaxed);
     0
@@ -158,7 +162,15 @@ fn fake_symbols() -> EntrySymbols {
     let a4: FnUvClose = fake_uv_close;
     let a5: FnIsolateGetCurrent = fake_isolate_get_current;
     let a6: FnRequestInterrupt = fake_request_interrupt;
-    EntrySymbols::from_raw(a1 as usize, a2 as usize, a3 as usize, a4 as usize, a5 as usize, a6 as usize)
+    EntrySymbols::from_raw(
+        a1 as usize,
+        a2 as usize,
+        a3 as usize,
+        a4 as usize,
+        fake_uv_loop_alive as *const () as usize,
+        a5 as usize,
+        a6 as usize,
+    )
 }
 
 fn report_path(tag: &str) -> String {

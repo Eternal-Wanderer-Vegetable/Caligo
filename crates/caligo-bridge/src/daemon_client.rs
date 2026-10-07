@@ -552,6 +552,8 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
     let mut acked_high: u64 = 0;
     let mut last_heartbeat = Instant::now();
     let mut heartbeat_misses: u32 = 0;
+    // resident 未就绪期的待提交队列(owner 初始化完成后补交)。
+    let mut pending: VecDeque<(String, usize)> = VecDeque::new();
 
     // HelloAck(阻塞;被拒 → 不可重试)。
     loop {
@@ -581,6 +583,22 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
     loop {
         if stop.load(Ordering::Relaxed) {
             return SessionEnd::LocalStop;
+        }
+        c.publish(); // 实时计数(导出侧快照取证)
+        // 0) 待提交补交(resident 就绪后)。
+        let plen = pending.len();
+        for _ in 0..plen {
+            let (id, len) = pending.front().cloned().expect("nonempty");
+            match resident.submit(crate::resident::OwnedRequest::SendText {
+                request_id: id.clone(),
+                text_len: len,
+            }) {
+                crate::resident::SubmitVerdict::Accepted => {
+                    pending.pop_front();
+                    wake();
+                }
+                _ => break, // 仍未就绪:保留队列,下轮再试
+            }
         }
         // 1) 结果回传(Failure/Unknown/Success 都立即上报)。
         while let Ok(outcome) = result_rx.try_recv() {
@@ -677,10 +695,14 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
                 if send_json(conn, &BridgeMsg::NativeStarted { request_id: request_id.clone() }).is_err() {
                     return SessionEnd::Broken;
                 }
-                let _ = resident.submit(crate::resident::OwnedRequest::SendText {
-                    request_id,
+                match resident.submit(crate::resident::OwnedRequest::SendText {
+                    request_id: request_id.clone(),
                     text_len: text.len(),
-                });
+                }) {
+                    crate::resident::SubmitVerdict::Accepted => {}
+                    // resident 未就绪(owner 初始化重试中):挂回待提交队列。
+                    _ => pending.push_back((request_id, text.len())),
+                }
                 wake();
             }
             Ok(CoreToBridgeMsg::EventAck { event_seq, suppressed }) => {

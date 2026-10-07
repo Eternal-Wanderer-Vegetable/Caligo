@@ -29,6 +29,7 @@ use crate::exec::EXPECTED_VTABLE_RVA;
 const NAME_UV_ASYNC_INIT: &str = "uv_async_init";
 const NAME_UV_ASYNC_SEND: &str = "uv_async_send";
 const NAME_UV_HANDLE_SIZE: &str = "uv_handle_size";
+const NAME_UV_LOOP_ALIVE: &str = "uv_loop_alive";
 const NAME_UV_CLOSE: &str = "uv_close";
 const NAME_ISOLATE_GETCURRENT: &str = "?GetCurrent@Isolate@v8@@SAPEAV12@XZ";
 const NAME_REQUEST_INTERRUPT: &str =
@@ -41,6 +42,7 @@ type FnUvAsyncInit = unsafe extern "C" fn(
 ) -> i32;
 type FnUvAsyncSend = unsafe extern "C" fn(async_: *mut core::ffi::c_void) -> i32;
 type FnUvHandleSize = unsafe extern "C" fn(t: i32) -> usize;
+type FnUvLoopAlive = unsafe extern "C" fn(loop_: *mut core::ffi::c_void) -> i32;
 type FnUvClose = unsafe extern "C" fn(
     handle: *mut core::ffi::c_void,
     cb: Option<unsafe extern "C" fn(*mut core::ffi::c_void)>,
@@ -59,6 +61,7 @@ pub struct EntrySymbols {
     pub uv_async_send: usize,
     pub uv_handle_size: usize,
     pub uv_close: usize,
+    pub uv_loop_alive: usize,
     pub isolate_get_current: usize,
     pub request_interrupt: usize,
 }
@@ -78,6 +81,7 @@ impl EntrySymbols {
             uv_async_init: get(NAME_UV_ASYNC_INIT)?,
             uv_async_send: get(NAME_UV_ASYNC_SEND)?,
             uv_handle_size: get(NAME_UV_HANDLE_SIZE)?,
+            uv_loop_alive: get(NAME_UV_LOOP_ALIVE)?,
             uv_close: get(NAME_UV_CLOSE)?,
             isolate_get_current: get(NAME_ISOLATE_GETCURRENT)?,
             request_interrupt: get(NAME_REQUEST_INTERRUPT)?,
@@ -90,6 +94,7 @@ impl EntrySymbols {
         uv_async_send: usize,
         uv_handle_size: usize,
         uv_close: usize,
+        uv_loop_alive: usize,
         isolate_get_current: usize,
         request_interrupt: usize,
     ) -> Self {
@@ -98,6 +103,7 @@ impl EntrySymbols {
             uv_async_send,
             uv_handle_size,
             uv_close,
+            uv_loop_alive,
             isolate_get_current,
             request_interrupt,
         }
@@ -142,6 +148,7 @@ struct EntryShared {
     sym_uv_async_init: AtomicUsize,
     sym_uv_async_send: AtomicUsize,
     sym_uv_handle_size: AtomicUsize,
+    sym_uv_loop_alive: AtomicUsize,
     sym_uv_close: AtomicUsize,
     sym_isolate_get_current: AtomicUsize,
     // 机器状态。
@@ -247,6 +254,7 @@ static ENTRY: EntryShared = EntryShared {
     sym_uv_async_init: AtomicUsize::new(0),
     sym_uv_async_send: AtomicUsize::new(0),
     sym_uv_handle_size: AtomicUsize::new(0),
+    sym_uv_loop_alive: AtomicUsize::new(0),
     sym_uv_close: AtomicUsize::new(0),
     sym_isolate_get_current: AtomicUsize::new(0),
     tid: AtomicUsize::new(0),
@@ -593,6 +601,9 @@ pub fn bootstrap(cfg: &EntryConfig, symbols: &EntrySymbols) -> Result<EntryHandl
     ENTRY
         .sym_uv_handle_size
         .store(symbols.uv_handle_size, Ordering::Release);
+    ENTRY
+        .sym_uv_loop_alive
+        .store(symbols.uv_loop_alive, Ordering::Release);
     ENTRY.sym_uv_close.store(symbols.uv_close, Ordering::Release);
     ENTRY
         .sym_isolate_get_current
@@ -658,6 +669,23 @@ pub fn shutdown(wait_ms: u32) -> Result<(), EntryError> {
     Ok(())
 }
 
+/// libuv 面存活校验(pump 阶段的宿主状态 gate):uv_loop_alive(loop)。
+/// 语义注记(计划 §5.1 范围界定):零 current 拒绝针对 V8/Node 表面;
+/// D7 的 pump 阶段无任何 V8 调用(监听器延迟、发送未接线),libuv 面
+/// 以 owner 线程 + env 新鲜 + loop 存活三重校验。D8/D9 触碰 V8 的操作
+/// 必须另加 entered/current context 校验(见 QqOwnerAdapter 文档)。
+pub fn uv_loop_alive() -> bool {
+    if ENTRY.ready.load(Ordering::Acquire) != 1 {
+        return false;
+    }
+    // SAFETY: 符号地址经 bootstrap 校验;调用发生在 loop 线程(pump)或
+    // 只读查询。
+    unsafe {
+        let f: FnUvLoopAlive = EntrySymbols::to_fn(ENTRY.sym_uv_loop_alive.load(Ordering::Acquire));
+        (f)(ENTRY.loop_ptr.load(Ordering::Acquire) as *mut core::ffi::c_void) != 0
+    }
+}
+
 /// LAB 专用:重置首入静态状态(仅 research 构建导出;生产链路永不调用 ——
 /// 真机上单宿主代次单实例,重置意味着允许二次首入,违反 §6.1)。
 #[doc(hidden)]
@@ -669,6 +697,7 @@ pub fn test_reset_state() {
     ENTRY.sym_uv_async_init.store(0, Ordering::Release);
     ENTRY.sym_uv_async_send.store(0, Ordering::Release);
     ENTRY.sym_uv_handle_size.store(0, Ordering::Release);
+    ENTRY.sym_uv_loop_alive.store(0, Ordering::Release);
     ENTRY.sym_uv_close.store(0, Ordering::Release);
     ENTRY.sym_isolate_get_current.store(0, Ordering::Release);
     ENTRY.tid.store(0, Ordering::Release);

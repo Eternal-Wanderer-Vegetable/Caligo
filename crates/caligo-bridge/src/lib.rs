@@ -628,13 +628,18 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
     {
         let r = resident.clone();
         qq_entry::install_drain_hook(Box::new(move || {
+            // owner 初始化:安静 QQ 的轮转点上下文条件可能暂不满足 —— 每次泵
+            // 重试直至成功;首次失败原因写阶段日志(不吞)。
             static OWNER_INIT: AtomicBool = AtomicBool::new(false);
-            if !OWNER_INIT.swap(true, Ordering::Relaxed) {
-                if let Err(e) = r.bootstrap() {
-                    eprintln!(
-                        "[qq-daemon] resident bootstrap failed on owner: {e:?} -> quarantine"
-                    );
-                    return 0;
+            if !OWNER_INIT.load(Ordering::Relaxed) {
+                match r.bootstrap() {
+                    Ok(_) => {
+                        OWNER_INIT.store(true, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        qq_entry::append_stage_simple("owner_init_retry", false, &format!("{e:?}"));
+                        return 0;
+                    }
                 }
             }
             let _ = r.drain();
