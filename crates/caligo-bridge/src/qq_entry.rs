@@ -18,7 +18,8 @@
 //! 全程阶段化 JSONL 取证(每阶段可独立 PASS/FAIL,供 D7 报告逐行引用)。
 //! 单进程单实例(计划 §6.1:每宿主代次初始化一次)。
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::exec::EXPECTED_VTABLE_RVA;
@@ -152,9 +153,90 @@ struct EntryShared {
     quarantine: AtomicUsize,   // pump 发现错误线程
     close_req: AtomicUsize,
     closed: AtomicUsize,
-    drain_hook: AtomicUsize,   // fn() -> usize(owner 轮转点执行)
     pumps: AtomicU64,
     wake_sends: AtomicU64,
+}
+
+/// owner 轮转点 drain 钩子(boxed 闭包;接线 worker 结果通道等捕获)。
+/// 单宿主代次单钩子;shutdown 清空(资源随代次收尾,非泄漏)。
+static DRAIN_HOOK: std::sync::Mutex<Option<Box<dyn Fn() -> usize + Send>>> =
+    std::sync::Mutex::new(None);
+
+/// 已启动的 daemon worker 停止标志(shutdown 先停 worker 再走关闭协议)。
+static DAEMON_STOP: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+
+/// 自由函数版钩子安装(导出侧在句柄 move 后仍可调用)。
+pub fn install_drain_hook(f: Box<dyn Fn() -> usize + Send>) {
+    if let Ok(mut g) = DRAIN_HOOK.lock() {
+        *g = Some(f);
+    }
+}
+
+/// daemon 启动产物(worker 停止标志;导出侧保存)。
+#[derive(Debug, Clone)]
+pub struct DaemonStartup {
+    pub stop: Arc<AtomicBool>,
+}
+
+/// bootstrap 成功的 EntryHandle 存档(daemon 导出取用;取走即空)。
+static STORED_HANDLE: std::sync::Mutex<Option<EntryHandle>> = std::sync::Mutex::new(None);
+/// 唤醒函数地址(uv_async_send 包装;worker 侧跨线程面)。
+static WAKE_ADDR: AtomicUsize = AtomicUsize::new(0);
+/// 报告路径指针(bootstrap 登记;shutdown/daemon 阶段日志)。
+static REPORT_PATH_PTR: AtomicUsize = AtomicUsize::new(0);
+
+/// daemon 导出侧:存档 bootstrap 句柄(bootstrap 成功后由导出调用)。
+pub fn store_entry_handle(h: EntryHandle, wake_addr: usize) {
+    WAKE_ADDR.store(wake_addr, Ordering::Release);
+    if let Ok(mut g) = STORED_HANDLE.lock() {
+        *g = Some(h);
+    }
+}
+
+/// daemon 导出侧:取走句柄(每代次一次)。
+pub fn take_stored_entry_handle() -> Option<EntryHandle> {
+    STORED_HANDLE.lock().ok()?.take()
+}
+
+/// worker 唤醒闭包地址(uv_async_send;0 = 不可用)。
+pub fn peek_stored_wake() -> Option<fn() -> bool> {
+    let addr = WAKE_ADDR.load(Ordering::Acquire);
+    if addr == 0 {
+        return None;
+    }
+    // SAFETY: 地址来自 EntryHandle::wake 的 fn 指针(bootstrap 成功后登记)。
+    Some(unsafe { std::mem::transmute::<usize, fn() -> bool>(addr) })
+}
+
+/// 登记报告路径(shutdown/daemon 阶段日志用)。
+pub fn register_report_path(p: *const u16) {
+    REPORT_PATH_PTR.store(p as usize, Ordering::Release);
+}
+
+/// daemon 导出侧:读取 worker 停止标志(shutdown 先停 worker)。
+pub fn peek_daemon_startup() -> Option<DaemonStartup> {
+    DAEMON_STOP.get().map(|f| DaemonStartup { stop: f.clone() })
+}
+
+/// 唤醒蹦床:EntryHandle::wake 的稳定地址(daemon 导出登记用;
+/// wake 内部读 ENTRY 静态,不捕获环境)。
+pub fn wake_trampoline_addr() -> usize {
+    // SAFETY: 仅取关联 fn 项地址。
+    unsafe { std::mem::transmute::<fn() -> bool, usize>(wake_trampoline) }
+}
+
+/// 蹦床本体:读静态句柄执行 uv_async_send。
+fn wake_trampoline() -> bool {
+    // 句柄地址存于 ENTRY.handle;ready 后恒有效。
+    if ENTRY.ready.load(Ordering::Acquire) != 1 {
+        return false;
+    }
+    // SAFETY: 符号地址经 bootstrap 校验;uv_async_send 是唯一合法跨线程面。
+    unsafe {
+        let send: FnUvAsyncSend =
+            EntrySymbols::to_fn(ENTRY.sym_uv_async_send.load(Ordering::Acquire));
+        (send)(ENTRY.handle.load(Ordering::Acquire) as *mut core::ffi::c_void) == 0
+    }
 }
 
 static ENTRY: EntryShared = EntryShared {
@@ -175,7 +257,6 @@ static ENTRY: EntryShared = EntryShared {
     quarantine: AtomicUsize::new(0),
     close_req: AtomicUsize::new(0),
     closed: AtomicUsize::new(0),
-    drain_hook: AtomicUsize::new(0),
     pumps: AtomicU64::new(0),
     wake_sends: AtomicU64::new(0),
 };
@@ -225,7 +306,7 @@ fn take_error() -> Option<EntryError> {
 pub fn append_stage_simple(stage: &str, ok: bool, detail: &str) {
     // ENTRY 不保存路径;shutdown 的日志由导出侧持有路径参数 —— 但导出无路径。
     // 折衷:日志写到 bootstrap 报告同目录的 shutdown.jsonl(若取不到路径则跳过)。
-    let path = REPORT_PATH.load(Ordering::Acquire);
+    let path = REPORT_PATH_PTR.load(Ordering::Acquire);
     if path == 0 {
         return;
     }
@@ -235,8 +316,6 @@ pub fn append_stage_simple(stage: &str, ok: bool, detail: &str) {
         append_stage(&p, stage, ok, detail);
     }
 }
-
-static REPORT_PATH: AtomicUsize = AtomicUsize::new(0);
 
 /// SAFETY: p 须指向 NUL 结尾 UTF-16 缓冲。
 unsafe fn wide_ptr_to_string_pub(p: *const u16) -> Option<String> {
@@ -384,10 +463,10 @@ unsafe extern "C" fn pump_cb(_handle: *mut core::ffi::c_void) {
             );
             return;
         }
-        let hook = ENTRY.drain_hook.load(Ordering::Acquire);
-        if hook != 0 {
-            let f: fn() -> usize = std::mem::transmute::<usize, fn() -> usize>(hook);
-            let _ = f();
+        if let Ok(guard) = DRAIN_HOOK.lock() {
+            if let Some(f) = guard.as_ref() {
+                let _ = f();
+            }
         }
     }
 }
@@ -415,9 +494,23 @@ impl EntryHandle {
         }
     }
 
-    /// 注册 owner 轮转点 drain 钩子(`fn() -> usize`,返回处理数)。
-    pub fn set_drain_hook(&self, f: fn() -> usize) {
-        ENTRY.drain_hook.store(f as usize, Ordering::Release);
+    /// 注册 owner 轮转点 drain 钩子(返回处理数;shutdown 时随代次清空)。
+    pub fn set_drain_hook(&self, f: Box<dyn Fn() -> usize + Send>) {
+        install_drain_hook(f);
+    }
+
+    /// 关闭后清空钩子(资源收尾语义,非泄漏)。
+    pub fn clear_drain_hook(&self) {
+        if let Ok(mut g) = DRAIN_HOOK.lock() {
+            *g = None;
+        }
+    }
+
+    /// daemon worker 停止标志(shutdown 接线用;首次调用创建)。
+    pub fn daemon_stop_flag(&self) -> Arc<AtomicBool> {
+        DAEMON_STOP
+            .get_or_init(|| Arc::new(AtomicBool::new(false)))
+            .clone()
     }
 
     /// 关闭协议:置 CLOSE_REQ → 唤醒 → owner pump 执行 uv_close →
@@ -486,7 +579,7 @@ pub fn bootstrap(cfg: &EntryConfig, symbols: &EntrySymbols) -> Result<EntryHandl
         &format!("isolate={isolate:#x} loop={loop_ptr:#x}"),
     );
     // 发布(ready 之前;回调以 Acquire 读取)。
-    REPORT_PATH.store(cfg.report_path.as_ptr() as usize, Ordering::Release);
+    REPORT_PATH_PTR.store(cfg.report_path.as_ptr() as usize, Ordering::Release);
     ENTRY.qqnt_base.store(cfg.qqnt_base, Ordering::Release);
     ENTRY.env.store(cfg.env, Ordering::Release);
     ENTRY.isolate.store(isolate, Ordering::Release);
@@ -559,6 +652,9 @@ pub fn shutdown(wait_ms: u32) -> Result<(), EntryError> {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+    if let Ok(mut g) = DRAIN_HOOK.lock() {
+        *g = None; // 关闭确认:钩子随代次收尾
+    }
     Ok(())
 }
 
@@ -583,7 +679,9 @@ pub fn test_reset_state() {
     ENTRY.quarantine.store(0, Ordering::Release);
     ENTRY.close_req.store(0, Ordering::Release);
     ENTRY.closed.store(0, Ordering::Release);
-    ENTRY.drain_hook.store(0, Ordering::Release);
+    if let Ok(mut g) = DRAIN_HOOK.lock() {
+        *g = None;
+    }
     ENTRY.pumps.store(0, Ordering::Relaxed);
     ENTRY.wake_sends.store(0, Ordering::Relaxed);
 }

@@ -204,10 +204,10 @@ fn staged_bootstrap_wake_and_owner_pump() {
     assert!(!handle.quarantine());
 
     // owner 轮转点:drain 钩子被调用。
-    handle.set_drain_hook(|| {
+    handle.set_drain_hook(Box::new(move || {
         DRAIN_CALLS.fetch_add(1, Ordering::Relaxed);
         1
-    });
+    }));
     assert!(handle.wake());
     assert_eq!(FAKE_SEND_CALLS.load(Ordering::Relaxed), 1);
     pump_once();

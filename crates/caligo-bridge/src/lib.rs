@@ -44,6 +44,8 @@ pub mod probe_code {
 }
 
 pub mod asyncrun;
+#[cfg(feature = "research")]
+pub mod daemon_client;
 pub mod envrun;
 pub mod exec;
 pub mod gate;
@@ -486,7 +488,15 @@ pub unsafe extern "system" fn caligo_qq_entry_bootstrap(ctx: *mut QqEntryCtx) ->
         return qq_entry_code::ERR_RESOLVE;
     };
     match bootstrap(&cfg, &symbols) {
-        Ok(_handle) => qq_entry_code::OK,
+        Ok(handle) => {
+            // 存档句柄(daemon 导出取用)+ 唤醒面地址 + 报告路径。
+            qq_entry::register_report_path(view.report_path as *const u16);
+            qq_entry::store_entry_handle(
+                handle,
+                qq_entry::wake_trampoline_addr(),
+            );
+            qq_entry_code::OK
+        }
         Err(e) => match e {
             EntryError::EnvNotFresh => qq_entry_code::ERR_ENV_NOT_FRESH,
             EntryError::LoopChainUnreadable => qq_entry_code::ERR_LOOP_CHAIN,
@@ -505,6 +515,10 @@ pub unsafe extern "system" fn caligo_qq_entry_bootstrap(ctx: *mut QqEntryCtx) ->
 #[no_mangle]
 pub extern "system" fn caligo_qq_entry_shutdown(wait_ms: u32) -> u32 {
     use qq_entry::EntryError;
+    // 先停 daemon worker(若已启动):关闭协议不与管道循环竞争。
+    if let Some(startup) = qq_entry::peek_daemon_startup() {
+        startup.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     match qq_entry::shutdown(wait_ms) {
         Ok(()) => {
             qq_entry::append_stage_simple("shutdown", true, "closed via owner pump");
@@ -514,6 +528,146 @@ pub extern "system" fn caligo_qq_entry_shutdown(wait_ms: u32) -> u32 {
         Err(EntryError::Timeout) => qq_entry_code::ERR_SHUTDOWN_TIMEOUT,
         Err(_) => qq_entry_code::ERR_SHUTDOWN_TIMEOUT,
     }
+}
+
+/// daemon client 启动结果码。
+#[cfg(feature = "research")]
+pub mod daemon_client_code {
+    pub const OK: u32 = 0;
+    pub const ERR_NULL_CFG: u32 = 1;
+    pub const ERR_BAD_CFG: u32 = 2;
+    pub const ERR_NOT_BOOTSTRAPPED: u32 = 3;
+    pub const ERR_ALREADY_STARTED: u32 = 4;
+    pub const ERR_SPAWN: u32 = 5;
+}
+
+/// daemon client 的 JSON 配置(caligo-cli 写入):
+/// `{"pipe_name":"...","auth_token":"...","session_generation":1,"account":"...","module_baseline":"..."}`
+#[cfg(feature = "research")]
+static DAEMON_CFG: std::sync::Mutex<Option<qq_entry::DaemonStartup>> = std::sync::Mutex::new(None);
+
+/// 启动常驻 daemon 客户端(bootstrap 成功后调用;每代次一次)。
+/// worker:自有线程,只做管道 I/O + resident 提交(计划 §3.1);
+/// drain 钩子接线 owner pump → 结果回传通道。
+///
+/// 参数:`cfg_json_ptr` 指向 NUL 结尾 UTF-8 JSON(CreateRemoteThread 单参):
+/// `{"pipe_name":"...","auth_token":"...","session_generation":1,
+///   "account":"...","module_baseline":"...","report_path":"..."}`
+/// (report_path 可省;为 daemon/关闭阶段日志路径)。
+///
+/// # Safety
+///
+/// `cfg_json_ptr` 须指向本进程内有效 NUL 结尾 UTF-8 缓冲。
+#[cfg(feature = "research")]
+#[no_mangle]
+pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const u8) -> u32 {
+    use daemon_client_code as c;
+    use qq_entry::QqOwnerAdapter;
+    use resident::{Resident, ResidentLimits};
+    use std::sync::Arc;
+    if cfg_json_ptr.is_null() {
+        return c::ERR_NULL_CFG;
+    }
+    // SAFETY: 调用方保证 NUL 结尾;上限防失控。
+    let mut len = 0usize;
+    unsafe {
+        while len < 64 * 1024 && *cfg_json_ptr.add(len) != 0 {
+            len += 1;
+        }
+    }
+    if len >= 64 * 1024 {
+        return c::ERR_BAD_CFG;
+    }
+    // SAFETY: 范围已界定。
+    let raw = unsafe { std::slice::from_raw_parts(cfg_json_ptr, len) };
+    let parsed: Result<serde_json::Value, _> = serde_json::from_slice(raw);
+    let Ok(v) = parsed else {
+        return c::ERR_BAD_CFG;
+    };
+    let get = |k: &str| v.get(k).and_then(|x| x.as_str()).map(|s| s.to_string());
+    let (Some(pipe_name), Some(auth_token), Some(account), Some(module_baseline)) = (
+        get("pipe_name"),
+        get("auth_token"),
+        get("account"),
+        get("module_baseline"),
+    ) else {
+        return c::ERR_BAD_CFG;
+    };
+    let session_generation = v.get("session_generation").and_then(|x| x.as_u64()).unwrap_or(0);
+
+    // 报告路径登记(shutdown/daemon 阶段日志用;UTF-8 → 宽字符)。
+    if let Some(rp) = get("report_path") {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = std::ffi::OsStr::new(&rp)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // 进程生存期缓冲(每代次一次;随进程回收,如实记录)。
+        let leaked = leaked_wide(wide);
+        qq_entry::register_report_path(leaked.as_ptr());
+    }
+
+    let mut guard = match DAEMON_CFG.lock() {
+        Ok(g) => g,
+        Err(_) => return c::ERR_ALREADY_STARTED,
+    };
+    if guard.is_some() {
+        return c::ERR_ALREADY_STARTED;
+    }
+    let Some(handle) = qq_entry::take_stored_entry_handle() else {
+        return c::ERR_NOT_BOOTSTRAPPED;
+    };
+    let stop = handle.daemon_stop_flag();
+    let resident = Arc::new(Resident::new(QqOwnerAdapter::new(handle), ResidentLimits::default()));
+    // resident 初始化(每代次一次;监听器延迟模式 —— D8 接线)。
+    if resident.bootstrap().is_err() {
+        return c::ERR_ALREADY_STARTED;
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<resident::SendOutcome>();
+    // drain 钩子:owner pump 执行 drain + 结果回传通道(自由函数安装,
+    // 句柄已 move 进 adapter)。
+    {
+        let r = resident.clone();
+        qq_entry::install_drain_hook(Box::new(move || {
+            let _ = r.drain();
+            for outcome in r.take_results() {
+                let _ = tx.send(outcome);
+            }
+            r.take_events().len()
+        }));
+    }
+    let cfg = daemon_client::DaemonClientConfig {
+        pipe_name,
+        auth_token,
+        session_generation,
+        account,
+        module_baseline,
+        ..Default::default()
+    };
+    let wake = {
+        let h = qq_entry::peek_stored_wake();
+        move || h.map(|w| w()).unwrap_or(false)
+    };
+    let worker_stop = stop.clone();
+    let spawned = std::thread::Builder::new()
+        .name("caligo-daemon-client".into())
+        .spawn(move || {
+            let (_counters, _exit) = daemon_client::run_worker(cfg, resident, &wake, rx, worker_stop);
+        });
+    if spawned.is_err() {
+        return c::ERR_SPAWN;
+    }
+    *guard = Some(qq_entry::DaemonStartup { stop });
+    c::OK
+}
+
+/// 宽字符串常驻缓冲(每代次一次登记;随进程回收 —— 单份固定资源,非逐请求泄漏)。
+#[cfg(feature = "research")]
+fn leaked_wide(mut wide: Vec<u16>) -> &'static [u16] {
+    if let Some(pos) = wide.iter().position(|c| *c == 0) {
+        wide.truncate(pos + 1);
+    }
+    Box::leak(wide.into_boxed_slice())
 }
 
 /// 把 NUL 结尾 UTF-16 指针读为 String(上限 32 KiB;失败返回 None)。

@@ -392,3 +392,12 @@ mod tests {
         assert!(ActionState::ConfirmedSuccess { native_id: None }.is_terminal());
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// K4-D7b:CLG1 帧编解码与 IPC v2 桥方向消息(纯数据,从 caligo-core 下沉;
+// bridge 与 core 共用同一协议定义,避免跨 crate 漂移)。
+// ---------------------------------------------------------------------------
+
+pub mod framing;
+pub mod ipc_v2;

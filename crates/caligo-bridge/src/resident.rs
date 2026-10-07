@@ -84,6 +84,17 @@ pub enum SubmitVerdict {
     QueueFull,
 }
 
+/// 派发结果(worker 经 take_results 取走并回传 core;§6.6 receipt 三分类)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendOutcome {
+    /// native 成功;native_id 缺失时上层按"未关联"处理,不得冒充成功。
+    Success { request_id: String, native_id: Option<String> },
+    /// 宿主侧明确失败(如 native 服务报错)。
+    Failure { request_id: String, reason: String },
+    /// 结果不确定(env 失效/未知错误):执行与否不可证明。
+    Unknown { request_id: String },
+}
+
 /// 关闭报告(计数回基线的验收数据)。
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CloseReport {
@@ -134,6 +145,7 @@ struct Core<A: HostAdapter> {
     ingress: VecDeque<(OwnedRequest, LifecycleToken)>,
     requests: HashMap<String, ReqRecord>,
     events: VecDeque<(OwnedEvent, LifecycleToken)>,
+    results_out: VecDeque<SendOutcome>,
     listener_token: Option<u64>,
     counters: ResidentCounters,
     late_rejections: usize,
@@ -157,6 +169,7 @@ impl<A: HostAdapter> Resident<A> {
                 ingress: VecDeque::new(),
                 requests: HashMap::new(),
                 events: VecDeque::new(),
+                results_out: VecDeque::new(),
                 listener_token: None,
                 counters: ResidentCounters::default(),
                 late_rejections: 0,
@@ -275,18 +288,43 @@ impl<A: HostAdapter> Resident<A> {
             };
             let r = c.adapter.native_op(op);
             c.counters.native_ops_total += 1;
-            if r.is_ok() {
-                c.counters.dispatched_total += 1;
-                if let OwnedRequest::SendText { request_id, .. } = &req {
-                    if let Some(rec) = c.requests.get_mut(request_id) {
-                        rec.state = ReqState::Done;
+            match &r {
+                Ok(HostOpResult::Sent { native_id }) => {
+                    c.counters.dispatched_total += 1;
+                    if let OwnedRequest::SendText { request_id, .. } = &req {
+                        if let Some(rec) = c.requests.get_mut(request_id) {
+                            rec.state = ReqState::Done;
+                        }
+                        c.results_out.push_back(SendOutcome::Success {
+                            request_id: request_id.clone(),
+                            native_id: native_id.clone(),
+                        });
                     }
                 }
-            } else {
-                // native 失败:send 记 unknown(执行不确定),probe 忽略。
-                if let OwnedRequest::SendText { request_id, .. } = &req {
-                    if let Some(rec) = c.requests.get_mut(request_id) {
-                        rec.state = ReqState::DeliveryUnknown;
+                Ok(_) => {
+                    c.counters.dispatched_total += 1;
+                }
+                Err(HostError::Native { code }) => {
+                    // 宿主明确报错:执行了但失败(Failure),不是 unknown。
+                    if let OwnedRequest::SendText { request_id, .. } = &req {
+                        if let Some(rec) = c.requests.get_mut(request_id) {
+                            rec.state = ReqState::Done;
+                        }
+                        c.results_out.push_back(SendOutcome::Failure {
+                            request_id: request_id.clone(),
+                            reason: format!("native code {code}"),
+                        });
+                    }
+                }
+                Err(_) => {
+                    // env 失效/线程/上下文问题:执行与否不确定。
+                    if let OwnedRequest::SendText { request_id, .. } = &req {
+                        if let Some(rec) = c.requests.get_mut(request_id) {
+                            rec.state = ReqState::DeliveryUnknown;
+                        }
+                        c.results_out.push_back(SendOutcome::Unknown {
+                            request_id: request_id.clone(),
+                        });
                     }
                 }
             }
@@ -299,6 +337,12 @@ impl<A: HostAdapter> Resident<A> {
     pub fn take_events(&self) -> Vec<OwnedEvent> {
         let mut c = self.core.lock().unwrap();
         c.events.drain(..).map(|(ev, _)| ev).collect()
+    }
+
+    /// 消费派发结果(worker 回传 core;先落账后 ACK 由 core 负责)。
+    pub fn take_results(&self) -> Vec<SendOutcome> {
+        let mut c = self.core.lock().unwrap();
+        c.results_out.drain(..).collect()
     }
 
     pub fn counters(&self) -> ResidentCounters {

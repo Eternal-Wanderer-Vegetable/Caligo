@@ -55,6 +55,9 @@ struct MockHostInner {
     current_thread: u64,
     native_calls: u64,
     failed_ops: u64,
+    /// 操作级 unknown:env/上下文检查通过,但操作中途环境失效
+    /// (模拟 precheck 后、执行中的环境死亡;映射 DeliveryUnknown)。
+    unknown_ops: u64,
     next_listener_token: u64,
     listener: Option<u64>,
     op_threads: Vec<u64>,
@@ -93,6 +96,9 @@ impl SharedControl {
     }
     fn fail_next_native(&self) {
         self.inner.lock().unwrap().failed_ops += 1;
+    }
+    fn fail_next_op_unknown(&self) {
+        self.inner.lock().unwrap().unknown_ops += 1;
     }
     fn all_native_on_owner(&self) -> bool {
         self.inner.lock().unwrap().op_threads.iter().all(|t| *t == OWNER)
@@ -149,6 +155,10 @@ impl HostAdapter for SharedMockHost {
             inner.failed_ops -= 1;
             return Err(HostError::Native { code: 9 });
         }
+        if inner.unknown_ops > 0 {
+            inner.unknown_ops -= 1;
+            return Err(HostError::EnvInvalid);
+        }
         match op {
             HostOp::ListenerAdd => {
                 inner.next_listener_token += 1;
@@ -162,7 +172,7 @@ impl HostAdapter for SharedMockHost {
                 Ok(HostOpResult::ListenerRemoved)
             }
             HostOp::Probe => Ok(HostOpResult::ProbeDone),
-            HostOp::SendText { .. } => Ok(HostOpResult::Sent),
+            HostOp::SendText { .. } => Ok(HostOpResult::Sent { native_id: Some(format!("NM-{}", inner.native_calls)) }),
         }
     }
 }
@@ -255,20 +265,36 @@ fn l16_close_protocol_and_late_callbacks() {
 }
 
 #[test]
-fn close_cancels_queued_and_marks_failed_native_unknown() {
+fn close_cancels_queued_and_reports_failure_vs_unknown() {
     let (r, ctl) = fixture();
     r.bootstrap().unwrap();
-    // native 失败(结果不确定)→ delivery_unknown,不宣称"未发送"。
+    // native 服务明确报错(调用完成但失败)→ Failure 结果,不是 unknown。
     ctl.fail_next_native();
     r.submit(OwnedRequest::SendText { request_id: "inflight".into(), text_len: 1 });
     assert_eq!(r.drain().unwrap(), 1);
-    assert_eq!(r.request_state("inflight"), Some("delivery_unknown"));
+    assert_eq!(r.request_state("inflight"), Some("done"));
+    let outcomes = r.take_results();
+    assert_eq!(
+        outcomes,
+        vec![caligo_bridge::resident::SendOutcome::Failure {
+            request_id: "inflight".into(),
+            reason: "native code 9".into(),
+        }]
+    );
+    // 操作级环境失效(precheck 过、执行中死)→ DeliveryUnknown,不冒充失败。
+    ctl.fail_next_op_unknown();
+    r.submit(OwnedRequest::SendText { request_id: "ghost".into(), text_len: 1 });
+    assert_eq!(r.drain().unwrap(), 1);
+    assert_eq!(r.request_state("ghost"), Some("delivery_unknown"));
+    let outcomes = r.take_results();
+    assert_eq!(outcomes.len(), 1);
+    assert!(matches!(outcomes[0], caligo_bridge::resident::SendOutcome::Unknown { .. }));
     // 排队未执行项随 close 取消。
     r.submit(OwnedRequest::SendText { request_id: "queued".into(), text_len: 1 });
     let report = r.close().unwrap();
     assert_eq!(report.cancelled_unsent, 1);
     assert_eq!(r.request_state("queued"), Some("cancelled_unsent"));
-    assert_eq!(report.marked_unknown, 0, "inflight 已在 drain 时显式化");
+    assert_eq!(report.marked_unknown, 0, "前两项已显式化");
 }
 
 #[test]

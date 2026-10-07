@@ -33,7 +33,9 @@ pub enum HostOpResult {
     ListenerDeferred,
     ListenerRemoved,
     ProbeDone,
-    Sent,
+    /// 发送完成。`native_id` 为实际原生消息身份 —— **拿不到关联时为 None**,
+    /// 上层(§6.6 receipt 契约)不得把 None 冒充成已关联成功。
+    Sent { native_id: Option<String> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

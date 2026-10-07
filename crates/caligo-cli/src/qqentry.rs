@@ -20,6 +20,11 @@ struct QqEntryArgs {
     wait_s: u32,
     wait_ms: u32,
     confirmed: bool,
+    /// D7b:daemon 客户端接线(可选;bootstrap 成功后启动)。
+    daemon_pipe: Option<String>,
+    daemon_auth: Option<String>,
+    daemon_generation: Option<u64>,
+    daemon_account: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Result<QqEntryArgs, String> {
@@ -47,6 +52,12 @@ fn parse_args(args: &[String]) -> Result<QqEntryArgs, String> {
             "--wait-s" => a.wait_s = next(&mut i).and_then(|s| s.parse().ok()).unwrap_or(600),
             "--wait-ms" => a.wait_ms = next(&mut i).and_then(|s| s.parse().ok()).unwrap_or(10_000),
             "--confirm-designated-test-instance" => a.confirmed = true,
+            "--daemon-pipe" => a.daemon_pipe = next(&mut i),
+            "--daemon-auth" => a.daemon_auth = next(&mut i),
+            "--daemon-generation" => {
+                a.daemon_generation = next(&mut i).and_then(|s| s.parse().ok());
+            }
+            "--daemon-account" => a.daemon_account = next(&mut i),
             other => return Err(format!("未知参数: {other}")),
         }
         i += 1;
@@ -100,10 +111,11 @@ fn usage() {
 }
 
 /// 公共前置:研究门控 + 必填参数 + 门 1(manifest)+ 门 2(实例确认)。
+#[allow(clippy::type_complexity)]
 fn gates(
     args: &[String],
     need_env: bool,
-) -> Result<(u32, PathBuf, PathBuf, usize, u32, u32), ExitCode> {
+) -> Result<(u32, PathBuf, PathBuf, usize, u32, u32, QqEntryArgs), ExitCode> {
     if !caligo_bridge::gate::research_enabled() {
         eprintln!("{}", caligo_bridge::gate::DISABLED_NOTICE);
         return Err(ExitCode::from(3));
@@ -116,7 +128,14 @@ fn gates(
         }
     };
     let (pid, bridge, manifest, report, env, wait_s, wait_ms, confirmed) = (
-        a.pid, a.bridge, a.manifest, a.report, a.env, a.wait_s, a.wait_ms, a.confirmed,
+        a.pid.clone(),
+        a.bridge.clone(),
+        a.manifest.clone(),
+        a.report.clone(),
+        a.env,
+        a.wait_s,
+        a.wait_ms,
+        a.confirmed,
     );
     let (Some(pid), Some(bridge), Some(manifest), Some(report)) = (pid, bridge, manifest, report)
     else {
@@ -144,7 +163,7 @@ fn gates(
         return Err(ExitCode::from(2));
     }
     println!("[gate 2] PASS — 执行者已确认 PID {pid} 为指定测试实例");
-    Ok((pid, bridge, report, env.unwrap_or(0), wait_s, wait_ms))
+    Ok((pid, bridge, report, env.unwrap_or(0), wait_s, wait_ms, a))
 }
 
 fn print_report(report: &Path) {
@@ -175,7 +194,7 @@ fn absolute_report_path(report: &Path) -> PathBuf {
 }
 
 pub fn cmd_qq_entry(args: &[String]) -> ExitCode {
-    let (pid, bridge, report, env, wait_s, _wait_ms) = match gates(args, true) {
+    let (pid, bridge, report, env, wait_s, _wait_ms, extra) = match gates(args, true) {
         Ok(v) => v,
         Err(c) => return c,
     };
@@ -230,6 +249,37 @@ pub fn cmd_qq_entry(args: &[String]) -> ExitCode {
     let verdict = map_code(code);
     println!("[qq-entry] bootstrap exit={code:#x} ({verdict:?})");
     print_report(&report);
+    // D7b:bootstrap 成功后启动 daemon 客户端(可选)。
+    if verdict == QqEntryExit::Ok {
+        let (Some(pipe), Some(auth)) = (extra.daemon_pipe.clone(), extra.daemon_auth.clone()) else {
+            return ExitCode::SUCCESS;
+        };
+        let generation = extra.daemon_generation.unwrap_or(1);
+        let account = extra
+            .daemon_account
+            .clone()
+            .unwrap_or_else(|| "10001".to_string());
+        let cfg_json = serde_json::json!({
+            "pipe_name": pipe,
+            "auth_token": auth,
+            "session_generation": generation,
+            "account": account,
+            "module_baseline": "qq-9.9.33-52230",
+            "report_path": absolute_report_path(&report).to_string_lossy(),
+        });
+        let code = unsafe { remote_daemon_start(pid, remote_base, &cfg_json.to_string()) };
+        match code {
+            Ok(0) => println!("[qq-entry] daemon 客户端已启动(管道 {pipe})"),
+            Ok(c) => {
+                eprintln!("[qq-entry] daemon 启动失败: {c:#x}");
+                return ExitCode::from(2);
+            }
+            Err(e) => {
+                eprintln!("[qq-entry] daemon 远程调用失败: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     match verdict {
         QqEntryExit::Ok => ExitCode::SUCCESS,
         QqEntryExit::Already => {
@@ -241,6 +291,104 @@ pub fn cmd_qq_entry(args: &[String]) -> ExitCode {
             ExitCode::from(2)
         }
         _ => ExitCode::from(2),
+    }
+}
+
+/// SAFETY: 前置:bridge 已加载。
+/// daemon 启动导出为单指针签名(NUL 结尾 UTF-8 JSON)。
+unsafe fn remote_daemon_start(
+    pid: u32,
+    remote_base: usize,
+    cfg_json: &str,
+) -> Result<u32, String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
+    use windows_sys::Win32::System::Memory::{
+        VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CreateRemoteThread, GetExitCodeThread, OpenProcess, WaitForSingleObject,
+        PROCESS_CREATE_THREAD, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ,
+        PROCESS_VM_WRITE,
+    };
+    // SAFETY: 文档化远程调用序列。
+    unsafe {
+        let proc_h = OpenProcess(
+            PROCESS_CREATE_THREAD
+                | PROCESS_QUERY_INFORMATION
+                | PROCESS_VM_OPERATION
+                | PROCESS_VM_WRITE
+                | PROCESS_VM_READ,
+            0,
+            pid,
+        );
+        if proc_h.is_null() || proc_h == INVALID_HANDLE_VALUE {
+            return Err(format!("OpenProcess: Win32 error {}", GetLastError()));
+        }
+        let result = (|| -> Result<u32, String> {
+            let addr = winutil::read_remote_export(
+                proc_h,
+                remote_base,
+                "caligo_qq_daemon_client_start",
+            )?
+            .ok_or("caligo_qq_daemon_client_start not found(bridge 是否 research 构建?)")?;
+            let mut bytes = cfg_json.as_bytes().to_vec();
+            bytes.push(0); // NUL 结尾
+            let remote_cfg = VirtualAllocEx(
+                proc_h,
+                std::ptr::null(),
+                bytes.len(),
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_READWRITE,
+            );
+            if remote_cfg.is_null() {
+                return Err(format!("alloc daemon cfg: Win32 error {}", GetLastError()));
+            }
+            let mut w: usize = 0;
+            if WriteProcessMemory(proc_h, remote_cfg, bytes.as_ptr().cast(), bytes.len(), &mut w)
+                == 0
+                || w != bytes.len()
+            {
+                VirtualFreeEx(proc_h, remote_cfg, 0, MEM_RELEASE);
+                return Err("write daemon cfg incomplete".into());
+            }
+            let start: winutil::RemoteThreadFn =
+                std::mem::transmute::<usize, winutil::RemoteThreadFn>(addr);
+            let thread = CreateRemoteThread(
+                proc_h,
+                std::ptr::null(),
+                0,
+                Some(start),
+                remote_cfg,
+                0,
+                std::ptr::null_mut(),
+            );
+            if thread.is_null() {
+                VirtualFreeEx(proc_h, remote_cfg, 0, MEM_RELEASE);
+                return Err(format!(
+                    "CreateRemoteThread(daemon): Win32 error {}",
+                    GetLastError()
+                ));
+            }
+            let wr = WaitForSingleObject(thread, 30_000);
+            let mut code: u32 = u32::MAX;
+            GetExitCodeThread(thread, &mut code);
+            CloseHandle(thread);
+            if wr != 0 {
+                winutil::retain_remote_pub(
+                    pid,
+                    remote_cfg as usize,
+                    bytes.len(),
+                    "daemon cfg",
+                    "wait-timeout",
+                );
+                return Err(format!("daemon start wait failed (retained): code {wr:#x}"));
+            }
+            VirtualFreeEx(proc_h, remote_cfg, 0, MEM_RELEASE);
+            Ok(code)
+        })();
+        CloseHandle(proc_h);
+        result
     }
 }
 
@@ -398,7 +546,7 @@ unsafe fn remote_bootstrap(
 }
 
 pub fn cmd_qq_entry_stop(args: &[String]) -> ExitCode {
-    let (pid, bridge, report, _env, _wait_s, wait_ms) = match gates(args, false) {
+    let (pid, bridge, report, _env, _wait_s, wait_ms, _extra) = match gates(args, false) {
         Ok(v) => v,
         Err(c) => return c,
     };

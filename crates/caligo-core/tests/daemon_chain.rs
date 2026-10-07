@@ -22,6 +22,8 @@ struct ChainHost;
 
 const CHAIN_OWNER: u64 = 77;
 
+static CHAIN_SENDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 impl HostAdapter for ChainHost {
     fn owner_thread_id(&self) -> u64 {
         CHAIN_OWNER
@@ -40,7 +42,10 @@ impl HostAdapter for ChainHost {
             HostOp::ListenerAdd => HostOpResult::ListenerAdded { token: 1 },
             HostOp::ListenerRemove { .. } => HostOpResult::ListenerRemoved,
             HostOp::Probe => HostOpResult::ProbeDone,
-            HostOp::SendText { .. } => HostOpResult::Sent,
+            HostOp::SendText { .. } => {
+                let n = CHAIN_SENDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                HostOpResult::Sent { native_id: Some(format!("NM-{n}")) }
+            }
         })
     }
 }

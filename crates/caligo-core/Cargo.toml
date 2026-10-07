@@ -3,6 +3,10 @@ name = "caligo-core"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# K4-D7b:转发 research 到 bridge;LAB 集成测试以本特性门控。
+research = ["caligo-bridge/research"]
+
 [dependencies]
 caligo-model = { workspace = true }
 serde = { workspace = true }
