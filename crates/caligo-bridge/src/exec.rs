@@ -30,6 +30,8 @@ pub struct ExecCtx {
     pub env: usize,
     /// QQNT.dll 基址(加载器侧解析;env 新鲜度校验用)。
     pub qqnt_base: usize,
+    /// 上下文钉扎(非零时优先于阶梯;来自 start 轮报告的 ctx 值)。
+    pub ctx_hint: usize,
     /// UTF-8 JS 源码指针(加载器已写入本进程内存)。
     pub js: usize,
     /// JS 字节长度。
@@ -48,6 +50,7 @@ static JS_PTR: AtomicUsize = AtomicUsize::new(0);
 static JS_LEN: AtomicUsize = AtomicUsize::new(0);
 static EXEC_ISOLATE: AtomicUsize = AtomicUsize::new(0);
 static EXEC_CTXV: AtomicUsize = AtomicUsize::new(0);
+static EXEC_CTX_HINT: AtomicUsize = AtomicUsize::new(0);
 static EXEC_ENV_ISOLATE: AtomicUsize = AtomicUsize::new(0);
 static EXPORTS: AtomicUsize = AtomicUsize::new(0);
 
@@ -214,26 +217,36 @@ unsafe extern "C" fn exec_cb(_handle: *mut c_void) {
             return;
         }
         let ex: &ExecExports = &*(ex_ptr as *const ExecExports);
-        // 上下文阶梯(本线程 = 主循环线程,与 async_cb 同位;asyncrun 已证安全)。
-        // SAFETY: GetCurrent 无参静态;entered/incumbent 为纯读访问器。
+        // SAFETY: GetCurrent 无参静态。
         let current = (ex.isolate_get_current)() as usize;
         let isolate = if current != 0 { current } else { env_isolate };
-        let entered = call_sret1(ex.entered_ctx, isolate as *mut c_void);
-        let mut ctxv = 0usize;
-        if !local_empty(entered) {
-            ctxv = entered;
-        } else {
-            let incumbent = call_sret1(ex.incumbent_ctx, isolate as *mut c_void);
-            if !local_empty(incumbent) {
-                ctxv = incumbent;
+        // 上下文钉扎:hint 非零且页有效 → 直接使用(跨 inject 稳定,start 轮记录)。
+        let hint = EXEC_CTX_HINT.load(Ordering::Acquire);
+        if hint != 0 && page_span_ok(hint, 0x100) {
+            EXEC_ISOLATE.store(isolate, Ordering::Release);
+            EXEC_CTXV.store(hint, Ordering::Release);
+        }
+        // 阶梯(本线程 = 主循环线程,与 async_cb 同位;asyncrun 已证安全)。
+        // SAFETY: entered/incumbent 为纯读访问器。
+        if EXEC_CTXV.load(Ordering::Acquire) == 0 {
+            let entered = call_sret1(ex.entered_ctx, isolate as *mut c_void);
+            let mut ctxv = 0usize;
+            if !local_empty(entered) {
+                ctxv = entered;
+            } else {
+                let incumbent = call_sret1(ex.incumbent_ctx, isolate as *mut c_void);
+                if !local_empty(incumbent) {
+                    ctxv = incumbent;
+                }
             }
+            if ctxv == 0 {
+                RESULT_SEQ.store(5, Ordering::Release);
+                return;
+            }
+            EXEC_ISOLATE.store(isolate, Ordering::Release);
+            EXEC_CTXV.store(ctxv, Ordering::Release);
         }
-        if ctxv == 0 {
-            RESULT_SEQ.store(5, Ordering::Release);
-            return;
-        }
-        EXEC_ISOLATE.store(isolate, Ordering::Release);
-        EXEC_CTXV.store(ctxv, Ordering::Release);
+        let ctxv = EXEC_CTXV.load(Ordering::Acquire);
         let mut scope = [0usize; 8];
         (ex.hs_ctor)(scope.as_mut_ptr().cast(), isolate as *mut c_void);
         let mut src = 0usize;
@@ -319,20 +332,15 @@ pub unsafe fn exec_run(ctx: &ExecCtx) -> u32 {
         JS_LEN.store(0, Ordering::Release);
         EXEC_ISOLATE.store(0, Ordering::Release);
         EXEC_CTXV.store(0, Ordering::Release);
+        EXEC_CTX_HINT.store(ctx.ctx_hint, Ordering::Release);
         EXPORTS.store(0, Ordering::Release);
 
         let path_ptr = ctx.report_path;
-        if path_ptr == 0 || ctx.js == 0 || ctx.js_len == 0 {
-            return exec_code::ERR_NULL;
-        }
-        let report = match read_wide(path_ptr) {
-            Some(s) => s,
-            None => return exec_code::ERR_NULL,
-        };
-        if !page_span_ok(ctx.js, ctx.js_len) {
-            append_stage(&report, "js", false, "js buffer unreadable");
-            return exec_code::ERR_NULL;
-        }
+        if path_ptr == 0 { return 11; }
+        if ctx.js == 0 { return 12; }
+        if ctx.js_len == 0 { return 13; }
+        let report = match read_wide(path_ptr) { None => return 14, Some(s) => s };
+        if !page_span_ok(ctx.js, ctx.js_len) { append_stage(&report, "js", false, "js buffer unreadable"); return 15; }
         append_stage(&report, "start", true, &format!("js_len={} wait_ms={}", ctx.js_len, ctx.wait_ms));
 
         let wide: Vec<u16> = "QQNT.dll\0".encode_utf16().collect();
@@ -373,6 +381,9 @@ pub unsafe fn exec_run(ctx: &ExecCtx) -> u32 {
         };
         // 阶梯已在 exec_cb(主循环线程)执行——49688 死锁修复。
 
+        EXEC_ENV_ISOLATE.store(_env_isolate_check, Ordering::Release);
+        JS_PTR.store(ctx.js, Ordering::Release);
+        JS_LEN.store(ctx.js_len, Ordering::Release);
         let size = (ex.uv_handle_size)(1); // UV_ASYNC
         if size == 0 || size > 0x1000 {
             append_stage(&report, "alloc_async", false, &format!("size={size}"));
@@ -415,6 +426,7 @@ pub unsafe fn exec_run(ctx: &ExecCtx) -> u32 {
             core::slice::from_raw_parts(core::ptr::addr_of!(RESULT_BUF).cast::<u8>(), len)
         };
         append_stage(&report, "result", ok, &format!("seq={seq} {}", String::from_utf8_lossy(text)));
+        append_stage(&report, "exec_cb_ctxv", true, &format!("{:#x}", EXEC_CTXV.load(Ordering::Acquire)));
         append_stage(&report, "done", true, "exec complete");
         exec_code::OK
     }

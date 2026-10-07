@@ -38,9 +38,13 @@ dependencies = [
 name = "caligo-core"
 version = "0.1.0"
 dependencies = [
+ "caligo-bridge",
  "caligo-model",
+ "iced-x86",
  "serde",
  "serde_json",
+ "sha2",
+ "windows-sys",
 ]
 
 [[package]]

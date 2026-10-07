@@ -7,3 +7,11 @@ edition.workspace = true
 caligo-model = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+caligo-bridge = { workspace = true }
+windows-sys = { workspace = true }
+sha2 = { workspace = true }
+iced-x86 = { version = "1.21.0", features = ["decoder"] }
+
+[[bin]]
+name = "onebotd"
+path = "src/bin/onebotd.rs"
