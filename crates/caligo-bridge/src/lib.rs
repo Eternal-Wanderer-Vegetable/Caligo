@@ -417,6 +417,127 @@ pub unsafe extern "system" fn caligo_exec_run(ctx: *mut exec::ExecCtx) -> u32 {
     exec::exec_run(ctx_view)
 }
 
+// ---------------------------------------------------------------------------
+// K4-D7 候选 B 首入导出(仅 research 构建;普通构建不存在这些符号)。
+// ctx 布局与 CLI 加载器的写入序列一致(repr(C),8 字节对齐)。
+// ---------------------------------------------------------------------------
+
+/// 首入导出结果码(纯常量,两构建皆可引用;执行导出本身仍 research 门控)。
+pub mod qq_entry_code {
+    pub const OK: u32 = 0;
+    pub const ERR_NULL_CTX: u32 = 1;
+    pub const ERR_BAD_PATH: u32 = 2;
+    pub const ERR_RESOLVE: u32 = 3;
+    pub const ERR_ENV_NOT_FRESH: u32 = 0x10;
+    pub const ERR_LOOP_CHAIN: u32 = 0x11;
+    pub const ERR_NO_CURRENT: u32 = 0x12;
+    pub const ERR_HANDLE_SIZE: u32 = 0x13;
+    pub const ERR_UV_INIT: u32 = 0x14;
+    pub const ERR_TIMEOUT: u32 = 0x15;
+    pub const ERR_ALREADY: u32 = 0x16;
+    /// 关闭协议:未就绪。
+    pub const ERR_SHUTDOWN_NOT_READY: u32 = 0x20;
+    /// 关闭协议:超时(句柄保留,不冒充成功)。
+    pub const ERR_SHUTDOWN_TIMEOUT: u32 = 0x21;
+}
+
+/// 首入参数块(加载器写入;指针字段位于本进程)。
+#[cfg(feature = "research")]
+#[repr(C)]
+pub struct QqEntryCtx {
+    pub qqnt_base: usize,
+    pub env: usize,
+    /// NUL 结尾 UTF-16 报告路径。
+    pub report_path: usize,
+    pub wait_s: u32,
+    pub _pad: u32,
+}
+
+/// 候选 B 首入(计划 §7-D7)。每宿主代次一次;重复调用返回 ERR_ALREADY。
+///
+/// # Safety
+///
+/// `ctx` 必须指向本进程内有效的 [`QqEntryCtx`](由加载器写入);
+/// `qqnt_base`/`env` 须经 loader 侧解析与 envscan 提供。
+#[cfg(feature = "research")]
+#[no_mangle]
+pub unsafe extern "system" fn caligo_qq_entry_bootstrap(ctx: *mut QqEntryCtx) -> u32 {
+    use qq_entry::{bootstrap, EntryConfig, EntryError};
+    if ctx.is_null() {
+        return qq_entry_code::ERR_NULL_CTX;
+    }
+    // SAFETY: 调用方保证 ctx 有效(repr(C) 布局)。
+    let view = unsafe { &*ctx };
+    if view.report_path == 0 {
+        return qq_entry_code::ERR_BAD_PATH;
+    }
+    let path = wide_ptr_to_string(view.report_path as *const u16);
+    let Some(path) = path else {
+        return qq_entry_code::ERR_BAD_PATH;
+    };
+    let cfg = EntryConfig {
+        qqnt_base: view.qqnt_base,
+        env: view.env,
+        report_path: path,
+    };
+    // obs::export_addr 只读本进程导出表(resolve 内部自管 unsafe)。
+    let symbols = qq_entry::EntrySymbols::resolve(view.qqnt_base, &cfg.report_path);
+    let Some(symbols) = symbols else {
+        return qq_entry_code::ERR_RESOLVE;
+    };
+    match bootstrap(&cfg, &symbols) {
+        Ok(_handle) => qq_entry_code::OK,
+        Err(e) => match e {
+            EntryError::EnvNotFresh => qq_entry_code::ERR_ENV_NOT_FRESH,
+            EntryError::LoopChainUnreadable => qq_entry_code::ERR_LOOP_CHAIN,
+            EntryError::InterruptNoCurrentContext => qq_entry_code::ERR_NO_CURRENT,
+            EntryError::HandleSizeInvalid { .. } => qq_entry_code::ERR_HANDLE_SIZE,
+            EntryError::UvInitFailed { .. } => qq_entry_code::ERR_UV_INIT,
+            EntryError::Timeout => qq_entry_code::ERR_TIMEOUT,
+            EntryError::AlreadyBootstrapped => qq_entry_code::ERR_ALREADY,
+        },
+    }
+}
+
+/// 关闭协议(计划 §6.7:owner 线程 uv_close,等待关闭回调)。
+/// 超时返回 ERR_SHUTDOWN_TIMEOUT —— 句柄保留,不冒充成功。
+#[cfg(feature = "research")]
+#[no_mangle]
+pub extern "system" fn caligo_qq_entry_shutdown(wait_ms: u32) -> u32 {
+    use qq_entry::EntryError;
+    match qq_entry::shutdown(wait_ms) {
+        Ok(()) => {
+            qq_entry::append_stage_simple("shutdown", true, "closed via owner pump");
+            qq_entry_code::OK
+        }
+        Err(EntryError::AlreadyBootstrapped) => qq_entry_code::ERR_SHUTDOWN_NOT_READY,
+        Err(EntryError::Timeout) => qq_entry_code::ERR_SHUTDOWN_TIMEOUT,
+        Err(_) => qq_entry_code::ERR_SHUTDOWN_TIMEOUT,
+    }
+}
+
+/// 把 NUL 结尾 UTF-16 指针读为 String(上限 32 KiB;失败返回 None)。
+#[cfg(feature = "research")]
+fn wide_ptr_to_string(p: *const u16) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    // SAFETY: 加载器写入的 NUL 结尾缓冲;上限防失控。
+    unsafe {
+        while len < 32 * 1024 {
+            if *p.add(len) == 0 {
+                break;
+            }
+            len += 1;
+        }
+        if len == 32 * 1024 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(std::slice::from_raw_parts(p, len)))
+    }
+}
+
 #[no_mangle]
 /// 进程/线程入口。严格最小实现:仅记录自身句柄,不创建线程、不分配、不等待。
 pub extern "system" fn DllMain(hinst: isize, reason: u32, _reserved: isize) -> bool {

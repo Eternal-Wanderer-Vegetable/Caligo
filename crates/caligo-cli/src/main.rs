@@ -17,6 +17,7 @@
 mod disasm;
 mod envscan;
 mod pe;
+mod qqentry;
 mod rtti;
 mod winutil;
 
@@ -85,6 +86,8 @@ fn main() -> ExitCode {
         Some("rtti") => cmd_rtti(&args[1..]),
         Some("envscan") => cmd_envscan(&args[1..]),
         Some("inject") => cmd_inject(&args[1..]),
+        Some("qq-entry") => qqentry::cmd_qq_entry(&args[1..]),
+        Some("qq-entry-stop") => qqentry::cmd_qq_entry_stop(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
             ExitCode::FAILURE
@@ -1607,3 +1610,4 @@ fn cmd_inject(args: &[String]) -> ExitCode {
         }
     }
 }
+

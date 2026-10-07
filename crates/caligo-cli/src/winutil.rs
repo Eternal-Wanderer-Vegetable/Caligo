@@ -62,6 +62,17 @@ fn retain_remote(pid: u32, addr: usize, bytes: usize, what: &'static str, reason
     }
 }
 
+/// 留存账本登记(CLI 其他命令的远程缓冲超时面;D0 账本语义复用)。
+pub fn retain_remote_pub(
+    pid: u32,
+    addr: usize,
+    bytes: usize,
+    what: &'static str,
+    reason: &'static str,
+) {
+    retain_remote(pid, addr, bytes, what, reason);
+}
+
 /// 读取留存账本快照(测试/取证用;非测试构建下由测试模块独占使用)。
 #[allow(dead_code)]
 pub fn retained_remote_snapshot() -> Vec<RetainedRemoteAlloc> {
@@ -298,7 +309,7 @@ pub struct AsyncRequest {
     pub params: Vec<u8>,
 }
 
-type RemoteThreadFn = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
+pub type RemoteThreadFn = unsafe extern "system" fn(*mut core::ffi::c_void) -> u32;
 
 /// 把 bridge 装入指定进程并调用其 `caligo_probe_run`(可选:`caligo_obs_run`)。
 ///
@@ -1090,7 +1101,7 @@ pub unsafe fn inject_and_probe(
 ///
 /// `handle` 须具备 PROCESS_VM_READ,`base` 须是该进程内已加载映像基址。
 /// 全部读取量有上界(头部 4 KiB;导出名 256 B)。
-unsafe fn read_remote_export(
+pub(crate) unsafe fn read_remote_export(
     handle: HANDLE,
     base: usize,
     want: &str,

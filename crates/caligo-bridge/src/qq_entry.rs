@@ -219,6 +219,46 @@ fn take_error() -> Option<EntryError> {
     }
 }
 
+/// 无路径场景的阶段日志(shutdown 导出用):写到进程内环形缓冲不可行,
+/// 直接落到与 bootstrap 相同的报告文件(路径存于 ENTRY 之外 —— shutdown
+/// 在 bootstrap 之后调用,路径经 bootstrap 记录;此处从静态取)。
+pub fn append_stage_simple(stage: &str, ok: bool, detail: &str) {
+    // ENTRY 不保存路径;shutdown 的日志由导出侧持有路径参数 —— 但导出无路径。
+    // 折衷:日志写到 bootstrap 报告同目录的 shutdown.jsonl(若取不到路径则跳过)。
+    let path = REPORT_PATH.load(Ordering::Acquire);
+    if path == 0 {
+        return;
+    }
+    // SAFETY: bootstrap 已将该指针登记为 NUL 结尾 UTF-16(进程生存期)。
+    let text = unsafe { wide_ptr_to_string_pub(path as *const u16) };
+    if let Some(p) = text {
+        append_stage(&p, stage, ok, detail);
+    }
+}
+
+static REPORT_PATH: AtomicUsize = AtomicUsize::new(0);
+
+/// SAFETY: p 须指向 NUL 结尾 UTF-16 缓冲。
+unsafe fn wide_ptr_to_string_pub(p: *const u16) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    // SAFETY: 同 wide_ptr_to_string。
+    unsafe {
+        while len < 32 * 1024 {
+            if *p.add(len) == 0 {
+                break;
+            }
+            len += 1;
+        }
+        if len == 32 * 1024 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(std::slice::from_raw_parts(p, len)))
+    }
+}
+
 // —— 页校验读(与 asyncrun/intr 同语义)——
 
 fn page_readable(addr: usize) -> bool {
@@ -384,19 +424,7 @@ impl EntryHandle {
     /// 等关闭回调。超时不证明关闭完成:返回 Timeout,**不释放句柄内存**
     /// (计划 §5.3;留证据,随进程回收)。
     pub fn close(&self, wait_ms: u32) -> Result<(), EntryError> {
-        if ENTRY.ready.load(Ordering::Acquire) != 1 {
-            return Err(EntryError::AlreadyBootstrapped);
-        }
-        ENTRY.close_req.store(1, Ordering::Release);
-        self.wake();
-        let deadline = Instant::now() + Duration::from_millis(wait_ms as u64);
-        while ENTRY.closed.load(Ordering::Acquire) != 1 {
-            if Instant::now() >= deadline {
-                return Err(EntryError::Timeout);
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        Ok(())
+        shutdown(wait_ms)
     }
 
     pub fn owner_tid(&self) -> usize {
@@ -458,6 +486,7 @@ pub fn bootstrap(cfg: &EntryConfig, symbols: &EntrySymbols) -> Result<EntryHandl
         &format!("isolate={isolate:#x} loop={loop_ptr:#x}"),
     );
     // 发布(ready 之前;回调以 Acquire 读取)。
+    REPORT_PATH.store(cfg.report_path.as_ptr() as usize, Ordering::Release);
     ENTRY.qqnt_base.store(cfg.qqnt_base, Ordering::Release);
     ENTRY.env.store(cfg.env, Ordering::Release);
     ENTRY.isolate.store(isolate, Ordering::Release);
@@ -503,6 +532,34 @@ pub fn bootstrap(cfg: &EntryConfig, symbols: &EntrySymbols) -> Result<EntryHandl
         &format!("owner_tid={}", ENTRY.tid.load(Ordering::Acquire)),
     );
     Ok(EntryHandle)
+}
+
+/// 关闭协议(导出面用;无句柄实例依赖)。语义同 `EntryHandle::close`:
+/// 超时返回 Timeout 且**不释放句柄**(计划 §5.3)。
+pub fn shutdown(wait_ms: u32) -> Result<(), EntryError> {
+    if ENTRY.ready.load(Ordering::Acquire) != 1 {
+        return Err(EntryError::AlreadyBootstrapped);
+    }
+    ENTRY.close_req.store(1, Ordering::Release);
+    // 唤醒 owner 轮转点(uv_async_send:唯一合法跨线程面)。
+    let wake_ok = unsafe {
+        let send: FnUvAsyncSend =
+            EntrySymbols::to_fn(ENTRY.sym_uv_async_send.load(Ordering::Acquire));
+        (send)(ENTRY.handle.load(Ordering::Acquire) as *mut core::ffi::c_void) == 0
+    };
+    let deadline = Instant::now() + Duration::from_millis(wait_ms as u64);
+    while ENTRY.closed.load(Ordering::Acquire) != 1 {
+        if Instant::now() >= deadline {
+            append_stage_simple(
+                "shutdown",
+                false,
+                &format!("timeout(wait_ms={wait_ms} wake_ok={wake_ok}); handle retained"),
+            );
+            return Err(EntryError::Timeout);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
 }
 
 /// LAB 专用:重置首入静态状态(仅 research 构建导出;生产链路永不调用 ——
