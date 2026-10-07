@@ -45,6 +45,7 @@ pub mod probe_code {
 
 pub mod asyncrun;
 pub mod envrun;
+pub mod exec;
 pub mod intr;
 pub mod obs;
 pub mod register;
@@ -352,6 +353,22 @@ pub unsafe extern "system" fn caligo_async_run(ctx: *mut asyncrun::AsyncCtx) -> 
     // SAFETY: ctx 由 loader 写入且位于本进程;字段按 asyncrun::AsyncCtx 布局解读。
     let ctx_view = unsafe { &*ctx };
     asyncrun::async_run(ctx_view)
+}
+
+#[no_mangle]
+/// K3-E 通用 JS 执行器(生产 primitive,详见 exec.rs):在主 env 执行调用方
+/// 提供的 JS,结果写 JSONL 报告。返回 [`exec::exec_code`] 结果码。
+///
+/// # Safety
+///
+/// `ctx` 必须指向本进程内有效的 [`exec::ExecCtx`](js 缓冲由加载器写入)。
+pub unsafe extern "system" fn caligo_exec_run(ctx: *mut exec::ExecCtx) -> u32 {
+    if ctx.is_null() {
+        return exec::exec_code::ERR_NULL;
+    }
+    // SAFETY: ctx 由 loader 写入且位于本进程;字段按 exec::ExecCtx 布局解读。
+    let ctx_view = unsafe { &*ctx };
+    exec::exec_run(ctx_view)
 }
 
 #[no_mangle]

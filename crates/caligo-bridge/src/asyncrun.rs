@@ -341,7 +341,7 @@ fn local_empty(v: usize) -> bool {
 
 /// 调用成员函数风格的 Local 返回导出(this 在 RCX、sret 在 RDX),取回句柄值;
 /// 0 = 空。
-unsafe fn call_sret1(
+pub(crate) unsafe fn call_sret1(
     f: unsafe extern "C" fn(*mut c_void, *mut usize),
     this: *mut c_void,
 ) -> usize {
@@ -862,6 +862,24 @@ pub unsafe fn async_run(ctx: &AsyncCtx) -> u32 {
     if !page_readable_span(ctx.env, 0xB60) {
         append_stage(&report, "validate_env", false, "env pages unreadable (need 0xB60 span)");
         return async_code::ERR_ENV_INVALID;
+    }
+    // 13056 事故修复:env 新鲜度校验(vfptr 必须等于 qqnt_base+主 vtable RVA)。
+    // exec::EXPECTED_VTABLE_RVA 同源;qqnt 基址经 GetModuleHandleW 同前例。
+    {
+        let wide: Vec<u16> = "QQNT.dll\0".encode_utf16().collect();
+        // SAFETY: 只读查询;竞态论证同前(K2-03 先例)。
+        let h = unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(wide.as_ptr()) };
+        let qbase = if h.is_null() { 0 } else { h as usize };
+        let vfptr_ok = qbase != 0 && (unsafe { crate::exec::env_is_fresh_pub(qbase, ctx.env) });
+        if !vfptr_ok {
+            append_stage(
+                &report,
+                "validate_env",
+                false,
+                "env STALE (vfptr mismatch) — rescan required (envscan)",
+            );
+            return async_code::ERR_ENV_INVALID;
+        }
     }
     let Some(isolate_data) = (unsafe { read_usize(ctx.env + 0xB0) }) else {
         append_stage(&report, "validate_env", false, "env+0xB0 unreadable");

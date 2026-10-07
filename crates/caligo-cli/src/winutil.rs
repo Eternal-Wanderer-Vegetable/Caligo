@@ -211,6 +211,8 @@ pub struct InjectOutcome {
     pub intr_exit_code: Option<u32>,
     /// `caligo_async_run` 的返回码(仅在 async 提供时;同步执行)。
     pub async_exit_code: Option<u32>,
+    /// `caligo_exec_run` 的返回码(仅在 exec 提供时;同步执行)。
+    pub exec_exit_code: Option<u32>,
 }
 
 /// WU3 RequestInterrupt 实验的请求参数(布局对应 caligo_bridge::intr::IntrCtx)。
@@ -222,6 +224,18 @@ pub struct IntrRequest {
     /// JSONL 报告路径。
     pub report: PathBuf,
     /// 等待回调触发的毫秒数。
+    pub wait_ms: u32,
+}
+
+/// K3-E 通用 JS 执行请求(布局对应 caligo_bridge::exec::ExecCtx)。
+pub struct ExecRequest {
+    /// 候选 node::Environment*(0 = 干跑)。
+    pub env: usize,
+    /// UTF-8 JS 源码(CLI 侧已读入)。
+    pub js: Vec<u8>,
+    /// JSONL 报告路径。
+    pub report: PathBuf,
+    /// 轮询上限毫秒。
     pub wait_ms: u32,
 }
 
@@ -268,6 +282,7 @@ pub unsafe fn inject_and_probe(
     wait_ms: u32,
     intr: Option<&IntrRequest>,
     async_req: Option<&AsyncRequest>,
+    exec_req: Option<&ExecRequest>,
 ) -> Result<InjectOutcome, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
@@ -708,6 +723,97 @@ pub unsafe fn inject_and_probe(
                 intr_exit = Some(code);
             }
 
+            // 可选:K3-E 通用 JS 执行(caligo_exec_run;JS 缓冲 + ctx 远端写入)。
+            let mut exec_exit: Option<u32> = None;
+            if let Some(ex) = exec_req {
+                let addr = match read_remote_export(proc_h, remote_base, "caligo_exec_run") {
+                    Ok(Some(a)) => a,
+                    Ok(None) => return Err("caligo_exec_run not found in remote".into()),
+                    Err(e) => return Err(format!("remote export lookup (exec): {e}")),
+                };
+                // 写 JS 缓冲(执行期间必须保持有效;线程 Wait 结束后才释放)。
+                let remote_js = VirtualAllocEx(
+                    proc_h,
+                    std::ptr::null(),
+                    ex.js.len(),
+                    MEM_COMMIT | MEM_RESERVE,
+                    PAGE_READWRITE,
+                );
+                if remote_js.is_null() {
+                    return Err(format!("alloc exec js: Win32 error {}", GetLastError()));
+                }
+                let mut written: usize = 0;
+                if WriteProcessMemory(proc_h, remote_js, ex.js.as_ptr().cast(), ex.js.len(), &mut written) == 0
+                    || written != ex.js.len()
+                {
+                    VirtualFreeEx(proc_h, remote_js, 0, MEM_RELEASE);
+                    return Err("alloc exec js: WriteProcessMemory incomplete".into());
+                }
+                let rep_wide = to_wide(&ex.report.to_string_lossy());
+                let remote_rep = alloc_and_write(&rep_wide, "alloc exec report path")?;
+                // caligo_bridge::exec::ExecCtx 副本(env, qqnt_base, js, js_len,
+                // report, wait, pad)。
+                let mut ctx_bytes: Vec<u8> = Vec::with_capacity(48);
+                let qqnt_base = *module_bases_in(pid)?.get("QQNT.dll").unwrap_or(&0);
+                ctx_bytes.extend_from_slice(&ex.env.to_le_bytes());
+                ctx_bytes.extend_from_slice(&qqnt_base.to_le_bytes());
+                ctx_bytes.extend_from_slice(&(remote_js as usize).to_le_bytes());
+                ctx_bytes.extend_from_slice(&ex.js.len().to_le_bytes());
+                ctx_bytes.extend_from_slice(&(remote_rep as usize).to_le_bytes());
+                ctx_bytes.extend_from_slice(&ex.wait_ms.to_le_bytes());
+                ctx_bytes.extend_from_slice(&0u32.to_le_bytes());
+                let remote_ctx = VirtualAllocEx(
+                    proc_h,
+                    std::ptr::null(),
+                    ctx_bytes.len(),
+                    MEM_COMMIT | MEM_RESERVE,
+                    PAGE_READWRITE,
+                );
+                if remote_ctx.is_null() {
+                    return Err(format!("alloc exec ctx: Win32 error {}", GetLastError()));
+                }
+                let mut w2: usize = 0;
+                if WriteProcessMemory(proc_h, remote_ctx, ctx_bytes.as_ptr().cast(), ctx_bytes.len(), &mut w2) == 0
+                    || w2 != ctx_bytes.len()
+                {
+                    VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
+                    VirtualFreeEx(proc_h, remote_js, 0, MEM_RELEASE);
+                    return Err("alloc exec ctx: WriteProcessMemory incomplete".into());
+                }
+                let exec_fn: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32 =
+                    std::mem::transmute::<
+                        usize,
+                        unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+                    >(addr);
+                let start_exec: RemoteThreadFn =
+                    std::mem::transmute::<usize, RemoteThreadFn>(exec_fn as usize);
+                let exec_thread = CreateRemoteThread(
+                    proc_h,
+                    std::ptr::null(),
+                    0,
+                    Some(start_exec),
+                    remote_ctx,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if exec_thread.is_null() {
+                    VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
+                    VirtualFreeEx(proc_h, remote_js, 0, MEM_RELEASE);
+                    return Err(format!("CreateRemoteThread(exec): Win32 error {}", GetLastError()));
+                }
+                let wait = WaitForSingleObject(exec_thread, if ex.wait_ms.saturating_add(8000) > 0 { ex.wait_ms.saturating_add(8000) } else { INFINITE });
+                let mut code: u32 = u32::MAX;
+                GetExitCodeThread(exec_thread, &mut code);
+                CloseHandle(exec_thread);
+                VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
+                VirtualFreeEx(proc_h, remote_rep, 0, MEM_RELEASE);
+                VirtualFreeEx(proc_h, remote_js, 0, MEM_RELEASE);
+                if wait != 0 {
+                    return Err(format!("exec remote thread wait failed: code {wait:#x}"));
+                }
+                exec_exit = Some(code);
+            }
+
             // 可选:K2-03 事件循环点载荷(caligo_async_run;同步执行,mode 0/1/2)。
             let mut async_exit: Option<u32> = None;
             if let Some(req) = async_req {
@@ -795,6 +901,7 @@ pub unsafe fn inject_and_probe(
                 env_exit_code: env_exit,
                 intr_exit_code: intr_exit,
                 async_exit_code: async_exit,
+                exec_exit_code: exec_exit,
             })
         })();
 

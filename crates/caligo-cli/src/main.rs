@@ -897,6 +897,9 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut async_env: Option<usize> = None;
     let mut async_script: u32 = 0;
     let mut async_wait_ms: u32 = 10_000;
+    let mut exec_js: Option<PathBuf> = None;
+    let mut exec_env: Option<usize> = None;
+    let mut exec_wait_ms: u32 = 30_000;
 
     let mut i = 0;
     while i < args.len() {
@@ -1014,6 +1017,29 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => async_wait_ms = v,
                 None => {
                     eprintln!("--async-wait-ms 需要数字参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--exec-js" => match next(&mut i) {
+                Some(v) => exec_js = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("--exec-js 需要路径参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--exec-env" => match next(&mut i).as_deref().and_then(|s| {
+                usize::from_str_radix(s.strip_prefix("0x").unwrap_or(s), 16).ok()
+            }) {
+                Some(v) => exec_env = Some(v),
+                None => {
+                    eprintln!("--exec-env 需要十六进制指针参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--exec-wait-ms" => match next(&mut i).and_then(|s| s.parse().ok()) {
+                Some(v) => exec_wait_ms = v,
+                None => {
+                    eprintln!("--exec-wait-ms 需要数字参数");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1193,6 +1219,42 @@ fn cmd_inject(args: &[String]) -> ExitCode {
         }
         (None, None, None) => None,
     };
+    // K3-E 通用 JS 执行:--exec-js + --exec-env 成对(--exec-wait-ms 可选)。
+    let exec_req = match (exec_js, exec_env) {
+        (Some(js), Some(env)) => {
+            let abs = match to_absolute(&js) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("--exec-js 路径无效: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let src = match std::fs::read(&abs) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("--exec-js 读取失败 {}: {e}", abs.display());
+                    return ExitCode::FAILURE;
+                }
+            };
+            let rep = abs.with_extension("report.jsonl");
+            println!("[gate] K3-E exec:JS {} 字节 → env {env:#x}", src.len());
+            Some(winutil::ExecRequest {
+                env,
+                js: src,
+                report: rep,
+                wait_ms: exec_wait_ms,
+            })
+        }
+        (Some(_), None) => {
+            eprintln!("--exec-js 需要 --exec-env 成对出现");
+            return ExitCode::FAILURE;
+        }
+        (None, Some(_)) => {
+            eprintln!("--exec-env 需要 --exec-js 成对出现");
+            return ExitCode::FAILURE;
+        }
+        (None, None) => None,
+    };
 
     // 门 1:manifest 摘要核对(计划 §5:版本与模块摘要确认 → 接入)。
     println!("[gate 1] 核对模块基线 …");
@@ -1219,7 +1281,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     }
     println!("[gate 2] PASS — 执行者已确认 PID {pid} 为指定测试实例");
 
-    // 加载 + probe(可选 obs / register / env)。
+    // 加载 + probe(可选 obs / register / env / intr / async / exec)。
     println!("[inject] 加载 bridge 并调用 caligo_probe_run …");
     let outcome = unsafe {
         winutil::inject_and_probe(
@@ -1232,6 +1294,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             wait_ms,
             intr.as_ref(),
             async_req.as_ref(),
+            exec_req.as_ref(),
         )
     };
     match outcome {
@@ -1445,6 +1508,31 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                     }
                     Err(e) => {
                         eprintln!("async 报告读取失败 {}: {e}", req.report.display());
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            // K3-E exec 结果(JSONL 阶段报告)。
+            if let (Some(req), Some(code)) = (exec_req.as_ref(), o.exec_exit_code) {
+                println!(
+                    "[exec] caligo_exec_run:exit_code={} ({})",
+                    code,
+                    match code {
+                        0 => "OK(流程完成,结果见报告 result 行)",
+                        1 => "ERR_NULL",
+                        2 => "ERR_NO_QQNT",
+                        3 => "ERR_NO_CONTEXT",
+                        _ => "UNKNOWN",
+                    }
+                );
+                let rep = &req.report;
+                match std::fs::read_to_string(rep) {
+                    Ok(content) => {
+                        println!("=== exec report ({}) ===", rep.display());
+                        println!("{content}");
+                    }
+                    Err(e) => {
+                        eprintln!("exec 报告读取失败 {}: {e}", rep.display());
                         return ExitCode::FAILURE;
                     }
                 }
