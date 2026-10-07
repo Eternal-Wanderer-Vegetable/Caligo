@@ -1,0 +1,3 @@
+# Rust binary entry points are source, even though the directory is named bin.
+!crates/caligo-core/src/bin/
+!crates/caligo-core/src/bin/**

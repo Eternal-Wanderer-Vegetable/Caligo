@@ -879,6 +879,13 @@ fn cmd_envscan(args: &[String]) -> ExitCode {
 }
 
 fn cmd_inject(args: &[String]) -> ExitCode {
+    // K4-D0 门控:先于一切参数解析与进程操作。旧注入路线(加载 DLL、远程线程、
+    // async/exec 载荷、逐轮 poll)在普通构建中默认拒绝;恢复条件见
+    // docs/research/k4-execution-scope.md 与 D6 现场准入。
+    if !caligo_bridge::gate::research_enabled() {
+        eprintln!("{}", caligo_bridge::gate::DISABLED_NOTICE);
+        return ExitCode::from(3);
+    }
     let mut pid: Option<u32> = None;
     let mut bridge: Option<PathBuf> = None;
     let mut manifest: Option<PathBuf> = None;
@@ -1293,7 +1300,6 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             println!("[gate] K3-E exec:JS {} 字节 → env {env:#x}{}", src.len(), match exec_ctx_hint { Some(c) => format!(" ctxhint {c:#x}"), None => String::new() });
             Some(winutil::ExecRequest {
                 env,
-                qqnt_base: 0,
                 ctx_hint: exec_ctx_hint.unwrap_or(0),
                 js: src,
                 report: rep,

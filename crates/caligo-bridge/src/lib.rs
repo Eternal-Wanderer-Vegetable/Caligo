@@ -46,6 +46,7 @@ pub mod probe_code {
 pub mod asyncrun;
 pub mod envrun;
 pub mod exec;
+pub mod gate;
 pub mod intr;
 pub mod obs;
 pub mod register;
@@ -54,7 +55,12 @@ pub mod register;
 #[no_mangle]
 /// 注册自有 linked binding(EXP-K2-00;详见 register.rs 与方案文档)。
 /// 无参导出,由 loader 远程调用。返回 register_code 结果码。
+///
+/// K4-D0 门控:普通构建返回 [`gate::ERR_RESEARCH_DISABLED`],不触碰宿主。
 pub extern "system" fn caligo_register_entry() -> u32 {
+    if let Some(code) = gate::reject_legacy() {
+        return code;
+    }
     register::register_entry()
 }
 
@@ -74,10 +80,15 @@ pub extern "system" fn caligo_entry_fired() -> u32 {
 /// 启动自建 Environment 链路线程(envrun;EXP-K2-01)。立即返回(线程异步执行),
 /// 结果以 JSONL 报告文件呈现(每阶段一行,崩溃亦保留已完成阶段)。
 ///
+/// K4-D0 门控:普通构建返回 [`gate::ERR_RESEARCH_DISABLED`],不触碰宿主。
+///
 /// # Safety
 ///
 /// `report_path` 必须指向有效的 NUL 结尾 UTF-16 缓冲区(由 loader 写入)。
 pub unsafe extern "system" fn caligo_env_start(report_path: *const u16) -> u32 {
+    if let Some(code) = gate::reject_legacy() {
+        return code;
+    }
     let len = match wide_string_len(report_path) {
         Some(len) => len,
         None => return probe_code::ERR_NULL_PATH,
@@ -185,10 +196,15 @@ pub extern "system" fn caligo_bridge_protocol_version() -> u32 {
 ///
 /// 返回 [`probe_code`] 中的结果码。只读宿主信息;不做其他副作用。
 ///
+/// K4-D0 门控:probe 属旧注入链的远程线程入口,普通构建拒绝。
+///
 /// # Safety
 ///
 /// `report_path` 必须指向有效的 NUL 结尾 UTF-16 缓冲区(由 loader 写入)。
 pub unsafe extern "system" fn caligo_probe_run(report_path: *const u16) -> u32 {
+    if let Some(code) = gate::reject_legacy() {
+        return code;
+    }
     let len = match wide_string_len(report_path) {
         Some(len) => len,
         None => return probe_code::ERR_NULL_PATH,
@@ -252,10 +268,15 @@ fn current_pid() -> u32 {
 ///
 /// 返回 [`probe_code`] 结果码。不调用任何 QQ/Node 函数;唯一写动作是报告文件。
 ///
+/// K4-D0 门控:普通构建返回 [`gate::ERR_RESEARCH_DISABLED`]。
+///
 /// # Safety
 ///
 /// `report_path` 必须指向有效的 NUL 结尾 UTF-16 缓冲区(由 loader 写入)。
 pub unsafe extern "system" fn caligo_obs_run(report_path: *const u16) -> u32 {
+    if let Some(code) = gate::reject_legacy() {
+        return code;
+    }
     let len = match wide_string_len(report_path) {
         Some(len) => len,
         None => return probe_code::ERR_NULL_PATH,
@@ -285,7 +306,12 @@ pub unsafe extern "system" fn caligo_obs_run(report_path: *const u16) -> u32 {
 /// `ctx` 必须指向本进程内有效的 [`obs::ObsCtx`](结构体布局见 obs.rs):
 /// wrapper/qqnt/major 基址来自加载器侧 Toolhelp 快照,report_path 指向
 /// 远程已写入的 NUL 结尾 UTF-16 缓冲。
+///
+/// K4-D0 门控:普通构建返回 [`gate::ERR_RESEARCH_DISABLED`]。
 pub unsafe extern "system" fn caligo_obs_run2(ctx: *const obs::ObsCtx) -> u32 {
+    if let Some(code) = gate::reject_legacy() {
+        return code;
+    }
     if ctx.is_null() {
         return probe_code::ERR_NULL_PATH;
     }
@@ -327,7 +353,12 @@ pub unsafe extern "system" fn caligo_obs_run2(ctx: *const obs::ObsCtx) -> u32 {
 /// `ctx` 必须指向本进程内有效的 [`intr::IntrCtx`](布局见 intr.rs):
 /// env/expected_vftable/qqnt_base 来自加载器侧解析与 WU2 扫描结果,
 /// report_path 指向远程已写入的 NUL 结尾 UTF-16 缓冲。
+///
+/// K4-D0 门控:普通构建返回 [`gate::ERR_RESEARCH_DISABLED`]。
 pub unsafe extern "system" fn caligo_interrupt_run(ctx: *mut intr::IntrCtx) -> u32 {
+    if let Some(code) = gate::reject_legacy() {
+        return code;
+    }
     if ctx.is_null() {
         return intr::intr_code::ERR_NULL_PATH;
     }
@@ -346,7 +377,12 @@ pub unsafe extern "system" fn caligo_interrupt_run(ctx: *mut intr::IntrCtx) -> u
 ///
 /// `ctx` 必须指向本进程内有效的 [`asyncrun::AsyncCtx`](布局见 asyncrun.rs):
 /// env 来自 K2-02 扫描结果,report_path 指向远程已写入的 NUL 结尾 UTF-16 缓冲。
+///
+/// K4-D0 门控:普通构建返回 [`gate::ERR_RESEARCH_DISABLED`]。
 pub unsafe extern "system" fn caligo_async_run(ctx: *mut asyncrun::AsyncCtx) -> u32 {
+    if let Some(code) = gate::reject_legacy() {
+        return code;
+    }
     if ctx.is_null() {
         return asyncrun::async_code::ERR_NULL_PATH;
     }
@@ -362,7 +398,13 @@ pub unsafe extern "system" fn caligo_async_run(ctx: *mut asyncrun::AsyncCtx) -> 
 /// # Safety
 ///
 /// `ctx` 必须指向本进程内有效的 [`exec::ExecCtx`](js 缓冲由加载器写入)。
+///
+/// K4-D0 门控:K3-E 已判负的通用执行器,普通构建返回
+/// [`gate::ERR_RESEARCH_DISABLED`](计划 §2.2:文档暂停落实为默认拒绝)。
 pub unsafe extern "system" fn caligo_exec_run(ctx: *mut exec::ExecCtx) -> u32 {
+    if let Some(code) = gate::reject_legacy() {
+        return code;
+    }
     if ctx.is_null() {
         return exec::exec_code::ERR_NULL;
     }

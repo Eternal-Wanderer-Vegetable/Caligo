@@ -30,6 +30,47 @@ pub fn to_wide(s: &str) -> Vec<u16> {
         .collect()
 }
 
+/// 远端留存缓冲记录(K4-D1 资源账本)。
+///
+/// 计划 §5.3:`WAIT_TIMEOUT` 表示等待未满足,不等于远程线程已终止——
+/// 其仍可能引用远端 ctx/参数缓冲。等待超时(或无法证明线程终止)时,
+/// 相关分配**不释放**,登记在此账本,随宿主进程生存期回收;
+/// 生产链路(K4 起)不再逐次远程调用,本账本仅服务研究构建的取证。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetainedRemoteAlloc {
+    pub pid: u32,
+    pub addr: usize,
+    pub bytes: usize,
+    pub what: &'static str,
+    /// 留存原因("wait-timeout" / "async-worker-outlives-wait")。
+    pub reason: &'static str,
+}
+
+static RETAINED_REMOTE: std::sync::Mutex<Vec<RetainedRemoteAlloc>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// 把远端分配登记进留存账本(不释放)。
+fn retain_remote(pid: u32, addr: usize, bytes: usize, what: &'static str, reason: &'static str) {
+    if let Ok(mut ledger) = RETAINED_REMOTE.lock() {
+        ledger.push(RetainedRemoteAlloc {
+            pid,
+            addr,
+            bytes,
+            what,
+            reason,
+        });
+    }
+}
+
+/// 读取留存账本快照(测试/取证用;非测试构建下由测试模块独占使用)。
+#[allow(dead_code)]
+pub fn retained_remote_snapshot() -> Vec<RetainedRemoteAlloc> {
+    RETAINED_REMOTE
+        .lock()
+        .map(|l| l.clone())
+        .unwrap_or_default()
+}
+
 fn filetime_to_utc(ft: &FILETIME) -> Option<String> {
     let raw = ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64;
     if raw == 0 {
@@ -231,8 +272,6 @@ pub struct IntrRequest {
 pub struct ExecRequest {
     /// 候选 node::Environment*(0 = 干跑)。
     pub env: usize,
-    /// QQNT.dll 基址(加载器侧解析)。
-    pub qqnt_base: usize,
     /// 上下文钉扎 hint(非零优先;来自 start 轮报告)。
     pub ctx_hint: usize,
     /// UTF-8 JS 源码(CLI 侧已读入)。
@@ -332,6 +371,9 @@ pub unsafe fn inject_and_probe(
         let mut buf_env: Option<*mut core::ffi::c_void> = None;
         let mut buf_intr: Option<*mut core::ffi::c_void> = None;
         let mut buf_async: Option<*mut core::ffi::c_void> = None;
+        // K4-D1:任一远程线程等待超时即置位;此后所有远端缓冲转入留存账本,
+        // 不再释放(WAIT_TIMEOUT ≠ 线程终止,计划 §5.3)。
+        let mut timed_out = false;
 
         let result = (|| -> Result<InjectOutcome, String> {
             let alloc_and_write = |bytes: &[u16],
@@ -400,7 +442,11 @@ pub unsafe fn inject_and_probe(
             CloseHandle(thread);
             if wait != 0 {
                 // WAIT_OBJECT_0 == 0;超时/放弃都按失败处理(不假设加载完成)。
-                return Err(format!("remote LoadLibraryW wait failed: code {wait:#x}"));
+                // LoadLibraryW 线程可能仍持 bridge 路径缓冲 → 标记留存。
+                timed_out = true;
+                return Err(format!(
+                    "remote LoadLibraryW wait failed (remote buffers retained): code {wait:#x}"
+                ));
             }
 
             // 在目标模块快照中定位 bridge 基址(x64 线程退出码截断,不可靠)。
@@ -510,7 +556,10 @@ pub unsafe fn inject_and_probe(
             GetExitCodeThread(probe_thread, &mut exit_code);
             CloseHandle(probe_thread);
             if wait != 0 {
-                return Err(format!("probe remote thread wait failed: code {wait:#x}"));
+                timed_out = true;
+                return Err(format!(
+                    "probe remote thread wait failed (remote buffers retained): code {wait:#x}"
+                ));
             }
 
             // 可选:只读运行时观测 v2(caligo_obs_run2;基址由本加载器进程解析,
@@ -592,10 +641,21 @@ pub unsafe fn inject_and_probe(
                 let mut code: u32 = u32::MAX;
                 GetExitCodeThread(obs_thread, &mut code);
                 CloseHandle(obs_thread);
-                VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
                 if wait != 0 {
-                    return Err(format!("obs remote thread wait failed: code {wait:#x}"));
+                    // obs ctx 引用 obs 报告路径缓冲;线程未证实终止 → 双双留存。
+                    timed_out = true;
+                    retain_remote(
+                        pid,
+                        remote_ctx as usize,
+                        ctx_bytes.len(),
+                        "obs ctx",
+                        "wait-timeout",
+                    );
+                    return Err(format!(
+                        "obs remote thread wait failed (remote buffers retained): code {wait:#x}"
+                    ));
                 }
+                VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
                 obs_exit = Some(code);
             }
 
@@ -637,8 +697,22 @@ pub unsafe fn inject_and_probe(
                 let mut code: u32 = u32::MAX;
                 GetExitCodeThread(env_thread, &mut code);
                 CloseHandle(env_thread);
+                // env 链路线程内部再派生异步 worker,远端线程返回≠worker 结束:
+                // 报告路径缓冲 worker 仍可能引用,一律留存登记(不释放)。
+                if let Some(p) = buf_env.take() {
+                    retain_remote(
+                        pid,
+                        p as usize,
+                        env_wide.len() * 2,
+                        "env report path",
+                        "async-worker-outlives-wait",
+                    );
+                }
                 if wait != 0 {
-                    return Err(format!("env remote thread wait failed: code {wait:#x}"));
+                    timed_out = true;
+                    return Err(format!(
+                        "env remote thread wait failed (remote buffers retained): code {wait:#x}"
+                    ));
                 }
                 env_exit = Some(code);
             }
@@ -722,10 +796,22 @@ pub unsafe fn inject_and_probe(
                 let mut code: u32 = u32::MAX;
                 GetExitCodeThread(intr_thread, &mut code);
                 CloseHandle(intr_thread);
-                VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
                 if wait != 0 {
-                    return Err(format!("interrupt remote thread wait failed: code {wait:#x}"));
+                    // RequestInterrupt 回调可能在 JS 空闲时挂起数分钟(K2-03 记录):
+                    // 超时绝不证明回调链结束 → ctx 留存。
+                    timed_out = true;
+                    retain_remote(
+                        pid,
+                        remote_ctx as usize,
+                        ctx_bytes.len(),
+                        "intr ctx",
+                        "wait-timeout",
+                    );
+                    return Err(format!(
+                        "interrupt remote thread wait failed (remote buffers retained): code {wait:#x}"
+                    ));
                 }
+                VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
                 intr_exit = Some(code);
             }
 
@@ -812,12 +898,19 @@ pub unsafe fn inject_and_probe(
                 let mut code: u32 = u32::MAX;
                 GetExitCodeThread(exec_thread, &mut code);
                 CloseHandle(exec_thread);
+                if wait != 0 {
+                    // exec 回调(uv_async)可能尚未执行;ctx/js/report 缓冲均被引用 → 留存。
+                    timed_out = true;
+                    retain_remote(pid, remote_ctx as usize, ctx_bytes.len(), "exec ctx", "wait-timeout");
+                    retain_remote(pid, remote_js as usize, ex.js.len(), "exec js", "wait-timeout");
+                    retain_remote(pid, remote_rep as usize, rep_wide.len() * 2, "exec report path", "wait-timeout");
+                    return Err(format!(
+                        "exec remote thread wait failed (remote buffers retained): code {wait:#x}"
+                    ));
+                }
                 VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
                 VirtualFreeEx(proc_h, remote_rep, 0, MEM_RELEASE);
                 VirtualFreeEx(proc_h, remote_js, 0, MEM_RELEASE);
-                if wait != 0 {
-                    return Err(format!("exec remote thread wait failed: code {wait:#x}"));
-                }
                 exec_exit = Some(code);
             }
 
@@ -918,12 +1011,22 @@ pub unsafe fn inject_and_probe(
                 let mut code: u32 = u32::MAX;
                 GetExitCodeThread(async_thread, &mut code);
                 CloseHandle(async_thread);
+                if wait != 0 {
+                    // K4-D1 修复:原实现此处先释放 remote_ctx/params 再判 wait ——
+                    // 超时时回调(async_cb)可能仍在 QQ loop 线程上引用这些缓冲。
+                    // 现改为留存登记,绝不盲目释放;不用 TerminateThread。
+                    timed_out = true;
+                    retain_remote(pid, remote_ctx as usize, ctx_bytes.len(), "async ctx", "wait-timeout");
+                    if let Some(rp) = remote_params {
+                        retain_remote(pid, rp as usize, req.params.len(), "async params", "wait-timeout");
+                    }
+                    return Err(format!(
+                        "async remote thread wait failed (remote buffers retained): code {wait:#x}"
+                    ));
+                }
                 VirtualFreeEx(proc_h, remote_ctx, 0, MEM_RELEASE);
                 if let Some(rp) = remote_params {
                     VirtualFreeEx(proc_h, rp, 0, MEM_RELEASE);
-                }
-                if wait != 0 {
-                    return Err(format!("async remote thread wait failed: code {wait:#x}"));
                 }
                 async_exit = Some(code);
             }
@@ -940,23 +1043,41 @@ pub unsafe fn inject_and_probe(
             })
         })();
 
-        if let Some(p) = buf_bridge {
-            VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
-        }
-        if let Some(p) = buf_report {
-            VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
-        }
-        if let Some(p) = buf_obs {
-            VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
-        }
-        if let Some(p) = buf_env {
-            VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
-        }
-        if let Some(p) = buf_intr {
-            VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
-        }
-        if let Some(p) = buf_async {
-            VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
+        if timed_out {
+            // K4-D1:存在未证实终止的远程线程 —— 全部已分配远端缓冲转入留存账本,
+            // 不释放;生产链路不逐次远程调用,此留存随宿主进程生存期回收。
+            let entries: [(&Option<*mut core::ffi::c_void>, &'static str); 6] = [
+                (&buf_bridge, "bridge path"),
+                (&buf_report, "probe report path"),
+                (&buf_obs, "obs report path"),
+                (&buf_env, "env report path"),
+                (&buf_intr, "intr report path"),
+                (&buf_async, "async report path"),
+            ];
+            for (buf, what) in entries {
+                if let Some(p) = buf {
+                    retain_remote(pid, *p as usize, 0, what, "wait-timeout");
+                }
+            }
+        } else {
+            if let Some(p) = buf_bridge {
+                VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
+            }
+            if let Some(p) = buf_report {
+                VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
+            }
+            if let Some(p) = buf_obs {
+                VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
+            }
+            if let Some(p) = buf_env {
+                VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
+            }
+            if let Some(p) = buf_intr {
+                VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
+            }
+            if let Some(p) = buf_async {
+                VirtualFreeEx(proc_h, p, 0, MEM_RELEASE);
+            }
         }
         CloseHandle(proc_h);
         result
@@ -1131,5 +1252,23 @@ mod tests {
                 "implausible creation year {year} in {started}"
             );
         }
+    }
+
+    #[test]
+    fn retained_allocs_are_recorded_not_freed() {
+        // K4-D1 资源账本:登记只追加、可快照;同一 (addr) 可重复登记
+        // (多次超时),取证时按序呈现。
+        let marker = 0xDEADBEEF_usize;
+        retain_remote(1, marker, 64, "async ctx", "wait-timeout");
+        retain_remote(2, marker + 8, 32, "async params", "wait-timeout");
+        let snap = retained_remote_snapshot();
+        assert!(snap.contains(&RetainedRemoteAlloc {
+            pid: 1,
+            addr: marker,
+            bytes: 64,
+            what: "async ctx",
+            reason: "wait-timeout",
+        }));
+        assert!(snap.iter().any(|e| e.what == "async params" && e.pid == 2));
     }
 }

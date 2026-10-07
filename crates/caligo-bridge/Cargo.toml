@@ -8,6 +8,12 @@ edition.workspace = true
 # cdylib:实际被 loader 注入宿主进程的动态库产物。
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# K4-D0:研究路线默认关闭。`--features research` 仅用于自建宿主离线研究,
+# 不构成 QQ 现场准入(见 docs/research/k4-execution-scope.md)。
+default = []
+research = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

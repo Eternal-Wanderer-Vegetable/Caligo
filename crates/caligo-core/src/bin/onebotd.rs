@@ -19,6 +19,13 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 fn main() {
+    // K4-D0 门控:旧轮询 runner(ARM→逐轮 CLI inject→poll→STOP)整体停用。
+    // 不调用 cli_inject,不自动加"指定测试实例确认";K4 常驻链路由
+    // caligod + 命名管道 + bridge resident 承接(计划 §7-D5)。
+    if !caligo_bridge::gate::research_enabled() {
+        eprintln!("{}", caligo_bridge::gate::DISABLED_NOTICE);
+        std::process::exit(3);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut pid: u32 = 0;
     let mut env: String = String::new();
@@ -32,7 +39,7 @@ fn main() {
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
-        let mut val = |a: &[String], i: &mut usize| -> String { a.get(*i).cloned().unwrap_or_default() };
+        let val = |a: &[String], i: &mut usize| -> String { a.get(*i).cloned().unwrap_or_default() };
         match a.as_str() {
             "--pid" => { i += 1; pid = args.get(i).and_then(|s| s.parse().ok()).unwrap_or(0); }
             "--env" => { i += 1; env = val(&args, &mut i); }

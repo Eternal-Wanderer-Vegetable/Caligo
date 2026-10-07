@@ -844,6 +844,10 @@ fn read_wide(path_ptr: usize) -> Option<String> {
 /// ctx 必须指向本进程内由加载器写入的有效 [`AsyncCtx`];env 须来自
 /// K2-02 扫描结果且实例健康。
 pub unsafe fn async_run(ctx: &AsyncCtx) -> u32 {
+    // K4-D0 门控:先于一切状态复位/内存访问。
+    if let Some(code) = crate::gate::reject_legacy() {
+        return code;
+    }
     // 复位回调状态。
     FIRED.store(0, Ordering::Release);
     CB_TID.store(0, Ordering::Release);
@@ -1105,6 +1109,21 @@ pub unsafe fn async_run(ctx: &AsyncCtx) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(feature = "research"))]
+    #[test]
+    fn gated_build_rejects_async_run_before_any_state_or_memory_access() {
+        // K4-D0:门控位于第一条语句;全零 ctx(必然无效)必须返回门控码,
+        // 而不是参数错误 —— 证明门控先于一切参数/内存访问。
+        let ctx: AsyncCtx = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { async_run(&ctx) },
+            crate::gate::ERR_RESEARCH_DISABLED
+        );
+        // 全局复位原子量不得被触碰(仍是上轮遗留值或 0,但 FIRED 不被复位为 0 之外的
+        // 可观察副作用由下方 FIRED 初值断言兜底:门控路径完全不写状态)。
+        assert_eq!(FIRED.load(Ordering::Acquire), 0);
+    }
 
     #[test]
     fn enum_script_is_self_contained() {

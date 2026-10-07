@@ -324,6 +324,10 @@ fn read_wide(path_ptr: usize) -> Option<String> {
 ///
 /// ctx 由加载器写入本进程;js 缓冲须有效且长度正确。
 pub unsafe fn exec_run(ctx: &ExecCtx) -> u32 {
+    // K4-D0 门控:K3-E 判负的通用执行器,普通构建拒绝(先于一切状态复位/内存访问)。
+    if let Some(code) = crate::gate::reject_legacy() {
+        return code;
+    }
     // SAFETY: 调用方保证 ctx/js 有效。
     unsafe {
         RESULT_LEN.store(0, Ordering::Release);
@@ -442,5 +446,24 @@ pub(crate) unsafe fn env_is_fresh_pub(qqnt_base: usize, env: usize) -> bool {
         let Some(vfptr) = read_usize(env) else { return false; };
         let expected = (qqnt_base as u64).wrapping_add(EXPECTED_VTABLE_RVA as u64);
         vfptr as u64 == expected
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(not(feature = "research"))]
+    #[test]
+    fn gated_build_rejects_exec_run_before_any_state_or_memory_access() {
+        // K4-D0:K3-E 判负的通用执行器,普通构建在第一条语句拒绝。
+        // 全零 ctx(report_path=0)若未被门控会返回参数错误码 11;
+        // 返回门控码即证明门控先于状态复位与参数访问。
+        let ctx: ExecCtx = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { exec_run(&ctx) },
+            crate::gate::ERR_RESEARCH_DISABLED
+        );
+        assert_ne!(unsafe { exec_run(&ctx) }, 11);
     }
 }
