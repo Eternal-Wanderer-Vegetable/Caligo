@@ -4,6 +4,7 @@
 //! 不自动加"指定测试实例确认"。本测试以任意参数启动 onebotd,断言立即
 //! 以退出码 3 拒绝 —— 全程不 spawn caligo-cli、不触碰任何 QQ 进程。
 
+#![cfg(not(feature = "research"))] // research 构建下门控合法放开,本测试仅适用于普通构建
 use std::process::Command;
 
 #[test]

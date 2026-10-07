@@ -155,13 +155,12 @@ pub unsafe fn exec_script(
     unsafe {
         let get_current: FnGetCurrent = to_fn(syms.get_current);
         let current = (get_current)() as usize;
-        if std::env::var("CALIGO_V8_DEBUG").is_ok() {
-            eprintln!(
-                "[v8-dbg] current={current:#x} isolate={:#x}",
-                isolate as usize
-            );
-        }
-        if current == 0 || current != isolate as usize {
+        // K2-03 r3 实证语义(uv 轮转点):GetCurrent 经常合法为 0,
+        // entered/incumbent 才是轮转点的有效上下文。拒绝条件 = current 与
+        // isolate 不一致(非 0 且不等)+ 阶梯上下文为空。§5.1 的"零 current
+        // 不能自行解释为可进入"由此满足:仍须通过上下文阶梯方可进入,
+        // 且 env 新鲜度门 + owner 线程检查在阶梯之前(QqOwnerAdapter)。
+        if current != 0 && current != isolate as usize {
             return Err(V8Error::NoCurrentContext);
         }
         let Some(ctx) = ladder_ctx(syms, isolate) else {

@@ -503,14 +503,17 @@ fn d8_zero_current_refuses_v8_ladder_before_scope() {
     let cfg = EntryConfig { qqnt_base, env, report_path: report_path("d8zero") };
     let _handle = bootstrap(&cfg, &fake_symbols()).unwrap();
 
-    // 模拟安静轮转点:current = 0。
+    // 安静轮转点:current = 0 但 entered ctx 有效 → 阶梯可进入(K2-03 r3 语义)。
     let scope_before = fake_v8::SCOPE_CALLS.load(Ordering::Relaxed);
     fake_v8::CURRENT.store(0, Ordering::Release);
+    let r = caligo_bridge::qq_v8::poll_listener_json();
+    assert!(r.is_ok(), "current=0 + entered 有效 → 允许进入");
+    assert!(
+        fake_v8::SCOPE_CALLS.load(Ordering::Relaxed) > scope_before,
+        "阶梯即上下文验证"
+    );
+    // 真正的拒绝条件:current 与 isolate 不一致。
+    fake_v8::CURRENT.store(0xBAD_0001, Ordering::Release);
     let err = caligo_bridge::qq_v8::poll_listener_json().unwrap_err();
     assert_eq!(err, caligo_bridge::qq_v8::V8Error::NoCurrentContext);
-    assert_eq!(
-        fake_v8::SCOPE_CALLS.load(Ordering::Relaxed),
-        scope_before,
-        "零 current 下不得进入 HandleScope(先于一切 V8 调用)"
-    );
 }

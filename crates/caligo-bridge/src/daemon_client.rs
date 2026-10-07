@@ -445,8 +445,7 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
         // —— 连接 ——
         let conn = match PipeConn::connect(&cfg.pipe_name) {
             Ok(conn) => conn,
-            Err(e) => {
-                eprintln!("[dcl] connect failed: {}", e.describe());
+            Err(_) => {
                 c.connect_failures += 1;
                 if c.connects > 0 {
                     c.reconnects += 1;
