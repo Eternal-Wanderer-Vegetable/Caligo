@@ -24,7 +24,7 @@
 | 2.2 | API/ABI 版本记录(Node 24.11.1 / V8 14.4 / Electron 40;vtable RVA 绑定) | **PASS(静态)** | K2-03 r3 指纹;native-entry-contract §1 |
 | 2.3 | 指定测试账号与对端样本已登记(仅本机) | **PASS(执行者已填写)** | `local-evidence/test-scope-local.md`(值不入 Git;使用别名) |
 | 2.4 | 进程角色与创建时间判定标准明确(wrapper.node 独载 + PID+创建时间双核) | **PASS** | native-entry-contract §1;test-scope §4 |
-| 2.5 | D7 目标实例:专为实验新建、登录 TEST-ACCOUNT-A | **UNKNOWN(待 D7 当日)** | 执行者启动并记录 PID+创建时间到 local-evidence/k4/ |
+| 2.5 | D7 目标实例:专为实验新建、登录 TEST-ACCOUNT-A | **PASS(2026-10-07 17:07 闭合)** | 执行者新建并指定;登记于 local-evidence/k4/d7-a/instance.md(本机) |
 
 ## 3. 风险与恢复面
 
