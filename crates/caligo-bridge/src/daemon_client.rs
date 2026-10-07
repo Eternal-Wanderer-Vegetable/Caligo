@@ -427,6 +427,7 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
     resident: Arc<Resident<A>>,
     wake: &dyn Fn() -> bool,
     result_rx: mpsc::Receiver<SendOutcome>,
+    events_rx: mpsc::Receiver<crate::resident::OwnedEvent>,
     stop: Arc<AtomicBool>,
 ) -> (WorkerCounters, WorkerExit) {
     let mut c = WorkerCounters::default();
@@ -497,6 +498,7 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
             &resident,
             wake,
             &result_rx,
+            &events_rx,
             &tick,
             &stop,
             &mut c,
@@ -534,6 +536,7 @@ enum SessionEnd {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn session_loop<A: crate::host_adapter::HostAdapter>(
     conn: &PipeConn,
     dec: &mut FrameDecoder,
@@ -541,6 +544,7 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
     resident: &Arc<Resident<A>>,
     wake: &dyn Fn() -> bool,
     result_rx: &mpsc::Receiver<SendOutcome>,
+    events_rx: &mpsc::Receiver<crate::resident::OwnedEvent>,
     tick: &Arc<AtomicBool>,
     stop: &Arc<AtomicBool>,
     c: &mut WorkerCounters,
@@ -621,7 +625,70 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
             }
             c.results_sent += 1;
         }
-        // 2) 事件上行(重放未确认 → 新事件;窗口满 → 记 Gap 丢最旧)。
+        // 2) 事件上行:泵钩子经通道转交的 owned 事件(D8)+ 窗口重放。
+        while let Ok(ev) = events_rx.try_recv() {
+            let payload = EventPayload {
+                event_seq: 0, // core 持久化时分配
+                session_generation: cfg.session_generation,
+                session: serde_json::json!({
+                    "account": cfg.account,
+                    "kind": if ev.chat_type == 2 { "group" } else { "private" },
+                    "peer": ev.peer_uid,
+                }),
+                direction: if !cfg.account.is_empty() && ev.sender_uin == cfg.account {
+                    "self_sent"
+                } else {
+                    "incoming"
+                }
+                .into(),
+                sender: ev.sender_uin.clone(),
+                native_id: ev.native_id.clone(),
+                text: ev.text.clone(),
+                platform_time: ev.msg_time,
+                observed_at_unix_ms: 0,
+                source: match ev.source {
+                    crate::resident::EventSourceKind::Recv => "recv",
+                    crate::resident::EventSourceKind::Update => "update",
+                }
+                .into(),
+            };
+            let seq = next_local_seq;
+            next_local_seq += 1;
+            let bytes = payload.native_id.len() + payload.text.len() + 128;
+            while unacked.len() + 1 > EVENT_WINDOW_MAX_ITEMS
+                || unacked_bytes + bytes > EVENT_WINDOW_MAX_BYTES
+            {
+                if let Some((s, _)) = unacked.pop_front() {
+                    if let Some((_, e)) = unacked.front() {
+                        unacked_bytes -= e.native_id.len() + e.text.len() + 128;
+                    }
+                    let _ = s;
+                    c.events_gap_dropped += 1;
+                }
+            }
+            unacked.push_back((seq, payload.clone()));
+            unacked_bytes += bytes;
+            if send_json(conn, &BridgeMsg::Event { event: payload }).is_err() {
+                return SessionEnd::Broken;
+            }
+            c.events_sent += 1;
+        }
+        if !unacked.is_empty() {
+            let items: Vec<EventPayload> = unacked
+                .iter()
+                .filter(|(s, _)| *s > acked_high)
+                .map(|(_, e)| e.clone())
+                .collect();
+            if !items.is_empty() {
+                for e in items {
+                    if send_json(conn, &BridgeMsg::Event { event: e }).is_err() {
+                        return SessionEnd::Broken;
+                    }
+                    c.events_sent += 1;
+                }
+            }
+        }
+        // 2b) 事件上行(重放未确认 → 新事件;窗口满 → 记 Gap 丢最旧)。
         let mut replay: Vec<u64> = unacked.iter().map(|(s, _)| *s).collect();
         replay.retain(|s| *s > acked_high);
         if !replay.is_empty() {

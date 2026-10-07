@@ -636,6 +636,7 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
     let stop = handle.daemon_stop_flag();
     let resident = Arc::new(Resident::new(QqOwnerAdapter::new(handle), ResidentLimits::default()));
     let (tx, rx) = std::sync::mpsc::channel::<resident::SendOutcome>();
+    let (etx, erx) = std::sync::mpsc::channel::<resident::OwnedEvent>();
     // resident 初始化必须在 owner 线程执行(计划 §5.1:宿主 API 前的
     // owner 检查不是形式 —— 远程线程调用会被正确拒绝,D7-b 现场实证)。
     // 因此挂在 drain 钩子里,由 owner pump 的首次 tick 完成;失败即
@@ -710,7 +711,10 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
                     }
                 }
             }
-            r.take_events().len()
+            for ev in r.take_events() {
+                let _ = etx.send(ev); // 转交 worker(此前在此处被吞 —— D8 现场缺陷)
+            }
+            0
         }));
     }
     let cfg = daemon_client::DaemonClientConfig {
@@ -729,7 +733,8 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
     let spawned = std::thread::Builder::new()
         .name("caligo-daemon-client".into())
         .spawn(move || {
-            let (_counters, _exit) = daemon_client::run_worker(cfg, resident, &wake, rx, worker_stop);
+            let (_counters, _exit) =
+                daemon_client::run_worker(cfg, resident, &wake, rx, erx, worker_stop);
         });
     if spawned.is_err() {
         return c::ERR_SPAWN;

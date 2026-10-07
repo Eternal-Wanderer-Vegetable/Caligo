@@ -146,7 +146,7 @@ fn reconnect_then_hello_then_clean_stop_without_bootstrap() {
         let resident = resident.clone();
         let stop = stop.clone();
         std::thread::spawn(move || {
-            let r = run_worker(cfg, resident, &wake_false, _rx_placeholder(), stop);
+            let r = run_worker(cfg, resident, &wake_false, _rx_placeholder(), _ev_placeholder(), stop);
             w_tx.send(r).unwrap();
         });
     }
@@ -215,7 +215,7 @@ fn dispatch_roundtrip_through_real_worker() {
         let resident = resident.clone();
         let stop = stop.clone();
         std::thread::spawn(move || {
-            let r = run_worker(cfg, resident, &wake_true, rx, stop);
+            let r = run_worker(cfg, resident, &wake_true, rx, _ev_placeholder(), stop);
             w_tx.send(r).unwrap();
         });
     }
@@ -310,6 +310,11 @@ fn pipe_names_from_prefix(prefix: &str) -> (String, String) {
 
 // run_worker 的 rx 参数占位(第一个用例不消费结果)。
 fn _rx_placeholder() -> mpsc::Receiver<caligo_bridge::resident::SendOutcome> {
+    let (_t, r) = mpsc::channel();
+    r
+}
+
+fn _ev_placeholder() -> mpsc::Receiver<caligo_bridge::resident::OwnedEvent> {
     let (_t, r) = mpsc::channel();
     r
 }
