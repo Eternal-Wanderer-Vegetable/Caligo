@@ -222,7 +222,16 @@ impl PipeError {
 
 impl PipeConn {
     fn connect(name: &str) -> Result<Self, PipeError> {
-        let wide: Vec<u16> = OsStr::new(name)
+        // 短名自动补 Win32 管道根(与 core::daemon::pipe_names 同规则)——
+        // D7-b 现场教训:配置里的短名在 QQ 进程内解析失败,worker 永远
+        // 退避重连一个不存在的名字。
+        const ROOT: &str = "\\\\.\\pipe\\";
+        let name = if name.starts_with(ROOT) {
+            name.to_string()
+        } else {
+            format!("{ROOT}{}", name.trim_start_matches('\\'))
+        };
+        let wide: Vec<u16> = OsStr::new(&name)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();

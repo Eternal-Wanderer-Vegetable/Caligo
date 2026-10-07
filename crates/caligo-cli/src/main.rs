@@ -88,6 +88,7 @@ fn main() -> ExitCode {
         Some("inject") => cmd_inject(&args[1..]),
         Some("qq-entry") => qqentry::cmd_qq_entry(&args[1..]),
         Some("qq-entry-stop") => qqentry::cmd_qq_entry_stop(&args[1..]),
+        Some("qq-status") => qqentry::cmd_qq_status(&args[1..]),
         Some("daemon-control") => cmd_daemon_control(&args[1..]),
         _ => {
             eprintln!("{USAGE}");
@@ -1674,6 +1675,24 @@ fn cmd_daemon_control(args: &[String]) -> ExitCode {
         Some("drain") => ControlMsg::DrainEvents {
             max: cmd.get(1).and_then(|s| s.parse().ok()).unwrap_or(16),
         },
+        // D7-b:发送链路探针。格式:send <request-id> <kind> <peer> <text...>
+        // LAB/现场验证 Dispatch→SendResult 全链;真实业务发送属 D9 准入。
+        Some("send") => {
+            let id = cmd.get(1).cloned().unwrap_or_default();
+            let kind = cmd.get(2).cloned().unwrap_or_else(|| "private".into());
+            let peer = cmd.get(3).cloned().unwrap_or_default();
+            let text = cmd[4..].join(" ");
+            if id.is_empty() || peer.is_empty() {
+                eprintln!("send 需要: send <id> <private|group> <peer> <text...>");
+                return ExitCode::FAILURE;
+            }
+            ControlMsg::SendText {
+                request_id: id,
+                target: serde_json::json!({"account":"10001","kind":kind,"peer":peer}),
+                text,
+                deadline_ms: 30_000,
+            }
+        }
         _ => {
             eprintln!("未知动作: {action:?}");
             return ExitCode::FAILURE;

@@ -392,6 +392,113 @@ unsafe fn remote_daemon_start(
     }
 }
 
+/// QQ 内 worker 计数取证:远程调用 caligo_qq_daemon_status → 打印报告尾部。
+pub fn cmd_qq_status(args: &[String]) -> ExitCode {
+    let (pid, bridge, report, _env, _ws, _wm, _extra) = match gates(args, false) {
+        Ok(v) => v,
+        Err(c) => return c,
+    };
+    let probe_report = report.with_file_name("qq-status-probe.json");
+    let remote_base = match unsafe {
+        winutil::inject_and_probe(
+            pid,
+            &bridge,
+            &probe_report,
+            None,
+            None,
+            false,
+            20_000,
+            None,
+            None,
+            None,
+        )
+    } {
+        Ok(o) => o.remote_base,
+        Err(e) => {
+            eprintln!("[qq-status] bridge 加载失败:{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let code = unsafe { remote_status(pid, remote_base) };
+    let code = match code {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[qq-status] {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("[qq-status] exit={code:#x}");
+    print_report(&report);
+    ExitCode::SUCCESS
+}
+
+/// SAFETY: 前置:bridge 已加载。
+unsafe fn remote_status(pid: u32, remote_base: usize) -> Result<u32, String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Threading::{
+        CreateRemoteThread, GetExitCodeThread, OpenProcess, WaitForSingleObject,
+        PROCESS_CREATE_THREAD, PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ,
+        PROCESS_VM_WRITE,
+    };
+    // SAFETY: 文档化远程调用序列;单参占位导出。
+    unsafe {
+        let proc_h = OpenProcess(
+            PROCESS_CREATE_THREAD
+                | PROCESS_QUERY_INFORMATION
+                | PROCESS_VM_OPERATION
+                | PROCESS_VM_WRITE
+                | PROCESS_VM_READ,
+            0,
+            pid,
+        );
+        if proc_h.is_null() || proc_h == INVALID_HANDLE_VALUE {
+            return Err(format!("OpenProcess: Win32 error {}", GetLastError()));
+        }
+        let addr = match winutil::read_remote_export(
+            proc_h,
+            remote_base,
+            "caligo_qq_daemon_status",
+        ) {
+            Ok(Some(a)) => a,
+            Ok(None) => {
+                CloseHandle(proc_h);
+                return Err("caligo_qq_daemon_status not found".into());
+            }
+            Err(e) => {
+                CloseHandle(proc_h);
+                return Err(e);
+            }
+        };
+        let start: winutil::RemoteThreadFn =
+            std::mem::transmute::<usize, winutil::RemoteThreadFn>(addr);
+        let thread = CreateRemoteThread(
+            proc_h,
+            std::ptr::null(),
+            0,
+            Some(start),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+        );
+        if thread.is_null() {
+            CloseHandle(proc_h);
+            return Err(format!(
+                "CreateRemoteThread(status): Win32 error {}",
+                GetLastError()
+            ));
+        }
+        let wr = WaitForSingleObject(thread, 15_000);
+        let mut code: u32 = u32::MAX;
+        GetExitCodeThread(thread, &mut code);
+        CloseHandle(thread);
+        CloseHandle(proc_h);
+        if wr != 0 {
+            return Err(format!("status wait failed: code {wr:#x}"));
+        }
+        Ok(code)
+    }
+}
+
 /// SAFETY: 前置:bridge 已加载、pid 为执行者指定实例。
 unsafe fn remote_bootstrap(
     pid: u32,
