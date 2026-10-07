@@ -147,3 +147,50 @@ fn handshake_rejects_wrong_account_when_bound() {
         caligo_core::ipc::RejectReason::AccountMismatch { .. }
     ));
 }
+
+// ---- K4-D5 前置(L12):增量有界解码 ----
+
+#[test]
+fn l12_single_byte_feeding_decodes_all_frames() {
+    let mut d = caligo_core::ipc::FrameDecoder::new();
+    let mut out = Vec::new();
+    let payload = b"hello incremental".to_vec();
+    let frame = caligo_core::ipc::encode_frame(&payload).unwrap();
+    for b in &frame {
+        d.push(std::slice::from_ref(b), &mut out).unwrap();
+    }
+    d.push(&[], &mut out).unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0], payload);
+    assert_eq!(d.pending_bytes(), 0);
+}
+
+#[test]
+fn l12_decoder_buffer_stays_bounded_under_large_chunks() {
+    // 100 个合法帧一次喂入:内部组装缓冲必须远小于输入总量。
+    let mut stream = Vec::new();
+    for i in 0u32..100 {
+        stream.extend_from_slice(&caligo_core::ipc::encode_frame(format!("f{i}").as_bytes()).unwrap());
+    }
+    let mut d = caligo_core::ipc::FrameDecoder::new();
+    let mut out = Vec::new();
+    d.push(&stream, &mut out).unwrap();
+    assert_eq!(out.len(), 100);
+    assert!(d.pending_bytes() < 8 + caligo_core::ipc::MAX_FRAME_SIZE);
+    assert!(d.pending_bytes() == 0);
+}
+
+#[test]
+fn l12_oversize_declared_length_rejected_without_buffering_content() {
+    let mut d = caligo_core::ipc::FrameDecoder::new();
+    let mut out = Vec::new();
+    // 合法头声明超限长度(不发送内容)。
+    let mut head = Vec::new();
+    head.extend_from_slice(&caligo_core::ipc::FRAME_MAGIC.to_le_bytes());
+    head.extend_from_slice(&((caligo_core::ipc::MAX_FRAME_SIZE + 1) as u32).to_le_bytes());
+    assert!(matches!(
+        d.push(&head, &mut out),
+        Err(caligo_core::ipc::FrameError::FrameTooLarge(_))
+    ));
+    assert!(out.is_empty());
+}

@@ -53,8 +53,13 @@ pub fn encode_frame(payload: &[u8]) -> Result<Vec<u8>, FrameError> {
 }
 
 /// 流式帧解码器:容忍半包,产出完整 payload。
+///
+/// K4-D5 前置修复(计划 §10 ipc.rs 行):解码器**不把任意大小的输入整块
+/// 复制进缓存** —— 内部缓存严格有界(`8 + MAX_FRAME_SIZE` 字节),超出
+/// 部分直接从输入切片上取用;超长帧只读头即拒绝,不缓冲其内容。
 #[derive(Debug, Default)]
 pub struct FrameDecoder {
+    /// 当前帧的组装缓冲(header + 已收到的 payload 前缀);长度恒 ≤ 8 + MAX。
     buf: Vec<u8>,
 }
 
@@ -63,33 +68,78 @@ impl FrameDecoder {
         Self::default()
     }
 
+    /// 当前缓存字节数(测试/观测用;恒 ≤ 8 + [`MAX_FRAME_SIZE`])。
+    pub fn pending_bytes(&self) -> usize {
+        self.buf.len()
+    }
+
     /// 送入一段字节;完整帧的 payload 追加到 `out`。
     ///
     /// 返回 `Err` 时解码器状态不可信,调用方应丢弃重建(流已错位)。
     pub fn push(&mut self, chunk: &[u8], out: &mut Vec<Vec<u8>>) -> Result<(), FrameError> {
-        self.buf.extend_from_slice(chunk);
-        loop {
+        let mut ci = 0usize;
+        // 1) 补齐 header(若上一轮停在半包头)。
+        if self.buf.len() < 8 {
+            let take = (8 - self.buf.len()).min(chunk.len() - ci);
+            self.buf.extend_from_slice(&chunk[ci..ci + take]);
+            ci += take;
             if self.buf.len() < 8 {
                 return Ok(());
             }
-            let magic = u32::from_le_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]);
+        }
+        loop {
+            // 不变量:buf 非空时,buf[0..8] 是完整 header。
+            let (magic, len) = parse_header(&self.buf);
             if magic != FRAME_MAGIC {
                 return Err(FrameError::MagicMismatch(magic));
             }
-            let len =
-                u32::from_le_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]]) as usize;
             if len > MAX_FRAME_SIZE {
                 return Err(FrameError::FrameTooLarge(len));
             }
-            if self.buf.len() < 8 + len {
-                return Ok(()); // 半包:等待更多字节
+            let want_total = 8 + len;
+            let mut payload_whole_in_chunk = false;
+            if self.buf.len() < want_total {
+                let need = want_total - self.buf.len();
+                let avail = chunk.len() - ci;
+                if self.buf.len() == 8 && avail >= need {
+                    // 快路径:payload 完全位于 chunk,不经过组装缓冲。
+                    payload_whole_in_chunk = true;
+                } else {
+                    let take = need.min(avail);
+                    if take == 0 {
+                        return Ok(());
+                    }
+                    self.buf.extend_from_slice(&chunk[ci..ci + take]);
+                    ci += take;
+                    if self.buf.len() < want_total {
+                        return Ok(());
+                    }
+                }
             }
-            let mut rest = self.buf.split_off(8 + len);
-            let frame_payload = self.buf.split_off(8);
-            out.push(frame_payload);
-            self.buf = std::mem::take(&mut rest);
+            if payload_whole_in_chunk {
+                out.push(chunk[ci..ci + len].to_vec());
+                ci += len;
+            } else {
+                let payload = self.buf.split_off(8);
+                out.push(payload);
+            }
+            // 继续下一帧:重建组装缓冲,先补 header(不足 8 字节则等待)。
+            self.buf.clear();
+            let take = 8.min(chunk.len() - ci);
+            self.buf.extend_from_slice(&chunk[ci..ci + take]);
+            ci += take;
+            if self.buf.len() < 8 {
+                return Ok(());
+            }
         }
     }
+}
+
+fn parse_header(buf: &[u8]) -> (u32, usize) {
+    (
+        u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]),
+        u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize,
+    )
 }
 
 /// bridge → core 握手请求(计划 §6.2 握手字段的最小实现)。
