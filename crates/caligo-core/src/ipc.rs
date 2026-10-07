@@ -242,3 +242,222 @@ pub fn validate_hello(
         reject_reason: None,
     })
 }
+
+// ---------------------------------------------------------------------------
+// K4-D5:IPC v2 语义层(计划 §6.4)。保留 CLG1 framing 与 1 MiB 上限;
+// 语义协议升 v2,v1 不悄悄兼容。帧内 payload = JSON(`Envelope`)。
+// 消息类型固定集;未知动作一律 Reject;不开放 arbitrary JS 执行。
+// ---------------------------------------------------------------------------
+
+/// IPC 语义协议 v2。v1(`PROTOCOL_VERSION`)仅供 K1 probe 握手回归测试。
+pub const PROTOCOL_VERSION_V2: u32 = 2;
+
+/// 客户端连接角色。core 同一管道体系服务两类角色,各自独立管道实例。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    /// bridge 宿主侧(接收 Dispatch、上报 Event/结果)。
+    Bridge,
+    /// 测试客户端/控制面(提交 SendText、查询、Drain、Stop)。
+    Control,
+}
+
+/// bridge → core 的 v2 消息。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", content = "d", rename_all = "snake_case")]
+pub enum BridgeMsg {
+    Hello {
+        protocol_version: u32,
+        bridge_build: String,
+        /// 认证凭据(hex;OS 随机,经 bootstrap 私有通道交付)。
+        auth_token: String,
+        role: Role,
+        /// 期望接入的会话代次(bridge 侧已核实的会话身份)。
+        session_generation: u64,
+        account: String,
+        /// 模块基线标识(T01 的逻辑层,与 v1 Hello 一致)。
+        module_baseline: String,
+    },
+    /// 接收事件上报(core 持久化成功 = EventAck 依据)。
+    Event {
+        event: EventPayload,
+    },
+    /// bridge 确认已进入 native 调用。
+    NativeStarted {
+        request_id: String,
+    },
+    /// 发送结果(receipt 契约三分类,与 runtime::NativeResult 对应)。
+    SendResult {
+        request_id: String,
+        outcome: OutcomePayload,
+    },
+    Health {
+        ingress_pending: usize,
+        native_ops_total: u64,
+    },
+    Stop {},
+}
+
+/// core → bridge 的 v2 消息。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", content = "d", rename_all = "snake_case")]
+pub enum CoreToBridgeMsg {
+    HelloAck {
+        protocol_version: u32,
+        core_build: String,
+        connection_epoch: u64,
+        accepted: bool,
+        reject_reason: Option<String>,
+    },
+    /// 派发参数化发送(带持久 request_id)。
+    Dispatch {
+        request_id: String,
+        target: serde_json::Value,
+        text: String,
+    },
+    HealthAck {},
+    /// 事件受理回执(core 已持久化;suppressed=true 表示重复已抑制,
+    /// bridge 据此前移缓存 —— 计划 §6.5:ACK 只在持久化后前移)。
+    EventAck {
+        event_seq: u64,
+        suppressed: bool,
+    },
+    Stopped {},
+    Reject {
+        reason: String,
+    },
+}
+
+/// control → core 的 v2 消息。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", content = "d", rename_all = "snake_case")]
+pub enum ControlMsg {
+    Hello {
+        protocol_version: u32,
+        client_build: String,
+        auth_token: String,
+        role: Role,
+    },
+    SendText {
+        request_id: String,
+        target: serde_json::Value,
+        text: String,
+        deadline_ms: u64,
+    },
+    QueryRequest {
+        request_id: String,
+    },
+    CancelQueued {
+        request_id: String,
+    },
+    /// 拉取已持久化事件(交付游标前移)。
+    DrainEvents {
+        max: usize,
+    },
+    Health {},
+    Stop {},
+}
+
+/// core → control 的 v2 消息。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", content = "d", rename_all = "snake_case")]
+pub enum CoreToControlMsg {
+    HelloAck {
+        protocol_version: u32,
+        core_build: String,
+        connection_epoch: u64,
+        accepted: bool,
+        reject_reason: Option<String>,
+    },
+    /// 受理确认(先持久后受理;拒绝时 reason 属"未受理"而非发送失败)。
+    SendAccepted {
+        request_id: String,
+        state: String,
+    },
+    QueryResult {
+        request_id: String,
+        state: Option<String>,
+        native_id: Option<String>,
+    },
+    CancelResult {
+        request_id: String,
+        /// cancelled_unsent / too_late / not_found。
+        verdict: String,
+    },
+    EventsBatch {
+        events: Vec<EventPayload>,
+    },
+    HealthAck {},
+    Stopped {},
+    Reject {
+        reason: String,
+    },
+}
+
+/// 事件载荷(与 journal::EventRecord 字段对齐;session 为 SessionKey DTO)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EventPayload {
+    pub event_seq: u64,
+    pub session_generation: u64,
+    pub session: serde_json::Value,
+    pub direction: String,
+    pub sender: String,
+    pub native_id: String,
+    pub text: String,
+    pub platform_time: Option<u64>,
+    pub observed_at_unix_ms: u64,
+    pub source: String,
+}
+
+/// 发送结果三分类(计划 §6.6)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", content = "d", rename_all = "snake_case")]
+pub enum OutcomePayload {
+    Success {
+        native_id: Option<String>,
+    },
+    Failure {
+        reason: String,
+    },
+    Unknown,
+}
+
+/// v2 握手校验(bridge/control 共用)。校验顺序:协议版本 → 认证 → 角色。
+/// 任一失败即拒绝,不做降级协商。
+pub fn validate_hello_v2(
+    protocol_version: u32,
+    role: Role,
+    expect_role: Role,
+    core_build: &str,
+) -> Result<(u32, String), RejectReason> {
+    if protocol_version != PROTOCOL_VERSION_V2 {
+        return Err(RejectReason::ProtocolVersionMismatch {
+            got: protocol_version,
+            want: PROTOCOL_VERSION_V2,
+        });
+    }
+    // 认证(token)由调用方以 validate_auth 完成并先行拒绝;
+    // 本函数只做版本与角色门控。
+    if role != expect_role {
+        return Err(RejectReason::AccountMismatch {
+            got: format!("role:{role:?}"),
+            want: format!("role:{expect_role:?}"),
+        });
+    }
+    Ok((PROTOCOL_VERSION_V2, core_build.to_string()))
+}
+
+/// 认证比较(非常量时间即可接受的程度:同用户本机攻击面不在本阶段威胁
+/// 边界内;此处仍用逐字节比较避免短路差异,详见 §6.4)。
+pub fn validate_auth(presented: &str, expected_hex: &str) -> bool {
+    let a = presented.as_bytes();
+    let b = expected_hex.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
