@@ -47,9 +47,11 @@ pub mod asyncrun;
 pub mod envrun;
 pub mod exec;
 pub mod gate;
+pub mod host_adapter;
 pub mod intr;
 pub mod obs;
 pub mod register;
+pub mod resident;
 
 /// 注册入口结果码。
 #[no_mangle]
