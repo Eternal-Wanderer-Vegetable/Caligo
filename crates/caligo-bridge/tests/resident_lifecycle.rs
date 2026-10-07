@@ -255,7 +255,19 @@ fn l16_close_protocol_and_late_callbacks() {
     // 迟到回调(已关闭):拒绝且零 native。
     let before = ctl.native_calls();
     assert!(r
-        .deliver_callback(tok, OwnedEvent { native_id: "late".into(), text_len: 1 })
+        .deliver_callback(
+            tok,
+            OwnedEvent {
+                source: caligo_bridge::resident::EventSourceKind::Recv,
+                chat_type: 1,
+                peer_uid: String::new(),
+                peer_uin: String::new(),
+                sender_uin: String::new(),
+                native_id: "late".into(),
+                text: String::new(),
+                msg_time: None,
+            },
+        )
         .is_err());
     assert_eq!(ctl.native_calls(), before, "迟回调零宿主触碰");
 

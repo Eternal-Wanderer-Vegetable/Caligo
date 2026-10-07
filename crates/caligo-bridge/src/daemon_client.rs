@@ -445,7 +445,8 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
         // —— 连接 ——
         let conn = match PipeConn::connect(&cfg.pipe_name) {
             Ok(conn) => conn,
-            Err(_) => {
+            Err(e) => {
+                eprintln!("[dcl] connect failed: {}", e.describe());
                 c.connect_failures += 1;
                 if c.connects > 0 {
                     c.reconnects += 1;
@@ -638,19 +639,29 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
             }
         }
         for ev in resident.take_events() {
+            // 方向判据:senderUin == 本账号 → SelfSent(不伪装 incoming);
+            // 会话种类:chatType 1=private 2=group(opaque 透传;peer=peerUid)。
+            let is_self = !cfg.account.is_empty() && ev.sender_uin == cfg.account;
             let payload = EventPayload {
                 event_seq: 0, // core 持久化时分配;本地 seq 仅用于 ACK 关联
                 session_generation: cfg.session_generation,
-                session: serde_json::json!({}),
-                direction: "incoming".into(),
-                sender: String::new(),
+                session: serde_json::json!({
+                    "account": cfg.account,
+                    "kind": if ev.chat_type == 2 { "group" } else { "private" },
+                    "peer": ev.peer_uid,
+                }),
+                direction: if is_self { "self_sent" } else { "incoming" }.into(),
+                sender: ev.sender_uin.clone(),
                 native_id: ev.native_id.clone(),
-                text: String::new(),
-                platform_time: None,
+                text: ev.text.clone(),
+                platform_time: ev.msg_time,
                 observed_at_unix_ms: 0,
-                source: "recv".into(),
+                source: match ev.source {
+                    crate::resident::EventSourceKind::Recv => "recv",
+                    crate::resident::EventSourceKind::Update => "update",
+                }
+                .into(),
             };
-            let _ = ev.text_len;
             let seq = next_local_seq;
             next_local_seq += 1;
             let bytes = payload.native_id.len() + 128;
@@ -687,6 +698,8 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
                 return SessionEnd::Broken;
             }
             last_heartbeat = Instant::now();
+            // 心跳兼作事件轮询唤醒源(5s 节奏;D8 接收环排空依赖周期性泵)。
+            wake();
         }
         // 4) 阻塞收(tick 周期返回)。
         match recv_json(conn, dec, tick) {

@@ -48,11 +48,28 @@ pub enum OwnedRequest {
     SendText { request_id: String, text_len: usize },
 }
 
-/// owned 事件(宿主 → core 方向)。
+/// 事件来源回调(D8 去重语义依赖:onRecvMsg=接收,onMsgInfoListUpdate=更新)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventSourceKind {
+    Recv,
+    Update,
+}
+
+/// owned 事件(宿主 → core 方向;D8 完整字段,JS 侧已 owned 拷贝)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedEvent {
+    pub source: EventSourceKind,
+    /// 1=私聊 2=群聊(原生 chatType,opaque 透传)。
+    pub chat_type: u32,
+    pub peer_uid: String,
+    pub peer_uin: String,
+    pub sender_uin: String,
+    /// 原生消息 ID(opaque 字符串)。
     pub native_id: String,
-    pub text_len: usize,
+    /// 完整正文(JS 侧上限 8000 字节,不裁剪语义由 JS 环承担)。
+    pub text: String,
+    /// 平台时间(原生 msgTime;取不到 None)。
+    pub msg_time: Option<u64>,
 }
 
 /// 生命周期 token:回调/迟交结果必须携带;关闭后失效。
@@ -122,6 +139,7 @@ pub struct ResidentCounters {
     pub cancelled_unsent: u64,
     pub marked_unknown: u64,
     pub quarantine_events: u64,
+    pub events_gap_dropped: u64,
 }
 
 struct ReqRecord {
@@ -343,6 +361,21 @@ impl<A: HostAdapter> Resident<A> {
     pub fn take_results(&self) -> Vec<SendOutcome> {
         let mut c = self.core.lock().unwrap();
         c.results_out.drain(..).collect()
+    }
+
+    /// 宿主(pump/D8 排空)注入 owned 事件;有界窗口满 → 计数丢弃(不静默)。
+    pub fn ingest_event(&self, ev: OwnedEvent) -> bool {
+        let mut c = self.core.lock().unwrap();
+        if !matches!(c.state, ResidentState::Ready | ResidentState::Stopping) {
+            return false;
+        }
+        if c.events.len() >= c.limits.events_max {
+            c.counters.events_gap_dropped += 1;
+            return false;
+        }
+        let tok = c.token;
+        c.events.push_back((ev, tok));
+        true
     }
 
     pub fn counters(&self) -> ResidentCounters {

@@ -220,6 +220,11 @@ pub fn register_report_path(p: *const u16) {
     REPORT_PATH_PTR.store(p as usize, Ordering::Release);
 }
 
+/// daemon/D8 侧:isolate 地址(首入时解析;ready 前 0)。
+pub fn isolate_addr() -> *mut core::ffi::c_void {
+    ENTRY.isolate.load(Ordering::Acquire) as *mut core::ffi::c_void
+}
+
 /// daemon 导出侧:读取 worker 停止标志(shutdown 先停 worker)。
 pub fn peek_daemon_startup() -> Option<DaemonStartup> {
     DAEMON_STOP.get().map(|f| DaemonStartup { stop: f.clone() })
@@ -770,10 +775,33 @@ impl crate::host_adapter::HostAdapter for QqOwnerAdapter {
                 }
                 Ok(HostOpResult::ProbeDone)
             }
-            // D7 无消息监听(D8 接线):显式延迟,不冒充已注册。
-            HostOp::ListenerAdd => Ok(HostOpResult::ListenerDeferred),
+            // D8:真实监听器接线(K3 现场验证脚本,经 V8 阶梯执行;
+            // 零 current / 轮转点条件不满足时显式失败,由调用方重试)。
+            HostOp::ListenerAdd => match crate::qq_v8::start_listener() {
+                Ok(s) if s.starts_with("ARMED") => {
+                    let token = s
+                        .split("lidRet=")
+                        .nth(1)
+                        .and_then(|t| t.trim().parse::<u64>().ok())
+                        .unwrap_or(0);
+                    Ok(HostOpResult::ListenerAdded { token })
+                }
+                Ok(s) if s.starts_with("ALREADY") => {
+                    Ok(HostOpResult::ListenerAdded { token: 0 })
+                }
+                Ok(_s) => Err(HostError::Native { code: 1 }), // "ERR:.." / NOT_ARMED
+                Err(crate::qq_v8::V8Error::NoCurrentContext) => Err(HostError::NoCurrentContext),
+                Err(_) => Err(HostError::EnvInvalid),
+            },
+            HostOp::ListenerRemove { .. } => match crate::qq_v8::stop_listener() {
+                Ok(s) if s.starts_with("STOPPED") || s.starts_with("NOT_ARMED") => {
+                    Ok(HostOpResult::ListenerRemoved)
+                }
+                Ok(_) => Err(HostError::Native { code: 2 }),
+                Err(crate::qq_v8::V8Error::NoCurrentContext) => Err(HostError::NoCurrentContext),
+                Err(_) => Err(HostError::EnvInvalid),
+            },
             // D9 未接线:显式拒绝。
-            HostOp::ListenerRemove { .. } => Err(HostError::NoProvenRoute),
             HostOp::SendText { .. } => Err(HostError::NoProvenRoute),
         }
     }

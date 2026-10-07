@@ -266,6 +266,7 @@ pub fn cmd_qq_entry(args: &[String]) -> ExitCode {
             "account": account,
             "module_baseline": "qq-9.9.33-52230",
             "report_path": absolute_report_path(&report).to_string_lossy(),
+            "qqnt_base": format!("{qqnt_base:#x}"),
         });
         let code = unsafe { remote_daemon_start(pid, remote_base, &cfg_json.to_string()) };
         match code {

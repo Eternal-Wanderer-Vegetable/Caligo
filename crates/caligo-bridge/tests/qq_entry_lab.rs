@@ -292,10 +292,12 @@ fn stale_env_fails_freshness_gate_before_interrupt() {
 }
 
 #[test]
-fn adapter_rejects_unproven_ops_and_resident_deferred_mode() {
+fn adapter_listener_ops_via_v8_ladder_and_resident_full_mode() {
     let _g = TEST_LOCK.lock().unwrap();
     lab_reset();
+    install_fake_v8();
     let (_qq, qqnt_base, env, _loop) = FakeQq::new();
+    fake_v8::CURRENT.store(FAKE_EXPECTED_ISOLATE.load(Ordering::Acquire), Ordering::Release);
     let cfg = EntryConfig { qqnt_base, env, report_path: report_path("adapter") };
     let handle = bootstrap(&cfg, &fake_symbols()).unwrap();
     let mut adapter = QqOwnerAdapter::new(handle);
@@ -306,23 +308,209 @@ fn adapter_rejects_unproven_ops_and_resident_deferred_mode() {
     );
     // Probe:通过(新鲜度 + current)。
     assert!(adapter.native_op(HostOp::Probe).is_ok());
-    // D8/D9 面:显式拒绝 / 延迟,不冒充能力。
+    // D8 监听器:经 V8 阶梯执行注册脚本 → ARMED → token 17。
     assert_eq!(
         adapter.native_op(HostOp::ListenerAdd).unwrap(),
-        HostOpResult::ListenerDeferred
+        HostOpResult::ListenerAdded { token: 17 }
     );
-    assert!(matches!(
-        adapter.native_op(HostOp::ListenerRemove { token: 1 }),
-        Err(HostError::NoProvenRoute)
-    ));
+    // 对称移除:STOPPED 确认。
+    assert_eq!(
+        adapter.native_op(HostOp::ListenerRemove { token: 17 }).unwrap(),
+        HostOpResult::ListenerRemoved
+    );
+    // D9 发送:显式拒绝(未接线,不冒充)。
     assert!(matches!(
         adapter.native_op(HostOp::SendText { text_len: 1 }),
         Err(HostError::NoProvenRoute)
     ));
 
-    // resident 以延迟监听模式 bootstrap/close(关闭不做对称移除)。
+    // resident 全模式 bootstrap/close(注册 → 对称移除,资源回基线)。
     let resident = Resident::new(adapter, ResidentLimits::default());
     resident.bootstrap().unwrap();
     let report = resident.close().unwrap();
-    assert_eq!(report.listener_removed, None, "延迟模式:无监听器可移除");
+    assert_eq!(report.listener_removed, Some(true), "对称移除并确认");
+    let c = resident.counters();
+    assert_eq!(c.listener_adds, 1);
+    assert_eq!(c.listener_removes, 1);
+}
+
+// ---- 假 V8 ABI 机器:阶梯全链可测(sret/句柄/Utf8 契约) ----
+
+mod fake_v8 {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    static LOCALS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    pub static CURRENT: AtomicUsize = AtomicUsize::new(0x1DEA_0001);
+    pub static CTX: AtomicUsize = AtomicUsize::new(0xCAFE_0002);
+    pub static SCOPE_CALLS: AtomicU64 = AtomicU64::new(0);
+    /// Run 的应答队列(测试按需填充;弹出顺序消费)。
+    pub static RESPONSES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    /// 最近一次编译的源(断言用)。
+    pub static LAST_SRC: Mutex<String> = Mutex::new(String::new());
+
+    fn push_local(s: String) -> usize {
+        let mut g = LOCALS.lock().unwrap();
+        g.push(s);
+        g.len()
+    }
+    fn get_local(h: usize) -> String {
+        LOCALS.lock().unwrap()[h - 1].clone()
+    }
+
+    pub unsafe extern "C" fn scope_ctor(this: *mut core::ffi::c_void, _i: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
+        SCOPE_CALLS.fetch_add(1, Ordering::Relaxed);
+        this
+    }
+    pub unsafe extern "C" fn scope_dtor(_this: *mut core::ffi::c_void) {}
+    pub unsafe extern "C" fn get_current() -> *mut core::ffi::c_void {
+        CURRENT.load(Ordering::Acquire) as *mut core::ffi::c_void
+    }
+    pub unsafe extern "C" fn entered(i: *mut core::ffi::c_void, sret: *mut usize) {
+        *sret = CTX.load(Ordering::Acquire);
+        let _ = i;
+    }
+    pub unsafe extern "C" fn incumbent(i: *mut core::ffi::c_void, sret: *mut usize) {
+        *sret = 0;
+        let _ = i;
+    }
+    pub unsafe extern "C" fn new_from_utf8(sret: *mut usize, _i: *mut core::ffi::c_void, data: *const u8, _ty: i32, len: i32) {
+        // SAFETY: 调用方保证 data/len 有效。
+        let bytes = unsafe { core::slice::from_raw_parts(data, len as usize) };
+        let h = push_local(String::from_utf8_lossy(bytes).into_owned());
+        *sret = h as usize;
+    }
+    pub unsafe extern "C" fn compile(sret: *mut usize, _ctx: usize, src: usize, _origin: *mut core::ffi::c_void) {
+        let s = get_local(src);
+        *LAST_SRC.lock().unwrap() = s.clone();
+        let h = push_local(format!("SCRIPT::{}", s));
+        *sret = h as usize;
+    }
+    pub unsafe extern "C" fn run(this: usize, sret: *mut usize, _ctx: usize, _data: usize) {
+        let script = get_local(this);
+        let src = script.strip_prefix("SCRIPT::").unwrap_or(&script).to_string();
+        let mut q = RESPONSES.lock().unwrap();
+        let result = if !q.is_empty() {
+            q.remove(0)
+        } else if src.contains("addKernelMsgListener") {
+            "ARMED sid=nt_3 lidRet=17".into()
+        } else if src.contains("removeKernelMsgListener") {
+            "STOPPED sid=nt_3 remove=0".into()
+        } else {
+            "NOT_ARMED".into()
+        };
+        drop(q);
+        let h = push_local(result);
+        *sret = h as usize;
+    }
+    // Utf8Value:this 前 8 字节 = 结果句柄。
+    pub unsafe extern "C" fn utf8_ctor(this: *mut core::ffi::c_void, _i: *mut core::ffi::c_void, value: usize) -> *mut core::ffi::c_void {
+        (this as *mut usize).write(value);
+        this
+    }
+    pub unsafe extern "C" fn utf8_dtor(_this: *mut core::ffi::c_void) {}
+    pub unsafe extern "C" fn utf8_deref(this: *mut core::ffi::c_void) -> *const u8 {
+        let h = (this as *const usize).read();
+        let s = get_local(h);
+        // SAFETY: CString 泄漏为 LAB 常驻缓冲(测试进程生存期)。
+        std::ffi::CString::new(s).unwrap().into_raw().cast::<u8>()
+    }
+}
+
+fn install_fake_v8() {
+    type FScopeCtor = unsafe extern "C" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+    type FScopeDtor = unsafe extern "C" fn(*mut core::ffi::c_void);
+    type FGetCurrent = unsafe extern "C" fn() -> *mut core::ffi::c_void;
+    type FCtx = unsafe extern "C" fn(*mut core::ffi::c_void, *mut usize);
+    type FNewUtf8 = unsafe extern "C" fn(*mut usize, *mut core::ffi::c_void, *const u8, i32, i32);
+    type FCompile = unsafe extern "C" fn(*mut usize, usize, usize, *mut core::ffi::c_void);
+    type FRun = unsafe extern "C" fn(usize, *mut usize, usize, usize);
+    type FUtf8Ctor = unsafe extern "C" fn(*mut core::ffi::c_void, *mut core::ffi::c_void, usize) -> *mut core::ffi::c_void;
+    type FUtf8Dtor = unsafe extern "C" fn(*mut core::ffi::c_void);
+    type FUtf8Deref = unsafe extern "C" fn(*mut core::ffi::c_void) -> *const u8;
+    let p1: FScopeCtor = fake_v8::scope_ctor;
+    let p2: FScopeDtor = fake_v8::scope_dtor;
+    let p3: FGetCurrent = fake_v8::get_current;
+    let p4: FCtx = fake_v8::entered;
+    let p5: FCtx = fake_v8::incumbent;
+    let p6: FNewUtf8 = fake_v8::new_from_utf8;
+    let p7: FCompile = fake_v8::compile;
+    let p8: FRun = fake_v8::run;
+    let p9: FUtf8Ctor = fake_v8::utf8_ctor;
+    let p10: FUtf8Dtor = fake_v8::utf8_dtor;
+    let p11: FUtf8Deref = fake_v8::utf8_deref;
+    caligo_bridge::qq_v8::store_symbols_raw(caligo_bridge::qq_v8::V8Symbols::from_raw([
+        p1 as usize,
+        p2 as usize,
+        p3 as usize,
+        p4 as usize,
+        p5 as usize,
+        p6 as usize,
+        p7 as usize,
+        p8 as usize,
+        p9 as usize,
+        p10 as usize,
+        p11 as usize,
+    ]));
+}
+
+#[test]
+fn d8_v8_ladder_arm_and_stop_flow() {
+    let _g = TEST_LOCK.lock().unwrap();
+    caligo_bridge::qq_entry::test_reset_state();
+    install_fake_v8();
+    let (_qq, qqnt_base, env, _loop) = FakeQq::new();
+    fake_v8::CURRENT.store(
+        FAKE_EXPECTED_ISOLATE.load(Ordering::Acquire),
+        Ordering::Release,
+    );
+
+    let cfg = EntryConfig { qqnt_base, env, report_path: report_path("d8arm") };
+    let handle = bootstrap(&cfg, &fake_symbols()).unwrap();
+    let mut adapter = caligo_bridge::qq_entry::QqOwnerAdapter::new(handle);
+
+    // ListenerAdd → 阶梯执行 START_JS → ARMED → token 17。
+    let r = adapter.native_op(HostOp::ListenerAdd).unwrap();
+    assert_eq!(
+        r,
+        caligo_bridge::host_adapter::HostOpResult::ListenerAdded { token: 17 }
+    );
+    assert!(
+        fake_v8::LAST_SRC.lock().unwrap().contains("addKernelMsgListener"),
+        "阶梯执行的是监听器注册脚本"
+    );
+
+    // 轮询:NOT_ARMED 路径(无应答排队,run 走默认分支 → POLL 含 NOT_ARMED 字样)。
+    let json = caligo_bridge::qq_v8::poll_listener_json().unwrap();
+    assert!(json.contains("NOT_ARMED") || json.contains("items"));
+
+    // 对称移除。
+    let r = adapter.native_op(HostOp::ListenerRemove { token: 17 }).unwrap();
+    assert_eq!(r, caligo_bridge::host_adapter::HostOpResult::ListenerRemoved);
+}
+
+#[test]
+fn d8_zero_current_refuses_v8_ladder_before_scope() {
+    let _g = TEST_LOCK.lock().unwrap();
+    caligo_bridge::qq_entry::test_reset_state();
+    install_fake_v8();
+    let (_qq, qqnt_base, env, _loop) = FakeQq::new();
+    fake_v8::CURRENT.store(
+        FAKE_EXPECTED_ISOLATE.load(Ordering::Acquire),
+        Ordering::Release,
+    );
+    let cfg = EntryConfig { qqnt_base, env, report_path: report_path("d8zero") };
+    let _handle = bootstrap(&cfg, &fake_symbols()).unwrap();
+
+    // 模拟安静轮转点:current = 0。
+    let scope_before = fake_v8::SCOPE_CALLS.load(Ordering::Relaxed);
+    fake_v8::CURRENT.store(0, Ordering::Release);
+    let err = caligo_bridge::qq_v8::poll_listener_json().unwrap_err();
+    assert_eq!(err, caligo_bridge::qq_v8::V8Error::NoCurrentContext);
+    assert_eq!(
+        fake_v8::SCOPE_CALLS.load(Ordering::Relaxed),
+        scope_before,
+        "零 current 下不得进入 HandleScope(先于一切 V8 调用)"
+    );
 }

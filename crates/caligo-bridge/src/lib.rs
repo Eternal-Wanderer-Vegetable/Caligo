@@ -54,6 +54,8 @@ pub mod intr;
 pub mod obs;
 #[cfg(feature = "research")]
 pub mod qq_entry;
+#[cfg(feature = "research")]
+pub mod qq_v8;
 pub mod register;
 pub mod resident;
 
@@ -596,6 +598,19 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
     };
     let session_generation = v.get("session_generation").and_then(|x| x.as_u64()).unwrap_or(0);
 
+    // V8 符号解析(D8 监听器/轮询;每代次一次)。
+    let qqnt_base = v
+        .get("qqnt_base")
+        .and_then(|x| x.as_str())
+        .and_then(|h| usize::from_str_radix(h.strip_prefix("0x").unwrap_or(h), 16).ok())
+        .unwrap_or(0);
+    if qqnt_base != 0 {
+        let rp = get("report_path").unwrap_or_default();
+        if !crate::qq_v8::store_symbols(qqnt_base, &rp) {
+            eprintln!("[qq-daemon] V8 符号解析失败(监听器不可用)");
+        }
+    }
+
     // 报告路径登记(shutdown/daemon 阶段日志用;UTF-8 → 宽字符)。
     if let Some(rp) = get("report_path") {
         use std::os::windows::ffi::OsStrExt;
@@ -645,6 +660,55 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
             let _ = r.drain();
             for outcome in r.take_results() {
                 let _ = tx.send(outcome);
+            }
+            // D8 轮询:排空 JS 接收环 → owned 事件注入(每泵一轮;
+            // NOT_ARMED/未就绪静默跳过,Err 计数不吞)。
+            if OWNER_INIT.load(Ordering::Relaxed) {
+                match crate::qq_v8::poll_listener_json() {
+                    Ok(json) if !json.starts_with("NOT_ARMED") => {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+                            if let Some(items) = v.get("items").and_then(|x| x.as_array()) {
+                                for it in items {
+                                    let g = |k: &str| {
+                                        it.get(k)
+                                            .map(|x| {
+                                                if x.is_string() {
+                                                    x.as_str().unwrap_or("").to_string()
+                                                } else {
+                                                    x.to_string()
+                                                }
+                                            })
+                                            .unwrap_or_default()
+                                    };
+                                    let ev = resident::OwnedEvent {
+                                        source: if g("src") == "update" {
+                                            resident::EventSourceKind::Update
+                                        } else {
+                                            resident::EventSourceKind::Recv
+                                        },
+                                        chat_type: it
+                                            .get("chatType")
+                                            .and_then(|x| x.as_u64())
+                                            .unwrap_or(0) as u32,
+                                        peer_uid: g("peerUid"),
+                                        peer_uin: g("peerUin"),
+                                        sender_uin: g("senderUin"),
+                                        native_id: g("msgId"),
+                                        text: g("text"),
+                                        msg_time: it
+                                            .get("msgTime")
+                                            .and_then(|x| x.as_u64()),
+                                    };
+                                    r.ingest_event(ev);
+                                }
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        let _ = e; // 轮转点条件不满足:下泵重试(计数经 qq-status 观察)
+                    }
+                }
             }
             r.take_events().len()
         }));
