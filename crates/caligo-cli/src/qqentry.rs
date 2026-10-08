@@ -228,6 +228,8 @@ pub fn cmd_qq_entry(args: &[String]) -> ExitCode {
             None,
             None,
             None,
+            None,
+            10_000,
         )
     } {
         Ok(o) => o.remote_base,
@@ -414,6 +416,8 @@ pub fn cmd_qq_status(args: &[String]) -> ExitCode {
             None,
             None,
             None,
+            None,
+            10_000,
         )
     } {
         Ok(o) => o.remote_base,
@@ -674,6 +678,8 @@ pub fn cmd_qq_entry_stop(args: &[String]) -> ExitCode {
             None,
             None,
             None,
+            None,
+            10_000,
         )
     } {
         Ok(o) => o.remote_base,

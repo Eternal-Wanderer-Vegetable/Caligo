@@ -181,3 +181,105 @@ pub unsafe fn g1_probe_run(ctx: *const G1Ctx) -> u32 {
 }
 
 const FIELD_TRANSPORT_OFFSET: usize = 0x60;
+
+// ---- G1 收口:常驻观测(租约 + 探测循环 + 内部停止链) ----
+
+/// 常驻观测上下文(repr(C);loader 传入)。
+#[repr(C)]
+pub struct G1NativeCtx {
+    pub wrapper_base: usize,
+    pub report_path: *const u16,
+    /// 观测窗口毫秒(有界;线程在此窗口内周期探测后自停)。
+    pub observe_ms: u32,
+}
+
+pub const NATIVE_OK: u32 = 0;
+pub const NATIVE_ERR_NULL_PAIR: u32 = 11;
+pub const NATIVE_ERR_ANCHOR: u32 = 12;
+pub const NATIVE_ERR_NO_INNER: u32 = 14;
+
+/// 常驻观测(P6 G1 收口):
+/// 1. getter 一次(租约;不重复获取 —— 引用计数零增长可审计);
+/// 2. 观测窗口内周期 `probe_ready()`(只读 not-ready 语义,**零发送**),
+///    采样 strong 计数(租约稳定性);
+/// 3. 内部停止链:窗口结束 → 停止采样 → 汇总(探测数/首末 strong/transport
+///    在位)→ 正常返回。全程单线程、有界、可从外部 Wait 观测。
+///
+/// # Safety
+///
+/// `ctx` 必须指向本进程内有效的 [`G1NativeCtx`]。
+pub unsafe fn g1_native_run(ctx: *const G1NativeCtx) -> u32 {
+    // SAFETY: ctx 由 loader 写入且位于本进程。
+    let (wrapper_base, report_path, observe_ms) =
+        unsafe { ((*ctx).wrapper_base, (*ctx).report_path, (*ctx).observe_ms) };
+    let observe_ms = observe_ms.min(120_000).max(500); // 有界:0.5s..120s
+
+    // —— 一次获取(租约)——
+    let pre_ctrl = read_u64(wrapper_base + SVC_CTRL_SLOT).unwrap_or(0);
+    let pre_strong = if pre_ctrl != 0 { read_i32(pre_ctrl as usize + 8).unwrap_or(i32::MIN) } else { 0 };
+    let getter: GetterFn = unsafe { core::mem::transmute(wrapper_base + GETTER_RVA) };
+    let mut pair = ServicePair { obj: core::ptr::null_mut(), ctrl: core::ptr::null_mut() };
+    // SAFETY: getter 契约(R2 §4);单例已构造。
+    let ret = unsafe { getter(&mut pair as *mut ServicePair) };
+    if ret as usize != &mut pair as *mut ServicePair as usize || pair.obj.is_null() {
+        stage(report_path, "native_adopt", false, "getter failed");
+        return NATIVE_ERR_NULL_PAIR;
+    }
+    let vptr = read_u64(pair.obj as usize).unwrap_or(0);
+    if (vptr as usize).wrapping_sub(wrapper_base) != ANCHOR_SVC_VTBL_RVA {
+        stage(report_path, "native_adopt", false, &format!("anchor mismatch {vptr:#x}"));
+        return NATIVE_ERR_ANCHOR;
+    }
+    let first_strong = read_i32(pair.ctrl as usize + 8).unwrap_or(i32::MIN);
+    stage(
+        report_path,
+        "native_adopt",
+        true,
+        &format!("obj={} strong_adapted={first_strong} (lease; no repeated gets)", hex(pair.obj as u64)),
+    );
+
+    // —— 观测循环(只读探测 + 计数采样)——
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(observe_ms as u64);
+    let mut probes: u64 = 0;
+    let mut transport_seen = 0u64;
+    let mut inner_seen = 0u64;
+    let mut last_strong = first_strong;
+    let mut min_strong = first_strong;
+    let mut max_strong = first_strong;
+    while std::time::Instant::now() < deadline {
+        // probe_ready 语义:transport 与内联 pair 在位(只读;零发送)。
+        let t = read_u64(pair.obj as usize + FIELD_TRANSPORT_OFFSET).unwrap_or(0);
+        let inner = if t != 0 { read_u64(t as usize + FIELD_TRANSPORT_OFFSET).unwrap_or(0) } else { 0 };
+        if t != 0 {
+            transport_seen += 1;
+        }
+        if inner != 0 {
+            inner_seen += 1;
+        }
+        if let Some(s) = read_i32(pair.ctrl as usize + 8) {
+            last_strong = s;
+            min_strong = min_strong.min(s);
+            max_strong = max_strong.max(s);
+        }
+        probes += 1;
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    // —— 停止链:汇总 + 干净返回 ——
+    let lease_stable = first_strong == read_i32(pair.ctrl as usize + 8).unwrap_or(i32::MIN);
+    stage(
+        report_path,
+        "native_stop",
+        true,
+        &format!(
+            "probes={probes} transport_present={transport_seen} inner_present={inner_seen} strong_first={first_strong} last={last_strong} min={min_strong} max={max_strong} lease_stable={lease_stable} stop=clean"
+        ),
+    );
+    if transport_seen != probes || inner_seen != probes {
+        // 观测窗口内 transport/inner 出现过缺失:如实降级返回(仍不算失败 ——
+        // QQ 自身会话波动由 G2+ 观察;此处只记录)。
+        stage(report_path, "native_stop", false, "transport/inner had gaps in window");
+        return NATIVE_ERR_NO_INNER;
+    }
+    NATIVE_OK
+}

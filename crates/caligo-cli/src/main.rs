@@ -46,6 +46,7 @@ caligo-cli <K1 probe>
                     --report <report.json> --confirm-designated-test-instance
                     [--obs-report <obs.json>] [--env-report <env.jsonl>]
                     [--g1-report <g1.jsonl>]
+                    [--native-run-report <nr.jsonl> --native-run-ms <ms>]
                     [--register-entry] [--wait-ms <ms>]
                     [--intr-report <intr.jsonl> --intr-env <ptr-hex>]
                     [--intr-vftable <va-hex>] [--intr-wait-ms <ms>]
@@ -911,6 +912,8 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut report: Option<PathBuf> = None;
     let mut obs_report: Option<PathBuf> = None;
     let mut g1_report: Option<PathBuf> = None;
+    let mut native_run_report: Option<PathBuf> = None;
+    let mut native_run_ms: u32 = 10_000;
     let mut env_report: Option<PathBuf> = None;
     let mut register_entry = false;
     let mut confirmed = false;
@@ -971,6 +974,20 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => g1_report = Some(PathBuf::from(v)),
                 None => {
                     eprintln!("--g1-report 需要路径参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--native-run-report" => match next(&mut i) {
+                Some(v) => native_run_report = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("--native-run-report 需要路径参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--native-run-ms" => match next(&mut i).and_then(|v| v.parse().ok()) {
+                Some(v) => native_run_ms = v,
+                None => {
+                    eprintln!("--native-run-ms 需要数字参数");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1165,6 +1182,11 @@ fn cmd_inject(args: &[String]) -> ExitCode {
         },
         None => None,
     };
+    // native-run 报告为 append-only jsonl;允许尚不存在(运行时创建)。
+    let native_run_report = native_run_report.map(|p| {
+        std::fs::OpenOptions::new().create(true).append(true).open(&p).ok();
+        p
+    });
     let obs_report = match obs_report {
         Some(p) => {
             let abs = match to_absolute(&p) {
@@ -1394,6 +1416,8 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             async_req.as_ref(),
             exec_req.as_ref(),
             g1_report.as_deref(),
+            native_run_report.as_deref(),
+            native_run_ms,
         )
     };
     match outcome {

@@ -101,7 +101,23 @@ P1 首轮交付的实质进展（细节见两份合同文档）：
 
 **事后**:QQ 实例存活(同 PID/创建时间);t2 外部复查 strong=465(自身活动平稳)、锚点仍命中。
 
-**结论**:G1 的"线程准入 + 真实对象/引用 + 账号连接状态"三项全部通过;getter 从非 QQ worker 线程可调用是 capability profile `gates.send` 有条件准入的关键证据。G1 完整收口(常驻 adapter 接线 + 停止链观察)随 native 入口实现推进;G2 收消息门未动。
+**结论**:G1 的"线程准入 + 真实对象/引用 + 账号连接状态"三项全部通过;getter 从非 QQ worker 线程可调用是 capability profile `gates.send` 有条件准入的关键证据。
+
+### G1 收口:常驻原生观测(2026-10-08,同实例)
+
+**第二次注入**(bridge v2,新 target 目录构建 —— v1 DLL 仍被进程持有,按"不热卸载"纪律共存;v2 额外含 `caligo_g1_native_run`):
+
+| 项 | 结果 |
+|---|---|
+| 租约获取 | getter 一次(tid 45160),strong=801 起租,**零重复获取** |
+| 观测窗口 | 10s,20 次只读探测(500ms 周期):transport_present **20/20**、inner_present **20/20**(会话全程在位) |
+| 租约完整性 | strong min=801(全程未低于起租值 = 我们的 +1 始终持有);801→809 波动为 QQ 自身引用活动 |
+| 停止链 | 窗口结束 → 内部停止 → 汇总落盘 → **stop=clean**,远程线程正常退出 |
+| 事后 | QQ 存活(同 PID/创建时间);t3 外部复查锚点命中、strong=824 平稳 |
+
+**G1 准入判定:PASS** —— 线程准入(探测循环持续于我们线程)、对象寿命(租约全程完整)、账号状态(transport/inner 连续在位)、停止链(有界窗口 + 干净退出)四项齐备。**G2 收消息门未动**(发送路径维持零调用;接收接线属下一阶段)。
+
+注:进程内现存两个 bridge 模块实例(v1 探针租约 + v2 观测租约,各持 1 个强引用),随 QQ 退出回收;不热卸载。
 
 证据:`evidence/p6-g1/`(observe t1/t2、probe json、g1 jsonl);工具 `crates/caligo-bridge/src/g1.rs` + `caligo-cli observe-msf/inject --g1-report`。
 

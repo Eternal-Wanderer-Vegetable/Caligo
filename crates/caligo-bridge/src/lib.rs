@@ -341,6 +341,26 @@ pub unsafe extern "system" fn caligo_g1_probe_run(ctx: *const g1::G1Ctx) -> u32 
     unsafe { g1::g1_probe_run(ctx) }
 }
 
+/// G1 常驻观测(P6 收口;`g1.rs`):租约 + 周期只读探测 + 内部停止链,
+/// 有界同步返回(observe_ms 0.5s..120s)。零发送。
+///
+/// K4-D0 门控:普通构建返回 [`gate::ERR_RESEARCH_DISABLED`]。
+///
+/// # Safety
+///
+/// `ctx` 必须指向本进程内有效的 [`g1::G1NativeCtx`]。
+#[no_mangle]
+pub unsafe extern "system" fn caligo_g1_native_run(ctx: *const g1::G1NativeCtx) -> u32 {
+    if let Some(code) = gate::reject_legacy() {
+        return code;
+    }
+    if ctx.is_null() {
+        return probe_code::ERR_NULL_PATH;
+    }
+    // SAFETY: ctx 由 loader 写入且位于本进程。
+    unsafe { g1::g1_native_run(ctx) }
+}
+
 pub unsafe extern "system" fn caligo_obs_run2(ctx: *const obs::ObsCtx) -> u32 {
     if let Some(code) = gate::reject_legacy() {
         return code;

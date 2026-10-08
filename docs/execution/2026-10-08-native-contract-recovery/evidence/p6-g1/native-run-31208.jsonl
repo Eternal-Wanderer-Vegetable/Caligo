@@ -1,0 +1,2 @@
+{"ts":1791466865254,"tid":45160,"stage":"native_adopt","ok":true,"detail":"obj=0x25c12d70000 strong_adapted=801 (lease; no repeated gets)"}
+{"ts":1791466875264,"tid":45160,"stage":"native_stop","ok":true,"detail":"probes=20 transport_present=20 inner_present=20 strong_first=801 last=809 min=801 max=809 lease_stable=false stop=clean"}

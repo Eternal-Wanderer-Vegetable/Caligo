@@ -259,6 +259,8 @@ pub struct InjectOutcome {
     pub register_exit_code: Option<u32>,
     /// `caligo_g1_probe_run` 的返回码(仅在 g1_report 提供时)。
     pub g1_exit_code: Option<u32>,
+    /// `caligo_g1_native_run` 的返回码(仅在 native_run_report 提供时)。
+    pub native_exit_code: Option<u32>,
     /// `caligo_env_start` 的返回码(仅在 env_report 提供时;链路线程异步执行)。
     pub env_exit_code: Option<u32>,
     /// `caligo_interrupt_run` 的返回码(仅在 intr 提供时;同步执行)。
@@ -342,6 +344,8 @@ pub unsafe fn inject_and_probe(
     async_req: Option<&AsyncRequest>,
     exec_req: Option<&ExecRequest>,
     g1_report: Option<&Path>,
+    native_run_report: Option<&Path>,
+    native_run_ms: u32,
 ) -> Result<InjectOutcome, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
@@ -651,6 +655,72 @@ pub unsafe fn inject_and_probe(
                     return Err(format!("g1 remote thread wait failed: code {wait_g1:#x}"));
                 }
                 g1_exit = Some(code);
+            }
+
+            // 可选:G1 常驻观测(caligo_g1_native_run;P6 收口):租约 + 周期
+            // 只读探测 + 内部停止链,有界同步返回。
+            let mut native_exit: Option<u32> = None;
+            if let Some(nr_path) = native_run_report {
+                let nr_addr =
+                    match read_remote_export(proc_h, remote_base, "caligo_g1_native_run") {
+                        Ok(Some(a)) => a,
+                        Ok(None) => {
+                            return Err("caligo_g1_native_run not found in remote".into())
+                        }
+                        Err(e) => return Err(format!("remote export lookup (native): {e}")),
+                    };
+                let wrapper_base = *module_bases_in(pid)?.get("wrapper.node").unwrap_or(&0);
+                if wrapper_base == 0 {
+                    return Err("wrapper.node base unresolved in target (native)".into());
+                }
+                let nr_wide = to_wide(&nr_path.to_string_lossy());
+                let remote_nr_path = alloc_and_write(&nr_wide, "alloc native report path")?;
+                buf_obs = Some(remote_nr_path);
+                // G1NativeCtx repr(C): {usize, *const u16, u32(+pad)} = 24 字节。
+                let mut ctx_bytes = Vec::with_capacity(24);
+                ctx_bytes.extend_from_slice(&wrapper_base.to_le_bytes());
+                ctx_bytes.extend_from_slice(&(remote_nr_path as usize).to_le_bytes());
+                ctx_bytes.extend_from_slice(&native_run_ms.to_le_bytes());
+                ctx_bytes.extend_from_slice(&[0u8; 4]); // 对齐填充
+                let remote_nr_ctx = alloc_and_write_bytes(&ctx_bytes, "alloc native ctx")?;
+                buf_report = Some(remote_nr_ctx);
+                let nr_fn: unsafe extern "system" fn(*const core::ffi::c_void) -> u32 =
+                    std::mem::transmute::<usize, unsafe extern "system" fn(*const core::ffi::c_void) -> u32>(nr_addr);
+                let start_nr: RemoteThreadFn =
+                    std::mem::transmute::<usize, RemoteThreadFn>(nr_fn as usize);
+                let nr_thread = CreateRemoteThread(
+                    proc_h,
+                    std::ptr::null(),
+                    0,
+                    Some(start_nr),
+                    remote_nr_ctx,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if nr_thread.is_null() {
+                    return Err(format!(
+                        "CreateRemoteThread(native): Win32 error {}",
+                        GetLastError()
+                    ));
+                }
+                // 观测窗口 + 余量。
+                let wait_nr = WaitForSingleObject(
+                    nr_thread,
+                    if native_run_ms > 0 {
+                        native_run_ms.saturating_add(15_000)
+                    } else {
+                        20_000
+                    },
+                );
+                let mut code: u32 = u32::MAX;
+                GetExitCodeThread(nr_thread, &mut code);
+                CloseHandle(nr_thread);
+                if wait_nr != 0 {
+                    return Err(format!(
+                        "native remote thread wait failed (window may still be running): code {wait_nr:#x}"
+                    ));
+                }
+                native_exit = Some(code);
             }
 
             // 可选:只读运行时观测 v2(caligo_obs_run2;基址由本加载器进程解析,
@@ -1128,6 +1198,7 @@ pub unsafe fn inject_and_probe(
                 obs_exit_code: obs_exit,
                 register_exit_code: register_exit,
                 g1_exit_code: g1_exit,
+                native_exit_code: native_exit,
                 env_exit_code: env_exit,
                 intr_exit_code: intr_exit,
                 async_exit_code: async_exit,
