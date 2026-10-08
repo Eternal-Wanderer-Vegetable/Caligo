@@ -20,9 +20,47 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use caligo_model::framing::{encode_frame, FrameDecoder, FrameError};
-use caligo_model::ipc_v2::{BridgeMsg, CoreToBridgeMsg, EventPayload, OutcomePayload, Role, PROTOCOL_VERSION_V2};
+use caligo_model::ipc_v3::{
+    BridgeMsg, CoreToBridgeMsg, EventPayload, OutcomePayload, Role, PROTOCOL_VERSION_V3,
+};
 
 use crate::resident::{Resident, SendOutcome};
+
+/// 宿主实例身份:进程内一次生成,保持到宿主进程退出(C9)。
+fn process_created_utc() -> String {
+    // SAFETY: 只读查询当前进程;缓冲由调用方提供。
+    unsafe {
+        use windows_sys::Win32::Foundation::FILETIME;
+        let mut created = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let mut exited = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let mut kernel = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let mut user = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let handle = windows_sys::Win32::System::Threading::GetCurrentProcess();
+        if windows_sys::Win32::System::Threading::GetProcessTimes(
+            handle, &mut created, &mut exited, &mut kernel, &mut user,
+        ) == 0
+        {
+            return String::new(); // 取不到必须如实为空(不得伪造)
+        }
+        let ticks = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
+        // FILETIME → unix 秒(1601-01-01 起 100ns;偏移 11644473600s)。
+        let unix_secs = (ticks / 10_000_000).wrapping_sub(11_644_473_600);
+        format!("{unix_secs}")
+    }
+}
+
+/// 宿主 nonce:PID 与进程存活期锚定;同进程恒定,跨进程不重复。
+fn host_instance_nonce() -> u64 {
+    static NONCE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *NONCE.get_or_init(|| {
+        let pid = std::process::id() as u64;
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        (pid << 32) | (ms & 0xffff_ffff)
+    })
+}
 
 /// worker 配置。
 #[derive(Debug, Clone)]
@@ -33,6 +71,10 @@ pub struct DaemonClientConfig {
     pub session_generation: u64,
     pub account: String,
     pub module_baseline: String,
+    /// 宿主实例 nonce(C9;默认进程内一次生成)。
+    pub host_nonce: u64,
+    /// 宿主进程创建时间(取不到为空;默认 GetProcessTimes 的 unix 秒)。
+    pub host_process_created_utc: String,
     /// 心跳间隔(计划 §6.4 建议 5s)。
     pub heartbeat_ms: u64,
     /// 重连退避起点(计划 §6.4:1/2/4…上限 30s)。
@@ -48,6 +90,8 @@ impl Default for DaemonClientConfig {
             session_generation: 0,
             account: String::new(),
             module_baseline: String::new(),
+            host_nonce: host_instance_nonce(),
+            host_process_created_utc: process_created_utc(),
             heartbeat_ms: 5_000,
             reconnect_backoff_ms: 1_000,
         }
@@ -394,28 +438,62 @@ fn send_json(conn: &PipeConn, msg: &BridgeMsg) -> Result<(), PipeError> {
     conn.write_all(&frame)
 }
 
-/// 阻塞收一帧;`tick` 置位时以 TimedOut 返回(回收后可继续)。
-fn recv_json(
-    conn: &PipeConn,
-    dec: &mut FrameDecoder,
-    tick: &AtomicBool,
-) -> Result<CoreToBridgeMsg, PipeError> {
-    let mut out: Vec<Vec<u8>> = Vec::new();
-    let mut buf = [0u8; 4096];
-    loop {
-        let n = conn.read_some(&mut buf, tick)?;
-        if n == 0 {
-            return Err(PipeError::BrokenPipe);
-        }
-        match dec.push(&buf[..n], &mut out) {
-            Ok(()) => {}
+/// 每连接长寿命帧管道:增量 decoder + 完整帧 FIFO(C3 修复)。
+///
+/// 合同(与 core 侧 FrameStream 一致):
+/// - 单次读合并的多帧按序全交付一次,不丢不重(T01);
+/// - 半帧跨唤醒/取消保留前缀(T02 客户端侧);
+/// - 新连接新建实例,不复用旧前缀。
+struct FramePipe {
+    dec: FrameDecoder,
+    queue: VecDeque<Vec<u8>>,
+}
+
+impl FramePipe {
+    fn new() -> Self {
+        Self { dec: FrameDecoder::new(), queue: VecDeque::new() }
+    }
+
+    fn feed(&mut self, chunk: &[u8]) -> Result<(), PipeError> {
+        let mut out = Vec::new();
+        match self.dec.push(chunk, &mut out) {
+            Ok(()) => {
+                self.queue.extend(out);
+                Ok(())
+            }
+            // 流错位:断开重连(解码器状态不可信)。
             Err(FrameError::MagicMismatch(_) | FrameError::FrameTooLarge(_)) => {
-                return Err(PipeError::BrokenPipe); // 流错位:断开重连
+                Err(PipeError::BrokenPipe)
             }
         }
-        if let Some(payload) = out.pop() {
-            return serde_json::from_slice(&payload)
-                .map_err(|_| PipeError::BrokenPipe);
+    }
+
+    /// FIFO 下一帧;`Ok(None)` = 尚无完整帧。载荷损坏为致命(BrokenPipe)。
+    fn next_msg(&mut self) -> Result<Option<CoreToBridgeMsg>, PipeError> {
+        match self.queue.pop_front() {
+            None => Ok(None),
+            Some(payload) => serde_json::from_slice(&payload)
+                .map(Some)
+                .map_err(|_| PipeError::BrokenPipe),
+        }
+    }
+}
+
+/// 阻塞收一帧;`tick` 置位时以 TimedOut 返回(已消费字节保留在 pipe)。
+fn recv_json(
+    conn: &PipeConn,
+    pipe: &mut FramePipe,
+    tick: &AtomicBool,
+) -> Result<CoreToBridgeMsg, PipeError> {
+    loop {
+        if let Some(msg) = pipe.next_msg()? {
+            return Ok(msg);
+        }
+        let mut buf = [0u8; 4096];
+        match conn.read_some(&mut buf, tick) {
+            Ok(0) => return Err(PipeError::BrokenPipe),
+            Ok(n) => pipe.feed(&buf[..n])?,
+            Err(e) => return Err(e),
         }
     }
 }
@@ -435,6 +513,10 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
     // 事件序号与确认游标:跨重连保持(worker 生存期内单调;wire 层身份)。
     let mut next_local_seq: u64 = 1;
     let mut acked_high: u64 = 0;
+    // 未确认事件窗口:跨连接持有(C4 修复)——内容与 ACK 游标生命周期一致;
+    // 断开前已发送未确认的事件在新连接上重放对账,不再随连接重建而丢失。
+    let mut unacked: VecDeque<(u64, EventPayload)> = VecDeque::new();
+    let mut unacked_bytes: usize = 0;
     macro_rules! publish {
         () => {
             c.publish();
@@ -465,13 +547,15 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
         if send_json(
             &conn,
             &BridgeMsg::Hello {
-                protocol_version: PROTOCOL_VERSION_V2,
+                protocol_version: PROTOCOL_VERSION_V3,
                 bridge_build: cfg.bridge_build.clone(),
                 auth_token: cfg.auth_token.clone(),
                 role: Role::Bridge,
                 session_generation: cfg.session_generation,
                 account: cfg.account.clone(),
                 module_baseline: cfg.module_baseline.clone(),
+                host_nonce: cfg.host_nonce,
+                host_process_created_utc: cfg.host_process_created_utc.clone(),
             },
         )
         .is_err()
@@ -480,7 +564,7 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
             std::thread::sleep(Duration::from_millis(backoff));
             continue;
         }
-        let mut dec = FrameDecoder::new();
+        let mut pipe = FramePipe::new();
         let tick = Arc::new(AtomicBool::new(false));
         // 心跳看门狗:100ms 置位 tick,使阻塞 recv 周期返回。
         let watchdog_stop = Arc::new(AtomicBool::new(false));
@@ -496,7 +580,7 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
         }
         let session = session_loop(
             &conn,
-            &mut dec,
+            &mut pipe,
             &cfg,
             &resident,
             wake,
@@ -507,6 +591,8 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
             &mut c,
             &mut next_local_seq,
             &mut acked_high,
+            &mut unacked,
+            &mut unacked_bytes,
         );
         watchdog_stop.store(true, Ordering::Relaxed);
         match session {
@@ -541,10 +627,9 @@ enum SessionEnd {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn session_loop<A: crate::host_adapter::HostAdapter>(
     conn: &PipeConn,
-    dec: &mut FrameDecoder,
+    pipe: &mut FramePipe,
     cfg: &DaemonClientConfig,
     resident: &Arc<Resident<A>>,
     wake: &dyn Fn() -> bool,
@@ -555,11 +640,10 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
     c: &mut WorkerCounters,
     next_local_seq: &mut u64,
     acked_high: &mut u64,
+    unacked: &mut VecDeque<(u64, EventPayload)>,
+    unacked_bytes: &mut usize,
 ) -> SessionEnd {
-    // 未确认事件窗口(EventAck 前移;重连重放)。序号与游标由 run_worker
-    // 持有(跨重连连续)。
-    let mut unacked: VecDeque<(u64, EventPayload)> = VecDeque::new();
-    let mut unacked_bytes: usize = 0;
+    // 未确认事件窗口由 run_worker 持有(跨连接,C4);此处只借用。
     let mut last_heartbeat = Instant::now();
     let mut heartbeat_misses: u32 = 0;
     // resident 未就绪期的待提交队列(owner 初始化完成后补交)。
@@ -567,7 +651,7 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
 
     // HelloAck(阻塞;被拒 → 不可重试)。
     loop {
-        match recv_json(conn, dec, tick) {
+        match recv_json(conn, pipe, tick) {
             Ok(CoreToBridgeMsg::HelloAck { accepted, reject_reason, .. }) => {
                 if accepted {
                     c.hellos_accepted += 1;
@@ -607,6 +691,10 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
             }) {
                 crate::resident::SubmitVerdict::Accepted => {
                     pending.pop_front();
+                    // 补交受理 = 真实开始(C5):此刻才上报 NativeStarted。
+                    if send_json(conn, &BridgeMsg::NativeStarted { request_id: id.clone() }).is_err() {
+                        return SessionEnd::Broken;
+                    }
                     wake();
                 }
                 _ => break, // 仍未就绪:保留队列,下轮再试
@@ -665,53 +753,35 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
             let seq = wire_seq;
             let bytes = payload.native_id.len() + payload.text.len() + 128;
             while unacked.len() + 1 > EVENT_WINDOW_MAX_ITEMS
-                || unacked_bytes + bytes > EVENT_WINDOW_MAX_BYTES
+                || *unacked_bytes + bytes > EVENT_WINDOW_MAX_BYTES
             {
                 if let Some((s, _)) = unacked.pop_front() {
                     if let Some((_, e)) = unacked.front() {
-                        unacked_bytes -= e.native_id.len() + e.text.len() + 128;
+                        *unacked_bytes -= e.native_id.len() + e.text.len() + 128;
                     }
                     let _ = s;
                     c.events_gap_dropped += 1;
                 }
             }
             unacked.push_back((seq, payload.clone()));
-            unacked_bytes += bytes;
+            *unacked_bytes += bytes;
             if send_json(conn, &BridgeMsg::Event { event: payload }).is_err() {
                 return SessionEnd::Broken;
             }
             c.events_sent += 1;
         }
-        if !unacked.is_empty() {
-            let items: Vec<EventPayload> = unacked
-                .iter()
-                .filter(|(s, _)| *s > *acked_high)
-                .map(|(_, e)| e.clone())
-                .collect();
-            if !items.is_empty() {
-                for e in items {
-                    if send_json(conn, &BridgeMsg::Event { event: e }).is_err() {
-                        return SessionEnd::Broken;
-                    }
-                    c.events_sent += 1;
-                }
+        // 2b) 重放未确认事件(新连接对账;窗口满 → 记 Gap 丢最旧)。
+        // 恰一处重放(此前重复的两处会每轮双发同一窗口)。
+        let replay: Vec<EventPayload> = unacked
+            .iter()
+            .filter(|(s, _)| *s > *acked_high)
+            .map(|(_, e)| e.clone())
+            .collect();
+        for e in replay {
+            if send_json(conn, &BridgeMsg::Event { event: e }).is_err() {
+                return SessionEnd::Broken;
             }
-        }
-        // 2b) 事件上行(重放未确认 → 新事件;窗口满 → 记 Gap 丢最旧)。
-        let mut replay: Vec<u64> = unacked.iter().map(|(s, _)| *s).collect();
-        replay.retain(|s| *s > *acked_high);
-        if !replay.is_empty() {
-            let items: Vec<EventPayload> = unacked
-                .iter()
-                .filter(|(s, _)| *s > *acked_high)
-                .map(|(_, e)| e.clone())
-                .collect();
-            for e in items {
-                if send_json(conn, &BridgeMsg::Event { event: e }).is_err() {
-                    return SessionEnd::Broken;
-                }
-                c.events_sent += 1;
-            }
+            c.events_sent += 1;
         }
         // 3) 心跳(3 次未响应 → 主动断开重连;计划 §6.4)。
         if last_heartbeat.elapsed() >= Duration::from_millis(cfg.heartbeat_ms) {
@@ -734,20 +804,31 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
             wake();
         }
         // 4) 阻塞收(tick 周期返回)。
-        match recv_json(conn, dec, tick) {
+        match recv_json(conn, pipe, tick) {
             Ok(CoreToBridgeMsg::Dispatch { request_id, target, text }) => {
                 c.dispatches += 1;
-                if send_json(conn, &BridgeMsg::NativeStarted { request_id: request_id.clone() }).is_err() {
-                    return SessionEnd::Broken;
-                }
+                // 真实开始边界(C5):先提交;提交被受理(claim 进入)后才上报
+                // NativeStarted。此前"先报 started 再提交"会把未执行项记成已
+                // 开始,取消窗口与恢复分类都失真。未就绪挂 pending,等补交
+                // 受理时再报 started。
                 match resident.submit(crate::resident::OwnedRequest::SendText {
                     request_id: request_id.clone(),
                     chat_type: chat_type_from_target(&target),
                     peer_uid: peer_uid_from_target(&target),
                     text: text.clone(),
                 }) {
-                    crate::resident::SubmitVerdict::Accepted => {}
-                    // resident 未就绪(owner 初始化重试中):挂回待提交队列。
+                    crate::resident::SubmitVerdict::Accepted => {
+                        if send_json(conn, &BridgeMsg::NativeStarted {
+                            request_id: request_id.clone(),
+                        })
+                        .is_err()
+                        {
+                            return SessionEnd::Broken;
+                        }
+                        wake();
+                    }
+                    // resident 未就绪(owner 初始化重试中):挂待提交队列,
+                    // 不报 NativeStarted(尚未开始)。
                     _ => pending.push_back((
                         request_id,
                         chat_type_from_target(&target),
@@ -755,7 +836,6 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
                         text.clone(),
                     )),
                 }
-                wake();
             }
             Ok(CoreToBridgeMsg::EventAck { event_seq, suppressed: _ }) => {
                 // daemon 回显 wire seq(首次持久化与重复抑制均如此 —— 修复
@@ -763,7 +843,7 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
                 *acked_high = (*acked_high).max(event_seq);
                 while unacked.front().map(|(s, _)| *s <= *acked_high).unwrap_or(false) {
                     if let Some((_, e)) = unacked.pop_front() {
-                        unacked_bytes -= e.native_id.len() + e.text.len() + 128;
+                        *unacked_bytes -= e.native_id.len() + e.text.len() + 128;
                         c.events_acked += 1;
                     }
                 }
@@ -801,4 +881,71 @@ fn peer_uid_from_target(v: &serde_json::Value) -> String {
         .and_then(|x| x.as_str())
         .unwrap_or_default()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn framed(msg: &CoreToBridgeMsg) -> Vec<u8> {
+        encode_frame(&serde_json::to_vec(msg).unwrap()).unwrap()
+    }
+
+    fn hello_ack() -> CoreToBridgeMsg {
+        CoreToBridgeMsg::HelloAck {
+            protocol_version: 2,
+            core_build: "lab".into(),
+            connection_epoch: 1,
+            accepted: true,
+            reject_reason: None,
+        }
+    }
+
+    /// T01(C3): 单次读合并 HelloAck+Dispatch+EventAck → 三帧按序全交付,
+    /// 恰好一次。修复前 out.pop() 只返回最后一帧,前两帧被静默丢弃。
+    #[test]
+    fn coalesced_frames_delivered_in_order_once() {
+        let mut pipe = FramePipe::new();
+        let msgs = vec![
+            hello_ack(),
+            CoreToBridgeMsg::Dispatch {
+                request_id: "R1".into(),
+                target: serde_json::json!({"account":"a","kind":"private","peer":"p"}),
+                text: "hi".into(),
+            },
+            CoreToBridgeMsg::EventAck { event_seq: 7, suppressed: false },
+        ];
+        let mut merged = Vec::new();
+        for m in &msgs {
+            merged.extend(framed(m));
+        }
+        pipe.feed(&merged).unwrap();
+        for m in &msgs {
+            assert_eq!(pipe.next_msg().unwrap().as_ref(), Some(m));
+        }
+        assert!(pipe.next_msg().unwrap().is_none(), "交付必须恰好一次");
+    }
+
+    /// 半帧跨 feed 保留前缀(T02 客户端侧;新连接不得复用旧前缀由
+    /// FramePipe::new 的每连接构造保证)。
+    #[test]
+    fn partial_frame_prefix_survives_across_feeds() {
+        let mut pipe = FramePipe::new();
+        let full = framed(&CoreToBridgeMsg::HealthAck {});
+        pipe.feed(&full[..5]).unwrap();
+        assert!(pipe.next_msg().unwrap().is_none());
+        pipe.feed(&full[5..]).unwrap();
+        assert!(matches!(
+            pipe.next_msg().unwrap(),
+            Some(CoreToBridgeMsg::HealthAck {})
+        ));
+    }
+
+    /// 魔数错位是致命错误(feed → BrokenPipe,状态不可信)。
+    #[test]
+    fn magic_mismatch_is_fatal() {
+        let mut pipe = FramePipe::new();
+        let garbage = b"NOT-A-FRAME!!".repeat(2);
+        assert!(pipe.feed(&garbage).is_err());
+    }
 }

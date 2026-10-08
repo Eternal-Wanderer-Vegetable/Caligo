@@ -7,6 +7,7 @@
 //! 停止:任一入口 Stop → 停止标志 → accept 取消 → actor.stop/close(Closed
 //! 前在途项显式 unknown)。core 非正常退出由断连恢复(测试在 recovery_contract)。
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,12 +15,13 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::ipc::{
-    encode_frame, validate_auth, validate_hello_v2, BridgeMsg, ControlMsg, CoreToBridgeMsg,
-    CoreToControlMsg, EventPayload, OutcomePayload, Role, PROTOCOL_VERSION_V2, FRAME_MAGIC,
-    MAX_FRAME_SIZE,
+    encode_frame, validate_auth, validate_hello_v3, BridgeMsg, ControlMsg, CoreToBridgeMsg,
+    CoreToControlMsg, EventPayload, FrameDecoder, OutcomePayload, Role, PROTOCOL_VERSION_V3,
 };
 use crate::runtime::{host_identity, AccountActor, NativeResult, RuntimeConfig};
-use crate::transport::{connect_client, generate_token, token_hex, PipeConnection, PipeServer, TransportError};
+use crate::transport::{
+    connect_client, generate_token, token_hex, PipeConnection, PipeServer, TransportError,
+};
 use caligo_model::{Direction, EventSource, MsgEvent, NativeMessageId, SendTextRequest, SessionIdentity};
 
 /// 会话帧读取错误。
@@ -44,40 +46,61 @@ impl core::fmt::Display for SessionError {
     }
 }
 
-/// 读取一帧(8 字节头 + payload);`cancel` 置位时中断等待。
-fn read_frame(
-    conn: &PipeConnection,
-    cancel: &AtomicBool,
-) -> Result<Vec<u8>, SessionError> {
-    let mut head = [0u8; 8];
-    conn.read_exact(&mut head, Some(cancel)).map_err(SessionError::Transport)?;
-    let magic = u32::from_le_bytes(head[0..4].try_into().unwrap());
-    if magic != FRAME_MAGIC {
-        return Err(SessionError::Frame(format!("magic {magic:#010x}")));
+/// 每连接长寿命帧流:增量 decoder + 完整帧 FIFO(C2/C3 修复)。
+///
+/// 合同:
+/// - 唤醒/取消(`TimedOut`)不丢失已消费字节 —— 半帧前缀留在 decoder,
+///   完整帧留在 FIFO,下一轮调用从原点继续(反例 T02);
+/// - 单次读合并的多帧按序全交付一次,不丢不重(反例 T01);
+/// - 新连接必须新建实例,不得复用旧连接前缀;
+/// - 魔数/超长为致命错误:解码器状态不可信,调用方结束该连接。
+struct FrameStream {
+    dec: FrameDecoder,
+    queue: VecDeque<Vec<u8>>,
+}
+
+impl FrameStream {
+    fn new() -> Self {
+        Self { dec: FrameDecoder::new(), queue: VecDeque::new() }
     }
-    let len = u32::from_le_bytes(head[4..8].try_into().unwrap()) as usize;
-    if len > MAX_FRAME_SIZE {
-        return Err(SessionError::Frame(format!("frame too large: {len}")));
+
+    fn recv_raw(&mut self, conn: &PipeConnection, cancel: &AtomicBool) -> Result<Vec<u8>, SessionError> {
+        loop {
+            if let Some(payload) = self.queue.pop_front() {
+                return Ok(payload);
+            }
+            let mut buf = [0u8; 4096];
+            match conn.read_some(&mut buf, Some(cancel)) {
+                Ok(0) => return Err(SessionError::Transport(TransportError::BrokenPipe)),
+                Ok(n) => {
+                    let mut out = Vec::new();
+                    self.dec
+                        .push(&buf[..n], &mut out)
+                        .map_err(|e| SessionError::Frame(e.to_string()))?;
+                    self.queue.extend(out);
+                }
+                Err(TransportError::TimedOut) => {
+                    return Err(SessionError::Transport(TransportError::TimedOut))
+                }
+                Err(e) => return Err(SessionError::Transport(e)),
+            }
+        }
     }
-    let mut payload = vec![0u8; len];
-    if len > 0 {
-        conn.read_exact(&mut payload, Some(cancel)).map_err(SessionError::Transport)?;
+
+    fn recv_json<T: for<'de> Deserialize<'de>>(
+        &mut self,
+        conn: &PipeConnection,
+        cancel: &AtomicBool,
+    ) -> Result<T, SessionError> {
+        let payload = self.recv_raw(conn, cancel)?;
+        serde_json::from_slice(&payload).map_err(SessionError::Serde)
     }
-    Ok(payload)
 }
 
 fn send_json<T: Serialize>(conn: &PipeConnection, msg: &T) -> Result<(), SessionError> {
     let payload = serde_json::to_vec(msg).map_err(SessionError::Serde)?;
     let frame = encode_frame(&payload).map_err(|e| SessionError::Frame(e.to_string()))?;
     conn.write_all(&frame).map_err(SessionError::Transport)
-}
-
-fn recv_json<T: for<'de> Deserialize<'de>>(
-    conn: &PipeConnection,
-    cancel: &AtomicBool,
-) -> Result<T, SessionError> {
-    let payload = read_frame(conn, cancel)?;
-    serde_json::from_slice(&payload).map_err(SessionError::Serde)
 }
 
 /// daemon 配置。`expect_client_pid` 为指定进程校验(0 = 不校验)。
@@ -90,6 +113,10 @@ pub struct DaemonConfig {
     pub core_build: String,
     pub expect_client_pid: u32,
     pub runtime: RuntimeConfig,
+    /// LAB 故障注入(research):bridge Hello 受理后不读在途入站字节、
+    /// 不发 Stopped 直接断开 —— 模拟"worker 已写入但 core 未消费即崩溃"
+    /// 的窗口(T07 反例的确定性构造点)。仅触发一次;生产路径恒 false。
+    pub test_fault_break_bridge_after_hello: bool,
 }
 
 /// 常驻 core(LAB 形态;计划 §7-D5)。
@@ -103,6 +130,8 @@ pub struct Daemon {
     /// 待派发队列(control 受理后经此转 bridge)。
     pub(crate) dispatch_out: Mutex<Vec<CoreToBridgeMsg>>,
     pub(crate) bridge_hello_seen: AtomicBool,
+    /// LAB 故障注入的一次性触发闸(与 config.test_fault_break_bridge_after_hello 配合)。
+    test_fault_armed: AtomicBool,
     /// bridge 会话读唤醒:control 推入派发后置位,使其阻塞读立即返回
     /// (read 以 100ms 粒度轮询该标志)。
     pub(crate) bridge_wake: Arc<AtomicBool>,
@@ -125,6 +154,7 @@ impl Daemon {
             epoch: AtomicU64::new(1),
             dispatch_out: Mutex::new(Vec::new()),
             bridge_hello_seen: AtomicBool::new(false),
+            test_fault_armed: AtomicBool::new(false),
             bridge_wake: Arc::new(AtomicBool::new(false)),
             config,
         }))
@@ -158,6 +188,11 @@ impl Daemon {
     /// 停止标志(Ctrl+C 与 control Stop 汇合)。
     pub fn stop_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         self.stop.clone()
+    }
+
+    /// 当前连接代次(观测/LAB;每条新 bridge 连接递增)。
+    pub fn connection_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
     }
 
 /// 阻塞运行:双 accept 循环;停止后收尾 actor(stop→close)。
@@ -241,7 +276,7 @@ impl Daemon {
         serde_json::json!({
             "t": "hello_ack",
             "d": {
-                "protocol_version": PROTOCOL_VERSION_V2,
+                "protocol_version": PROTOCOL_VERSION_V3,
                 "core_build": build,
                 "connection_epoch": epoch,
                 "accepted": accepted,
@@ -251,8 +286,13 @@ impl Daemon {
     }
 
     fn serve_bridge(self: &Arc<Self>, conn: PipeConnection) -> Result<(), SessionError> {
+        // 每连接独立帧流:半帧前缀不跨连接(见 FrameStream 合同)。
+        let mut stream = FrameStream::new();
+        // 连接代次:每条新 bridge 连接分配新 epoch(C1);旧连接不得以
+        // 相同/更小 epoch 触发重连恢复。
+        let epoch = self.epoch.fetch_add(1, Ordering::Relaxed) + 1;
         // 握手:版本 → 认证 → 角色 → 基线/账号/代次。
-        let hello: BridgeMsg = recv_json(&conn, &self.stop)?;
+        let hello: BridgeMsg = stream.recv_json(&conn, &self.stop)?;
         let BridgeMsg::Hello {
             protocol_version,
             bridge_build,
@@ -261,19 +301,20 @@ impl Daemon {
             session_generation,
             account,
             module_baseline,
+            host_nonce,
+            host_process_created_utc,
         } = hello
         else {
             send_json(&conn, &Self::reject_val("first message must be hello"))?;
-            return Err(SessionError::Frame("bridge hello expected".into()));
+            return Ok(());
         };
-        let epoch = self.epoch.load(Ordering::Relaxed);
         let reject = |reason: String| {
             let _ = send_json(
                 &conn,
                 &Self::hello_ack(false, Some(reason), &self.config.core_build, epoch),
             );
         };
-        if let Err(e) = validate_hello_v2(protocol_version, role, Role::Bridge, &self.config.core_build) {
+        if let Err(e) = validate_hello_v3(protocol_version, role, Role::Bridge, &self.config.core_build) {
             reject(e.to_string());
             return Ok(());
         }
@@ -290,15 +331,18 @@ impl Daemon {
             reject(format!("account mismatch: {account}"));
             return Ok(());
         }
-        // 会话绑定(首次 bridge 接入 = Bound→Active)。
+        // 会话绑定(首次 bridge 接入 = Bound→Active)。accepted 只在完整
+        // 绑定/恢复成功后返回(C1:重连失败必须拒绝,不得吞错后照常受理)。
         {
             let mut actor = self.actor.lock().unwrap();
+            // C9:宿主身份来自 bridge Hello(nonce + 创建时间 + OS PID),
+            // 不再由 core 代填;daemon 只核对,不发明。
             let host = host_identity(
                 conn.client_pid().unwrap_or(0),
-                "",
+                &host_process_created_utc,
                 &module_baseline,
                 &bridge_build,
-                self.core_nonce,
+                host_nonce,
             );
             let session = SessionIdentity {
                 host,
@@ -306,18 +350,27 @@ impl Daemon {
                 session_generation,
             };
             if let Err(e) = actor.attach_session(session) {
-                // 已绑定同代次 → 幂等(重连场景)。
+                // 已绑定同代次且同宿主 → 幂等(重连场景);宿主实例不同
+                // (QQ 重启/换宿主)必须显式拒绝,不得沿用旧绑定(T05)。
                 let same = actor
                     .session()
                     .map(|s| {
-                        s.session_generation == session_generation && s.account.0 == account
+                        s.session_generation == session_generation
+                            && s.account.0 == account
+                            && s.host.host_nonce == host_nonce
+                            && s.host.pid == conn.client_pid().unwrap_or(0)
+                            && s.host.process_created_utc == host_process_created_utc
                     })
                     .unwrap_or(false);
                 if !same {
                     reject(format!("attach rejected: {e:?}"));
                     return Ok(());
                 }
-                let _ = actor.reconnect(self.conn_identity(epoch));
+                if let Err(e) = actor.reconnect(self.conn_identity(epoch)) {
+                    // 同代次重连但连接代次不前进(如旧连接重放)→ 拒绝。
+                    reject(format!("reconnect rejected: {e:?}"));
+                    return Ok(());
+                }
             } else if let Err(e) = actor.mark_connection_ready(self.conn_identity(epoch)) {
                 reject(format!("connection rejected: {e:?}"));
                 return Ok(());
@@ -328,6 +381,20 @@ impl Daemon {
             &Self::hello_ack(true, None, &self.config.core_build, epoch),
         )?;
         self.bridge_hello_seen.store(true, Ordering::Relaxed);
+
+        // LAB 故障注入(T07):受理后不给 Stopped、不读在途入站字节直接断开。
+        // worker 在 HelloAck 之后写入的事件停留在管道缓冲,随断开被丢弃 ——
+        // worker 侧必须靠跨连接未确认窗口在新连接上重放对账。
+        if self.config.test_fault_break_bridge_after_hello
+            && !self.test_fault_armed.swap(true, Ordering::Relaxed)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            {
+                let mut actor = self.actor.lock().unwrap();
+                actor.degrade("lab fault: break after hello");
+            }
+            return Ok(());
+        }
 
         // 组合唤醒观察者:stop 或 dispatch 到达都会打断 bridge 会话的阻塞读
         // (read 以 50ms 粒度轮询 recv_wake)。观察者随会话结束退出。
@@ -364,7 +431,7 @@ impl Daemon {
             for m in pending {
                 send_json(&conn, &m)?;
             }
-            match recv_json::<BridgeMsg>(&conn, &recv_wake) {
+            match stream.recv_json::<BridgeMsg>(&conn, &recv_wake) {
                 Ok(msg) => match msg {
                     BridgeMsg::NativeStarted { request_id } => {
                         let mut actor = self.actor.lock().unwrap();
@@ -439,24 +506,25 @@ impl Daemon {
     }
 
     fn serve_control(self: &Arc<Self>, conn: PipeConnection) -> Result<(), SessionError> {
-        let hello: ControlMsg = recv_json(&conn, &self.stop)?;
+        let mut stream = FrameStream::new();
+        let hello: ControlMsg = stream.recv_json(&conn, &self.stop)?;
         let ControlMsg::Hello { protocol_version, auth_token, role, .. } = hello else {
             let _ = send_json(&conn, &CoreToControlMsg::Reject {
                 reason: "first message must be hello".into(),
             });
-            return Err(SessionError::Frame("control hello expected".into()));
+            return Ok(());
         };
         let epoch = self.epoch.load(Ordering::Relaxed);
         let ack = |accepted: bool, reject: Option<String>, conn: &PipeConnection| -> Result<(), SessionError> {
             send_json(conn, &CoreToControlMsg::HelloAck {
-                protocol_version: PROTOCOL_VERSION_V2,
+                protocol_version: PROTOCOL_VERSION_V3,
                 core_build: self.config.core_build.clone(),
                 connection_epoch: epoch,
                 accepted,
                 reject_reason: reject,
             })
         };
-        if let Err(e) = validate_hello_v2(protocol_version, role, Role::Control, &self.config.core_build) {
+        if let Err(e) = validate_hello_v3(protocol_version, role, Role::Control, &self.config.core_build) {
             ack(false, Some(e.to_string()), &conn)?;
             return Ok(());
         }
@@ -472,7 +540,7 @@ impl Daemon {
                 let _ = send_json(&conn, &CoreToControlMsg::Stopped {});
                 return Ok(());
             }
-            match recv_json::<ControlMsg>(&conn, &self.stop) {
+            match stream.recv_json::<ControlMsg>(&conn, &self.stop) {
                 Ok(msg) => match msg {
                     ControlMsg::SendText { request_id, target, text, deadline_ms } => {
                         let mut actor = self.actor.lock().unwrap();
@@ -570,7 +638,7 @@ impl Daemon {
         caligo_model::ConnectionIdentity {
             core_instance_nonce: self.core_nonce,
             connection_epoch: epoch,
-            protocol_version: PROTOCOL_VERSION_V2,
+            protocol_version: PROTOCOL_VERSION_V3,
         }
     }
 
@@ -650,19 +718,21 @@ fn caligo_target(v: &serde_json::Value) -> caligo_model::SessionKey {
 /// 控制客户端(LAB 测试用):连接、握手与请求/应答。
 pub struct ControlClient {
     pub conn: PipeConnection,
+    stream: FrameStream,
 }
 
 impl ControlClient {
     pub fn connect(name: &str, auth_token: &str, client_build: &str) -> Result<Self, SessionError> {
         let conn = connect_client(name).map_err(SessionError::Transport)?;
         send_json(&conn, &ControlMsg::Hello {
-            protocol_version: PROTOCOL_VERSION_V2,
+            protocol_version: PROTOCOL_VERSION_V3,
             client_build: client_build.to_string(),
             auth_token: auth_token.to_string(),
             role: Role::Control,
         })?;
         // 消费并核对 HelloAck(否则它会被当作第一条请求的应答)。
-        match recv_json::<CoreToControlMsg>(&conn, &AtomicBool::new(false))? {
+        let mut stream = FrameStream::new();
+        match stream.recv_json::<CoreToControlMsg>(&conn, &AtomicBool::new(false))? {
             CoreToControlMsg::HelloAck { accepted, reject_reason, .. } => {
                 if !accepted {
                     return Err(SessionError::Frame(format!(
@@ -677,21 +747,23 @@ impl ControlClient {
                 )));
             }
         }
-        Ok(Self { conn })
+        Ok(Self { conn, stream })
     }
 
     pub fn request(&mut self, msg: ControlMsg) -> Result<CoreToControlMsg, SessionError> {
         send_json(&self.conn, &msg)?;
-        recv_json(&self.conn, &AtomicBool::new(false))
+        self.stream.recv_json(&self.conn, &AtomicBool::new(false))
     }
 }
 
 /// bridge 侧 LAB 客户端(真机由 resident+worker 驱动;测试用同一管道语义)。
 pub struct BridgeClient {
     pub conn: PipeConnection,
+    stream: FrameStream,
 }
 
 impl BridgeClient {
+    /// `host_nonce`/`host_created_utc`:宿主实例身份(v3;LAB 显式提供)。
     pub fn connect(
         name: &str,
         auth_token: &str,
@@ -699,19 +771,24 @@ impl BridgeClient {
         session_generation: u64,
         account: &str,
         module_baseline: &str,
+        host_nonce: u64,
+        host_created_utc: &str,
     ) -> Result<Self, SessionError> {
         let conn = connect_client(name).map_err(SessionError::Transport)?;
         send_json(&conn, &BridgeMsg::Hello {
-            protocol_version: PROTOCOL_VERSION_V2,
+            protocol_version: PROTOCOL_VERSION_V3,
             bridge_build: bridge_build.to_string(),
             auth_token: auth_token.to_string(),
             role: Role::Bridge,
             session_generation,
             account: account.to_string(),
             module_baseline: module_baseline.to_string(),
+            host_nonce,
+            host_process_created_utc: host_created_utc.to_string(),
         })?;
         // 消费并核对 HelloAck。
-        match recv_json::<CoreToBridgeMsg>(&conn, &AtomicBool::new(false))? {
+        let mut stream = FrameStream::new();
+        match stream.recv_json::<CoreToBridgeMsg>(&conn, &AtomicBool::new(false))? {
             CoreToBridgeMsg::HelloAck { accepted, reject_reason, .. } => {
                 if !accepted {
                     return Err(SessionError::Frame(format!(
@@ -726,14 +803,14 @@ impl BridgeClient {
                 )));
             }
         }
-        Ok(Self { conn })
+        Ok(Self { conn, stream })
     }
 
     pub fn send(&self, msg: &BridgeMsg) -> Result<(), SessionError> {
         send_json(&self.conn, msg)
     }
 
-    pub fn recv(&self) -> Result<CoreToBridgeMsg, SessionError> {
-        recv_json(&self.conn, &AtomicBool::new(false))
+    pub fn recv(&mut self) -> Result<CoreToBridgeMsg, SessionError> {
+        self.stream.recv_json(&self.conn, &AtomicBool::new(false))
     }
 }

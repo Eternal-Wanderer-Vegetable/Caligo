@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use caligo_core::daemon::{BridgeClient, ControlClient, Daemon, DaemonConfig};
-use caligo_core::ipc::{BridgeMsg, ControlMsg, CoreToBridgeMsg, CoreToControlMsg, OutcomePayload, Role, PROTOCOL_VERSION_V2};
+use caligo_core::ipc::{BridgeMsg, ControlMsg, CoreToBridgeMsg, CoreToControlMsg, OutcomePayload, Role};
 use caligo_core::runtime::RuntimeConfig;
 use caligo_bridge::host_adapter::{HostAdapter, HostError, HostOp, HostOpResult};
 use caligo_bridge::resident::{OwnedRequest, Resident, ResidentLimits};
@@ -75,6 +75,7 @@ fn start_daemon(tag: &str) -> (Arc<Daemon>, std::thread::JoinHandle<Result<(), c
         core_build: caligo_core::CORE_BUILD.into(),
         expect_client_pid: std::process::id(),
         runtime: RuntimeConfig::default(),
+        test_fault_break_bridge_after_hello: false,
     };
     let daemon = Daemon::start(config).unwrap();
     let runner = {
@@ -94,6 +95,8 @@ fn connect_bridge(daemon: &Arc<Daemon>) -> BridgeClient {
             1,
             "10001",
             "qq-9.9.33-52230",
+            0xAA00_0001,
+            "2026-10-08T00:00:00Z",
         ) {
             Ok(c) => return c,
             Err(_) => std::thread::sleep(Duration::from_millis(20)),
@@ -120,7 +123,7 @@ fn spawn_bridge_agent(daemon: Arc<Daemon>, stop: Arc<AtomicBool>) -> std::thread
         let resident = Arc::new(Resident::new(ChainHost, ResidentLimits::default()));
         resident.bootstrap().unwrap();
         let mut native_sends = 0u64;
-        let bridge = connect_bridge(&daemon);
+        let mut bridge = connect_bridge(&daemon);
         // resident 的 bootstrap ListenerAdd 已发生(常驻一次初始化)。
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -280,7 +283,7 @@ fn full_chain_send_event_and_stop() {
 fn event_roundtrip_through_pipe_and_journal() {
     let (daemon, runner, journal) = start_daemon("event");
     // bridge 连接后推送事件 → EventAck(持久化依据)→ control DrainEvents。
-    let bridge = connect_bridge(&daemon);
+    let mut bridge = connect_bridge(&daemon);
     let mut control = connect_control(&daemon);
 
     let ev = caligo_core::ipc::EventPayload {
@@ -358,7 +361,7 @@ fn wrong_token_client_cannot_join_session() {
     }
     let conn = conn.unwrap();
     let hello = ControlMsg::Hello {
-        protocol_version: PROTOCOL_VERSION_V2,
+        protocol_version: caligo_core::ipc::PROTOCOL_VERSION_V3,
         client_build: "rogue".into(),
         auth_token: "0000".into(),
         role: Role::Control,
@@ -385,4 +388,109 @@ fn wrong_token_client_cannot_join_session() {
     let mut control = connect_control(&daemon);
     control.request(ControlMsg::Stop {}).unwrap();
     runner.join().unwrap().unwrap();
+}
+
+// ---- T02(C2):帧中唤醒不得丢失已消费半帧前缀 ----
+
+/// 读一帧并反序列化(原始管道客户端用;cancel 3s 超时防悬挂)。
+fn read_frame_msg(
+    conn: &caligo_core::transport::PipeConnection,
+) -> Result<CoreToBridgeMsg, String> {
+    let cancel = AtomicBool::new(false);
+    let mut head = [0u8; 8];
+    conn.read_exact(&mut head, Some(&cancel)).map_err(|e| e.to_string())?;
+    let len = u32::from_le_bytes(head[4..8].try_into().unwrap()) as usize;
+    let mut payload = vec![0u8; len];
+    conn.read_exact(&mut payload, Some(&cancel)).map_err(|e| e.to_string())?;
+    serde_json::from_slice(&payload).map_err(|e| e.to_string())
+}
+
+/// T02:已 Active 的 bridge 会话中,Health 帧只写了 header 就被 daemon 的
+/// 唤醒机制(recv_wake)打断;补齐 payload 后 daemon 必须把"前缀 + 补齐"
+/// 重组为同一帧并应答 HealthAck —— 半帧前缀不得丢弃、流不得错位。
+///
+/// 反例(修复前):取消把已消费的 header 丢掉,补齐字节被当作新帧的
+/// header 解析 → 魔数错位 → 会话错误 → 永远等不到 HealthAck。
+#[test]
+fn t02_mid_frame_wake_preserves_stream_prefix() {
+    let (daemon, runner, _journal) = start_daemon("t02frag");
+    let (bridge_name, control_name) = daemon.pipe_names();
+    // 原始 bridge 客户端(字节级写控制;完整 hello 帧走正常握手)。
+    let mut conn = None;
+    for _ in 0..100 {
+        match caligo_core::transport::connect_client(&bridge_name) {
+            Ok(c) => {
+                conn = Some(c);
+                break;
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    let conn = conn.unwrap();
+    let hello = BridgeMsg::Hello {
+        protocol_version: caligo_core::ipc::PROTOCOL_VERSION_V3,
+        bridge_build: "t02-bridge".into(),
+        auth_token: daemon.auth_token(),
+        role: Role::Bridge,
+        session_generation: 1,
+        account: "10001".into(),
+        module_baseline: "qq-9.9.33-52230".into(),
+        host_nonce: 0xAA00_0002,
+        host_process_created_utc: "2026-10-08T00:00:00Z".into(),
+    };
+    let hello_frame = {
+        let p = serde_json::to_vec(&hello).unwrap();
+        caligo_core::ipc::encode_frame(&p).unwrap()
+    };
+    conn.write_all(&hello_frame).unwrap();
+    match read_frame_msg(&conn).unwrap() {
+        CoreToBridgeMsg::HelloAck { accepted, reject_reason, .. } => {
+            assert!(accepted, "hello 应被受理: {reject_reason:?}");
+        }
+        other => panic!("hello_ack expected, got {other:?}"),
+    }
+
+    // Health 帧只写 header(8 字节);daemon 的 payload read 阻塞。
+    let health = BridgeMsg::Health { ingress_pending: 0, native_ops_total: 0 };
+    let health_frame = {
+        let p = serde_json::to_vec(&health).unwrap();
+        caligo_core::ipc::encode_frame(&p).unwrap()
+    };
+    assert!(health_frame.len() > 8);
+    conn.write_all(&health_frame[..8]).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+
+    // 触发 recv_wake(control 受理 SendText 会置位 bridge_wake),唤醒
+    // daemon 阻塞中的半帧读;dispatch 泵随后把 Dispatch 帧推给本客户端。
+    let mut control = ControlClient::connect(&control_name, &daemon.auth_token(), "t02-control").unwrap();
+    let r = control
+        .request(ControlMsg::SendText {
+            request_id: "R-T02".into(),
+            target: serde_json::json!({"account":"10001","kind":"group","peer":"grp"}),
+            text: "CALIGO-T02-WAKE".into(),
+            deadline_ms: 5_000,
+        })
+        .unwrap();
+    assert!(matches!(r, CoreToControlMsg::SendAccepted { .. }), "wake 提交应被受理: {r:?}");
+    std::thread::sleep(Duration::from_millis(150));
+
+    // 泵出的 Dispatch 必须先到(证明唤醒路径已执行)。
+    match read_frame_msg(&conn) {
+        Ok(CoreToBridgeMsg::Dispatch { request_id, .. }) => assert_eq!(request_id, "R-T02"),
+        Ok(other) => panic!("dispatch expected, got {other:?}"),
+        Err(e) => panic!("daemon 在半帧唤醒后失去连接: {e}"),
+    }
+
+    // 补齐 Health payload;daemon 必须重组并应答 HealthAck。
+    conn.write_all(&health_frame[8..]).unwrap();
+    let got = read_frame_msg(&conn);
+    // 收尾前先断言:修复前这里只能等到超时/断连(会话已错位)。
+    let msg = got.expect("HealthAck 必须在补齐 payload 后到达(半帧前缀未丢)");
+    match msg {
+        CoreToBridgeMsg::HealthAck {} => {}
+        other => panic!("health_ack expected, got {other:?}"),
+    }
+
+    control.request(ControlMsg::Stop {}).unwrap();
+    let _ = runner.join().unwrap();
 }

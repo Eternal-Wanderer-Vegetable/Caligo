@@ -33,13 +33,15 @@ fn encode(msg: &BridgeMsg) -> Vec<u8> {
 
 fn hello(token: &str) -> BridgeMsg {
     BridgeMsg::Hello {
-        protocol_version: PROTOCOL_VERSION_V2,
+        protocol_version: caligo_core::ipc::PROTOCOL_VERSION_V3,
         bridge_build: "test-bridge".into(),
         auth_token: token.into(),
         role: Role::Bridge,
         session_generation: 1,
         account: "10001".into(),
         module_baseline: "qq-9.9.33-52230".into(),
+        host_nonce: 0xAA00_0003,
+        host_process_created_utc: "2026-10-08T00:00:00Z".into(),
     }
 }
 

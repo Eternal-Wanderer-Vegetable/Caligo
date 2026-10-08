@@ -1,0 +1,20 @@
+P0 baseline 2026-10-08
+== git rev-parse HEAD ==
+681434bb8c0a32fd4e98ddaceadedf7e48f95782
+== git status --short ==
+ M docs/plans/2026-10-07-gitnexus-plan-caligo-k4-runtime-recovery.md
+?? docs/execution/
+?? docs/plans/2026-10-08-gitnexus-plan-caligo-native-contract-recovery.md
+?? docs/research/2026-10-08-qq-native-contract-and-version-adaptation.md
+?? docs/research/2026-10-08-snowluma-native-workflow-reconstruction.md
+== wrapper.node sha256 ==
+63112ab9161e127f5f7e17998a7196e143808923fb54cbbf7b4e21426187a5f0 */d/Program Files/Tencent/QQNT/versions/9.9.33-52230/resources/app/wrapper.node
+== manifest digests recheck ==
+82d9b73ebed35d2e554af41cb81c4080d83d9f5a2bd51767181dc1bd2aee30a9 */e/stella/_reference/snowluma-native-r1-20261008/artifact-manifest.json
+f22f3d1800fb1af32472d6fcb1e91e9e22865fa2f15cf2b335881fdb9a2ec00f */e/stella/_reference/qq-native-r2-20261008/artifact-manifest.json
+52adaea8e9318bd5eb2d1078386ad593926962e9b7fba0980ddfea31a8c44f25 */e/stella/_reference/qq-native-r2-20261008/validation.json
+91f6e01d6d4b5a0932e42c4f7933431c71b2908dfd9e94d8e9d47b055c727836 */e/stella/_reference/qq-native-r2-20261008/snow-native-v1.14.22-comparison.json
+5d8da75f726302d7e1bddb685f43284be2b88d3c19754a94d2a75dacb0dfacc4 */e/stella/_reference/qq-native-r2-20261008/reports/qq-object-resolver.md
+3b3dd179c25705f9bd99442e475002259773c489f7ec8a5703c609f06090e83e */e/stella/_reference/qq-native-r2-20261008/reports/qq-send-thread-contract.md
+958b77b2de3e54bfce87abe5cf9dc4979eab24aeb22c9e2bacd497a1d8005370 */e/stella/_reference/qq-native-r2-20261008/reports/qq-receive-thread-contract.md
+ebea4f3bc4158e141daf9602951b5802ddf3d62214f461370ae925accac4e4a0 */e/stella/_reference/qq-native-r2-20261008/reports/snowluma-version-adaptation.md

@@ -122,12 +122,39 @@ pub fn validate_hello(
 
 pub use caligo_model::framing::{encode_frame, FrameDecoder, FrameError, FRAME_MAGIC, MAX_FRAME_SIZE};
 pub use caligo_model::ipc_v2::{
-    BridgeMsg, ControlMsg, CoreToBridgeMsg, CoreToControlMsg, EventPayload, OutcomePayload, Role,
+    ControlMsg, CoreToBridgeMsg, CoreToControlMsg, EventPayload, OutcomePayload, Role,
     PROTOCOL_VERSION_V2,
 };
+pub use caligo_model::ipc_v3::{
+    BridgeMsg, PROTOCOL_VERSION_V3,
+};
+
+/// v3 握手校验(bridge/control 共用)。校验顺序:协议版本 → 角色。
+/// 认证(token)由调用方以 [`validate_auth`] 先行完成并拒绝。
+pub fn validate_hello_v3(
+    protocol_version: u32,
+    role: Role,
+    expect_role: Role,
+    core_build: &str,
+) -> Result<(u32, String), RejectReason> {
+    if protocol_version != PROTOCOL_VERSION_V3 {
+        return Err(RejectReason::ProtocolVersionMismatch {
+            got: protocol_version,
+            want: PROTOCOL_VERSION_V3,
+        });
+    }
+    if role != expect_role {
+        return Err(RejectReason::AccountMismatch {
+            got: format!("role:{role:?}"),
+            want: format!("role:{expect_role:?}"),
+        });
+    }
+    Ok((PROTOCOL_VERSION_V3, core_build.to_string()))
+}
 
 /// v2 握手校验(bridge/control 共用)。校验顺序:协议版本 → 角色。
 /// 认证(token)由调用方以 [`validate_auth`] 先行完成并拒绝。
+#[allow(dead_code)]
 pub fn validate_hello_v2(
     protocol_version: u32,
     role: Role,

@@ -1,0 +1,250 @@
+=== baseline: workspace ===
+   Compiling caligo-core v0.1.0 (E:\stella\Caligo\crates\caligo-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.38s
+     Running unittests src\lib.rs (target\debug\deps\caligo_bridge-4f484b5d456d25b6.exe)
+
+running 13 tests
+test asyncrun::tests::ctx_layout_is_fixed ... ok
+test asyncrun::tests::enum_script_is_self_contained ... ok
+test obs::tests::head_pattern_scan_finds_mov_rip ... ok
+test register::tests::entry_callback_records_env_and_returns_exports ... ok
+test gate::tests::disabled_code_does_not_collide_with_known_result_codes ... ok
+test gate::tests::research_feature_is_off_by_default ... ok
+test asyncrun::tests::gated_build_rejects_async_run_before_any_state_or_memory_access ... ok
+test obs::tests::empty_report_is_serializable ... ok
+test exec::tests::gated_build_rejects_exec_run_before_any_state_or_memory_access ... ok
+test obs::tests::obs_report_json_shape ... ok
+test tests::report_json_contains_handshake_fields ... ok
+test tests::report_serialization_is_deterministic_for_same_input ... ok
+test register::tests::napi_module_layout_matches_observed_pattern ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\qq_entry_lab.rs (target\debug\deps\qq_entry_lab-5de7137e12d3d2d1.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\resident_lifecycle.rs (target\debug\deps\resident_lifecycle-f4cfcf23f6c5bc85.exe)
+
+running 11 tests
+test after_env_destroyed_business_dispatch_touches_nothing ... ok
+test bootstrap_once_and_listener_registered_on_owner ... ok
+test listener_removal_failure_quarantines_instead_of_fake_success ... ok
+test duplicate_send_request_id_is_not_redispatched ... ok
+test l07_foreign_thread_and_zero_context_rejected_before_any_host_api ... ok
+test l16_close_protocol_and_late_callbacks ... ok
+test bounded_queues_reject_explicitly_and_drain_batches ... ok
+test l17_hundred_close_rebuild_cycles_return_to_baseline ... ok
+test close_cancels_queued_and_reports_failure_vs_unknown ... ok
+test submit_from_worker_threads_executes_only_on_owner ... ok
+test l17_ten_thousand_probes_no_growth_and_counters_balance ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\main.rs (target\debug\deps\caligo_cli-5d7b239f6ac357b8.exe)
+
+running 10 tests
+test envscan::tests::find_qwords_positions ... ok
+test rtti::tests::contains_filter_selects_names ... ok
+test rtti::tests::find_all_finds_overlapping_and_all_positions ... ok
+test envscan::tests::scan_target_serialization ... ok
+test rtti::tests::rejects_col_without_self_reference ... ok
+test pe::tests::rejects_non_pe_bytes ... ok
+test winutil::tests::filetime_conversion_known_value ... ok
+test rtti::tests::finds_td_col_vtable_chain ... ok
+test winutil::tests::own_process_creation_time_is_plausible ... ok
+test winutil::tests::retained_allocs_are_recorded_not_freed ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\legacy_gate.rs (target\debug\deps\legacy_gate-8bacc3e1576082fb.exe)
+
+running 4 tests
+test research_gate_constant_matches_cli_exit_code_domain ... ok
+test disabled_notice_names_recovery_path ... ok
+test inject_refused_before_any_gate_or_process_access ... ok
+test inject_refused_even_without_any_arguments ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src\lib.rs (target\debug\deps\caligo_core-02e96bf45dd51789.exe)
+
+running 6 tests
+test journal::tests::roundtrip_record ... ok
+test journal::tests::crc32_known_vector ... ok
+test journal::tests::tail_half_record_is_truncated_and_reported ... ok
+test journal::tests::capacity_exhausted_refuses_without_truncating ... ok
+test journal::tests::mid_file_corruption_is_rejected_and_file_untouched ... ok
+test journal::tests::open_append_recover_roundtrip ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src\bin\caligod.rs (target\debug\deps\caligod-098bb12e75b791e7.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\onebotd.rs (target\debug\deps\onebotd-d9630c45604b1e1a.exe)
+
+running 2 tests
+test tests::build_send_args_group ... ok
+test tests::build_send_args_private ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\caligod_smoke.rs (target\debug\deps\caligod_smoke-46381199a1e6526d.exe)
+
+running 1 test
+test caligod_binary_runs_stops_cleanly ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests\daemon_chain.rs (target\debug\deps\daemon_chain-3fe54befc3df3d23.exe)
+
+running 4 tests
+test event_roundtrip_through_pipe_and_journal ... ok
+test t02_mid_frame_wake_preserves_stream_prefix ... FAILED
+test wrong_token_client_cannot_join_session ... ok
+test full_chain_send_event_and_stop ... ok
+
+failures:
+
+---- t02_mid_frame_wake_preserves_stream_prefix stdout ----
+[daemon] creating bridge pipe: \\.\pipe\caligo-k5-t02frag-37128-1791452116427887200-bridge
+[daemon] bridge created ok; creating control pipe: \\.\pipe\caligo-k5-t02frag-37128-1791452116427887200-control
+[daemon] both pipes created; spawning accept loops
+[daemon] Bridge session error: frame: magic 0x2274227b
+
+thread 't02_mid_frame_wake_preserves_stream_prefix' (28944) panicked at crates\caligo-core\tests\daemon_chain.rs:483:19:
+HealthAck 必须在补齐 payload 后到达(半帧前缀未丢): "GetOverlappedResult failed: Win32 error 233"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    t02_mid_frame_wake_preserves_stream_prefix
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+error: test failed, to rerun pass `-p caligo-core --test daemon_chain`
+=== baseline: core research ===
+   Compiling caligo-bridge v0.1.0 (E:\stella\Caligo\crates\caligo-bridge)
+   Compiling caligo-core v0.1.0 (E:\stella\Caligo\crates\caligo-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.70s
+     Running unittests src\lib.rs (target\debug\deps\caligo_core-a5b1911f2388a56d.exe)
+
+running 6 tests
+test journal::tests::roundtrip_record ... ok
+test journal::tests::crc32_known_vector ... ok
+test journal::tests::tail_half_record_is_truncated_and_reported ... ok
+test journal::tests::mid_file_corruption_is_rejected_and_file_untouched ... ok
+test journal::tests::capacity_exhausted_refuses_without_truncating ... ok
+test journal::tests::open_append_recover_roundtrip ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src\bin\caligod.rs (target\debug\deps\caligod-c13c2706554103f5.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src\bin\onebotd.rs (target\debug\deps\onebotd-dc86f8a88ef85c75.exe)
+
+running 2 tests
+test tests::build_send_args_group ... ok
+test tests::build_send_args_private ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\caligod_smoke.rs (target\debug\deps\caligod_smoke-a2f41f287ceddd07.exe)
+
+running 1 test
+test caligod_binary_runs_stops_cleanly ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+     Running tests\daemon_chain.rs (target\debug\deps\daemon_chain-2dd79c16f847b11c.exe)
+
+running 4 tests
+test event_roundtrip_through_pipe_and_journal ... ok
+test t02_mid_frame_wake_preserves_stream_prefix ... FAILED
+test full_chain_send_event_and_stop ... ok
+test wrong_token_client_cannot_join_session ... ok
+
+failures:
+
+---- t02_mid_frame_wake_preserves_stream_prefix stdout ----
+[daemon] creating bridge pipe: \\.\pipe\caligo-k5-t02frag-28056-1791452121555648400-bridge
+[daemon] bridge created ok; creating control pipe: \\.\pipe\caligo-k5-t02frag-28056-1791452121555648400-control
+[daemon] both pipes created; spawning accept loops
+[daemon] Bridge session error: frame: magic 0x2274227b
+
+thread 't02_mid_frame_wake_preserves_stream_prefix' (10076) panicked at crates\caligo-core\tests\daemon_chain.rs:483:19:
+HealthAck 必须在补齐 payload 后到达(半帧前缀未丢): "GetOverlappedResult failed: Win32 error 233"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    t02_mid_frame_wake_preserves_stream_prefix
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.43s
+
+error: test failed, to rerun pass `-p caligo-core --test daemon_chain`
+=== baseline: bridge research ===
+   Compiling caligo-bridge v0.1.0 (E:\stella\Caligo\crates\caligo-bridge)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.47s
+     Running unittests src\lib.rs (target\debug\deps\caligo_bridge-c00aae2a8f83540a.exe)
+
+running 10 tests
+test asyncrun::tests::ctx_layout_is_fixed ... ok
+test gate::tests::disabled_code_does_not_collide_with_known_result_codes ... ok
+test obs::tests::head_pattern_scan_finds_mov_rip ... ok
+test obs::tests::empty_report_is_serializable ... ok
+test asyncrun::tests::enum_script_is_self_contained ... ok
+test register::tests::entry_callback_records_env_and_returns_exports ... ok
+test register::tests::napi_module_layout_matches_observed_pattern ... ok
+test tests::report_json_contains_handshake_fields ... ok
+test tests::report_serialization_is_deterministic_for_same_input ... ok
+test obs::tests::obs_report_json_shape ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests\qq_entry_lab.rs (target\debug\deps\qq_entry_lab-0abcf29722ce6804.exe)
+
+running 7 tests
+test adapter_listener_ops_via_v8_ladder_and_resident_full_mode ... ok
+test close_completes_via_pump_and_close_callback ... ok
+test d8_v8_ladder_arm_and_stop_flow ... ok
+test d8_zero_current_refuses_v8_ladder_before_scope ... ok
+test staged_bootstrap_wake_and_owner_pump ... ok
+test stale_env_fails_freshness_gate_before_interrupt ... ok
+test zero_current_context_aborts_before_any_host_api ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests\resident_lifecycle.rs (target\debug\deps\resident_lifecycle-db52024a0b1854bb.exe)
+
+running 11 tests
+test after_env_destroyed_business_dispatch_touches_nothing ... ok
+test bootstrap_once_and_listener_registered_on_owner ... ok
+test bounded_queues_reject_explicitly_and_drain_batches ... ok
+test duplicate_send_request_id_is_not_redispatched ... ok
+test listener_removal_failure_quarantines_instead_of_fake_success ... ok
+test l17_hundred_close_rebuild_cycles_return_to_baseline ... ok
+test close_cancels_queued_and_reports_failure_vs_unknown ... ok
+test l07_foreign_thread_and_zero_context_rejected_before_any_host_api ... ok
+test l16_close_protocol_and_late_callbacks ... ok
+test submit_from_worker_threads_executes_only_on_owner ... ok
+test l17_ten_thousand_probes_no_growth_and_counters_balance ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests caligo_bridge
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

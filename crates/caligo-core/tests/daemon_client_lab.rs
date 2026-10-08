@@ -15,7 +15,7 @@ use caligo_bridge::daemon_client::{run_worker, DaemonClientConfig, WorkerExit};
 use caligo_bridge::host_adapter::{HostAdapter, HostOp, HostOpResult};
 use caligo_bridge::resident::{Resident, ResidentLimits};
 
-use caligo_core::daemon::{ControlClient, Daemon, DaemonConfig};
+use caligo_core::daemon::{BridgeClient, ControlClient, Daemon, DaemonConfig};
 use caligo_core::ipc::CoreToControlMsg;
 use caligo_core::runtime::RuntimeConfig;
 
@@ -76,6 +76,14 @@ fn unique_prefix(tag: &str) -> String {
 fn start_daemon(
     prefix: &str,
 ) -> (Arc<Daemon>, impl FnOnce() -> std::thread::JoinHandle<Result<(), caligo_core::daemon::SessionError>>) {
+    start_daemon_mode(prefix, false)
+}
+
+/// `fault_break_after_hello = true` → LAB 故障注入(见 DaemonConfig 字段文档)。
+fn start_daemon_mode(
+    prefix: &str,
+    fault_break_after_hello: bool,
+) -> (Arc<Daemon>, impl FnOnce() -> std::thread::JoinHandle<Result<(), caligo_core::daemon::SessionError>>) {
     let dir = std::env::temp_dir().join(format!("caligo-dcl-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = DaemonConfig {
@@ -86,6 +94,7 @@ fn start_daemon(
         core_build: caligo_core::CORE_BUILD.into(),
         expect_client_pid: 0, // LAB worker 与测试同进程;PID 校验在此禁用
         runtime: RuntimeConfig::default(),
+        test_fault_break_bridge_after_hello: fault_break_after_hello,
     };
     {
         let probe = dir.join("probe-write.txt");
@@ -119,6 +128,11 @@ fn start_daemon(
 }
 
 fn worker_config(prefix: &str, auth: &str) -> DaemonClientConfig {
+    worker_config_host(prefix, auth, 0xAA00_0001)
+}
+
+/// `host_nonce` 可注入:宿主身份判定(T05)用不同 nonce 构造不同宿主。
+fn worker_config_host(prefix: &str, auth: &str, host_nonce: u64) -> DaemonClientConfig {
     DaemonClientConfig {
         pipe_name: format!("{prefix}-bridge"),
         auth_token: auth.into(),
@@ -126,6 +140,8 @@ fn worker_config(prefix: &str, auth: &str) -> DaemonClientConfig {
         session_generation: 1,
         account: "10001".into(),
         module_baseline: "qq-9.9.33-52230".into(),
+        host_nonce,
+        host_process_created_utc: "2026-10-08T00:00:00Z".into(),
         heartbeat_ms: 500,
         reconnect_backoff_ms: 50,
     }
@@ -317,4 +333,312 @@ fn _rx_placeholder() -> mpsc::Receiver<caligo_bridge::resident::SendOutcome> {
 fn _ev_placeholder() -> mpsc::Receiver<caligo_bridge::resident::OwnedEvent> {
     let (_t, r) = mpsc::channel();
     r
+}
+
+// ---- T07(C4):断开前未确认事件必须跨连接重放对账 ----
+
+/// daemon 在 Hello 受理后不读在途字节直接断开(LAB 故障注入):worker 已
+/// 写入管道的事件随缓冲丢弃。修复后 worker 的跨连接未确认窗口在新连接上
+/// 重放该事件 → core 持久化 → control 可拉取;修复前窗口随连接重建而
+/// 清空,事件双侧丢失。
+#[test]
+fn t07_unacked_event_replays_after_break_before_consume() {
+    let _g = TEST_SERIAL.lock().unwrap();
+    let prefix = unique_prefix("t07replay");
+    let (daemon, make_runner) = start_daemon_mode(&prefix, true);
+    let auth = daemon.auth_token().to_string();
+    let runner = make_runner();
+    let resident = Arc::new(Resident::new(LabHost, ResidentLimits::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (ev_tx, ev_rx) = mpsc::channel::<caligo_bridge::resident::OwnedEvent>();
+    let (w_tx, w_rx) = mpsc::channel();
+    {
+        let cfg = worker_config(&prefix, &auth);
+        let resident = resident.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let r = run_worker(cfg, resident, &wake_false, _rx_placeholder(), ev_rx, stop);
+            w_tx.send(r).unwrap();
+        });
+    }
+    // 在 daemon 故障断开(Hello 受理后 300ms)之前把事件推给 worker:
+    // worker 写入管道,daemon 不读取 —— 断开时随缓冲丢弃。
+    ev_tx
+        .send(caligo_bridge::resident::OwnedEvent {
+            source: caligo_bridge::resident::EventSourceKind::Recv,
+            chat_type: 1,
+            peer_uid: "123456".into(),
+            peer_uin: "123456".into(),
+            sender_uin: "friend-a".into(),
+            native_id: "EVT-T07-1".into(),
+            text: "CALIGO-T07-REPLAY".into(),
+            msg_time: None,
+        })
+        .unwrap();
+
+    // 故障断开后 worker 重连;窗口重放必须让事件最终落地。
+    let control_name = pipe_names_from_prefix(&prefix).1;
+    let mut control = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Ok(c) = ControlClient::connect(&control_name, &auth, "lab-client") {
+            control = Some(c);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut control = control.expect("control connected(worker 已重连接入)");
+
+    let mut seen: Vec<(String, String)> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        if let CoreToControlMsg::EventsBatch { events } = control
+            .request(caligo_core::ipc::ControlMsg::DrainEvents { max: 10 })
+            .unwrap()
+        {
+            for e in events {
+                seen.push((e.native_id, e.text));
+            }
+            if seen.iter().any(|(id, _)| id == "EVT-T07-1") {
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        seen.iter().any(|(id, _)| id == "EVT-T07-1"),
+        "断开前未确认事件必须经重连重放对账; seen={seen:?}"
+    );
+
+    control.request(caligo_core::ipc::ControlMsg::Stop {}).unwrap();
+    let (counters, exit) = match w_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(v) => v,
+        Err(_) => panic!("worker exit timeout; snapshot={:?}", caligo_bridge::daemon_client::counters_snapshot()),
+    };
+    runner.join().unwrap().unwrap();
+    assert_eq!(exit, WorkerExit::CoreStopped);
+    assert!(counters.reconnects >= 1, "故障断开必须经历重连");
+}
+
+// ---- C5:Dispatch 不得在执行侧受理前上报 NativeStarted ----
+
+/// worker 未 bootstrap(resident 未就绪)时,Dispatch 只能挂 pending,
+/// 不得上报 NativeStarted;bootstrap 后补交受理才报 started 并完成结果。
+/// 修复前"先报 started 再提交"会把未执行项记成已开始(查询可见反例)。
+#[test]
+fn native_started_only_after_resident_accepts() {
+    let _g = TEST_SERIAL.lock().unwrap();
+    let prefix = unique_prefix("c5boundary");
+    let (daemon, make_runner) = start_daemon(&prefix);
+    let auth = daemon.auth_token().to_string();
+    let runner = make_runner();
+    let resident = Arc::new(Resident::new(LabHost, ResidentLimits::default()));
+    // 故意不 bootstrap:Dispatch 到达时 submit 返回 NotReady → pending。
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel::<caligo_bridge::resident::SendOutcome>();
+    let (w_tx, w_rx) = mpsc::channel();
+    {
+        let cfg = worker_config(&prefix, &auth);
+        let resident = resident.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let r = run_worker(cfg, resident, &wake_true, rx, _ev_placeholder(), stop);
+            w_tx.send(r).unwrap();
+        });
+    }
+    let control_name = pipe_names_from_prefix(&prefix).1;
+    let mut control = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Ok(c) = ControlClient::connect(&control_name, &auth, "lab-client") {
+            control = Some(c);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut control = control.expect("control connected");
+
+    // 提交 R1(受理即派发)。
+    let mut accepted = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let r = control
+            .request(caligo_core::ipc::ControlMsg::SendText {
+                request_id: "R-C5".into(),
+                target: serde_json::json!({"account":"10001","kind":"private","peer":"123456"}),
+                text: "CALIGO-C5-BOUNDARY".into(),
+                deadline_ms: 30_000,
+            })
+            .unwrap();
+        if matches!(r, CoreToControlMsg::SendAccepted { .. }) {
+            accepted = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(accepted, "R-C5 未被受理");
+
+    // resident 未就绪窗口:状态必须停在 DispatchIntent,不得出现 NativeStarted。
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    let mut saw_started = false;
+    while Instant::now() < deadline {
+        if let CoreToControlMsg::QueryResult { state, .. } = control
+            .request(caligo_core::ipc::ControlMsg::QueryRequest { request_id: "R-C5".into() })
+            .unwrap()
+        {
+            let s = state.unwrap_or_default();
+            if s.contains("NativeStarted") {
+                saw_started = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !saw_started,
+        "resident 未就绪时不得上报 NativeStarted(C5 真实开始边界)"
+    );
+
+    // bootstrap → pending 补交受理 → started → 结果确认。
+    resident.bootstrap().unwrap();
+    let mut confirmed = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let _ = resident.drain();
+        for outcome in resident.take_results() {
+            let _ = tx.send(outcome);
+        }
+        if let CoreToControlMsg::QueryResult { state, native_id, .. } = control
+            .request(caligo_core::ipc::ControlMsg::QueryRequest { request_id: "R-C5".into() })
+            .unwrap()
+        {
+            if native_id.as_deref() == Some("NM-1")
+                || state.as_deref().map(|s| s.contains("ConfirmedSuccess")).unwrap_or(false)
+            {
+                confirmed = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(confirmed, "bootstrap 后 pending 必须补交并完成全链");
+
+    control.request(caligo_core::ipc::ControlMsg::Stop {}).unwrap();
+    let (_, exit) = match w_rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(v) => v,
+        Err(_) => panic!("worker exit timeout; snapshot={:?}", caligo_bridge::daemon_client::counters_snapshot()),
+    };
+    runner.join().unwrap().unwrap();
+    assert_eq!(exit, WorkerExit::CoreStopped);
+}
+
+// ---- T03+T05(C1/C9):重连推进连接代次;换宿主必须拒绝 ----
+
+/// worker A(宿主 N1)接入 → daemon 故障断开 → 同宿主自动重连:
+/// 连接代次必须递增且 actor 回到 Active(T03)。
+/// 之后 worker A 退出,同账号同代次但不同宿主 N2 的连接必须被拒绝(T05);
+/// 同宿主 N1 重连受理且业务可继续。
+#[test]
+fn reconnect_requires_same_host_and_advances_epoch() {
+    let _g = TEST_SERIAL.lock().unwrap();
+    let prefix = unique_prefix("t03t05host");
+    let (daemon, make_runner) = start_daemon_mode(&prefix, true);
+    let auth = daemon.auth_token().to_string();
+    let runner = make_runner();
+    let resident = Arc::new(Resident::new(LabHost, ResidentLimits::default()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (w_tx, w_rx) = mpsc::channel();
+    {
+        let cfg = worker_config_host(&prefix, &auth, 0x1111_1111);
+        let resident = resident.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let r = run_worker(cfg, resident, &wake_false, _rx_placeholder(), _ev_placeholder(), stop);
+            w_tx.send(r).unwrap();
+        });
+    }
+    let control_name = pipe_names_from_prefix(&prefix).1;
+    let mut control = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Ok(c) = ControlClient::connect(&control_name, &auth, "lab-client") {
+            control = Some(c);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut control = control.expect("control connected");
+
+    // T03:故障断开后同宿主重连 —— 代次递增 + actor Active。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && daemon.connection_epoch() < 2 {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(daemon.connection_epoch() >= 2, "重连必须推进连接代次(T03)");
+    let mut active = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let r = control
+            .request(caligo_core::ipc::ControlMsg::SendText {
+                request_id: "R-T03".into(),
+                target: serde_json::json!({"account":"10001","kind":"private","peer":"123456"}),
+                text: "CALIGO-T03-RECONNECT".into(),
+                deadline_ms: 30_000,
+            })
+            .unwrap();
+        if matches!(r, CoreToControlMsg::SendAccepted { .. }) {
+            active = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(active, "同宿主重连后 actor 必须 Active(T03);epoch={}", daemon.connection_epoch());
+
+    // worker A 干净退出 → daemon 降级,accept 循环继续。
+    stop.store(true, Ordering::Relaxed);
+    let (_, exit) = w_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(exit, WorkerExit::LocalStop);
+    std::thread::sleep(Duration::from_millis(300)); // 断开被 daemon 处理
+
+    let (bridge_name, _) = pipe_names_from_prefix(&prefix);
+
+    // T05(反例):同账号同代次、不同宿主 nonce → 必须拒绝。
+    match BridgeClient::connect(
+        &bridge_name, &auth, "t05-bridge", 1, "10001", "qq-9.9.33-52230",
+        0x2222_2222, "2026-10-08T00:00:00Z",
+    ) {
+        Err(_) => {} // HelloAck accepted=false → connect Err(即拒绝)
+        Ok(_) => panic!("不同宿主的同代次连接必须被拒绝(T05)"),
+    }
+
+    // T05(正例):同宿主 N1 重连 → 受理;业务继续(Active)。
+    // (前次连接的排水窗可能短暂 BUSY:轮询重试。)
+    let mut bridge = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        match BridgeClient::connect(
+            &bridge_name, &auth, "t05-bridge", 1, "10001", "qq-9.9.33-52230",
+            0x1111_1111, "2026-10-08T00:00:00Z",
+        ) {
+            Ok(b) => {
+                bridge = Some(b);
+                break;
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+    let mut bridge = bridge.expect("同宿主重连必须受理(T05)");
+    let _ = &mut bridge;
+    let r = control
+        .request(caligo_core::ipc::ControlMsg::SendText {
+            request_id: "R-T05".into(),
+            target: serde_json::json!({"account":"10001","kind":"private","peer":"123456"}),
+            text: "CALIGO-T05-SAMEHOST".into(),
+            deadline_ms: 30_000,
+        })
+        .unwrap();
+    assert!(matches!(r, CoreToControlMsg::SendAccepted { .. }), "同宿主重连后业务必须可继续: {r:?}");
+
+    control.request(caligo_core::ipc::ControlMsg::Stop {}).unwrap();
+    runner.join().unwrap().unwrap();
 }
