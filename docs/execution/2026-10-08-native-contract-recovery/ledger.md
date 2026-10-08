@@ -53,6 +53,7 @@ P1 首轮交付的实质进展（细节见两份合同文档）：
 | 2026-10-08 | P1 | 两份 R3 静态合同（thread/lifetime）+ 外部证据树 phaseA–G(165 函数)+3 个字节级扫描脚本;D32138 语义更正;TLS 提交目标拓扑定位;+0x60 候选淘汰表;LoginRequestImpl 观察者形状 | `qq-native-thread-contract.md`、`qq-native-lifetime-contract.md`、`E:/stella/_reference/qq-native-r3-p1-20261008/` |
 | 2026-10-08 | P1 伴生 | **发现并修复 D9 遗留缺陷**:`qq_entry::bootstrap` 把局部 UTF-8 String 指针登记为全局报告路径,悬空后被按 UTF-16 读取,LAB 运行在 CWD 产生乱码名诊断转储（10 个文件入库混入 P3 提交,已清理）;修复为进程生存期宽字符副本 | 提交 910dc5b |
 | 2026-10-08 | P1 受控观测 | 新增 `caligo-cli observe-msf`（外部只读:OpenProcess 仅 QUERY\|VM_READ,零注入/零写入/零 QQ 函数调用,不消耗实例首次 bootstrap）。读:MSF 双单例槽(+0x50/+0x60 transport/控制块计数)、执行器单例、全线程 TLS 提交目标(经验校准 TEB 布局,本机实证 TlsSlots@0x1480 非 0xE10)。self-test 全机械验证通过(含植入 pair 命中路径) | `crates/caligo-cli/src/observe_msf.rs`;`evidence/p1-observe-selftest.json` |
+| 2026-10-08 | P1 现场闭合 | **实例 47524**（创建 2026-10-08T11:58:14Z UTC,9.9.33-52230,锚点命中）三次外部只读采样 t1/t2/t3:this+0x60 transport **已安装**（vtable RVA 0x41403B8,slot7=**0x1B4E4EC** 发送实际目标,未连接时同步失败返回 0）;全局 dispatcher（0x67510A8,发送链提交目标）与 41 个 TLS dispatcher**同类**（vtable 0x43B6088,slot0=0x31F8CEE,入队+owner-TID 跨线程唤醒）;执行器单例 0x750088 **未构造**;MSFCoreService **未构造**（运行时 switch 选了 MSFService——首个运行时分支证据）。phaseH/I/J 静态反编译交叉定性 | `evidence/p1-observe-field-47524-t{1,2,3}.json`;`docs/research/qq-native-thread-contract.md` §10 |
 
 ### P3 反例与验证（LAB,2026-10-08）
 
