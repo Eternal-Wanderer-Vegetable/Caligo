@@ -1,0 +1,31 @@
+{
+  "kind": "caligo-observe-msf-v1",
+  "pid": 2948,
+  "observed_at_unix_ms": 1791473952843,
+  "target_process_created_unix_ms": 1791473881856,
+  "wrapper": null,
+  "wrapper_sha256_expected": "63112ab9161e127f5f7e17998a7196e143808923fb54cbbf7b4e21426187a5f0",
+  "singletons": [],
+  "executor_static": {
+    "storage_rva": 7667848,
+    "vptr": null,
+    "vptr_rva": null,
+    "vptr_matches_anchor": false
+  },
+  "global_dispatcher": null,
+  "manager": null,
+  "tls": {
+    "index_storage_rva": 108344404,
+    "index_raw": null,
+    "index_valid": false,
+    "calibration": [
+      "校准: 本进程 TEB=0xe4bbf8b000 idx=1 magic=0xb5ca11a5eed0001",
+      "校准: 魔数命中 TEB+0x1488",
+      "校准: 非经典内联布局 TlsSlots@0x1480"
+    ]
+  },
+  "threads": [],
+  "notes": [
+    "wrapper.node 不在目标模块表中(目标不是加载了 wrapper 的 QQ 进程?)"
+  ]
+}

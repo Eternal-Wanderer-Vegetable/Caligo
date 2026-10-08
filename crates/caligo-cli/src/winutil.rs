@@ -727,7 +727,7 @@ pub unsafe fn inject_and_probe(
                 native_exit = Some(code);
             }
 
-            // 可选:G2 接收监听(caligo_g2_listen_run;P6):+0x140 交换 + 转发,
+            // 可选:G2 接收监听(caligo_g2_listen_run;P6):begin_node 交换(路线 B),
             // 有界窗口同步返回。零发送。
             let mut g2_exit: Option<u32> = None;
             if let Some(g2_path) = g2_run_report {

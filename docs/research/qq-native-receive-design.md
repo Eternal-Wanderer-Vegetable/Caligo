@@ -89,3 +89,85 @@ G2 探针在 31208 上实测：**Service 单例的 +0x140/+0x170/+0x178 全为 0
 ## 哨兵 dump（2026-10-08 深夜续,决定性数据）
 
 S=0x260230eeee0 = {+0x00 = 0x260232e9720(= Manager+0x168,内嵌节点 E), +0x08 = 0x260231a0ca0(堆节点1), +0x10 = 0x10}。OnRecv 从 S 起沿 +0x08 走(prev 方向)、终止于 Manager+0x178、listener=*(node+0x20)。下一步:dump 节点1(0x260231a0ca0)头 + 完整链走查定插入方向与锁;g2.rs 链表注册按本节数据重写(+0x140 交换实现保留弃用)。
+
+## 7. 决定性修正:陈旧对象、SC 定位链与 libc++ __tree 容器(2026-10-08 续)
+
+### 7.1 §6 的"Manager 实例"是陈旧内存(负结果,证据 observe-20016-t4/t5/t7/t9/t10)
+
+对 0x260232e95b8 的全区域 dump 与静态比对**推翻**其"活 Manager"身份:
+
+- 布局不符:ctor `1B3EADC`(R3 phaseM 汇编)构造后 `+0x08` 必为**字节 1**、
+  `+0x10..+0x40` 为 0;该对象 `+0x08` = OnRecv 函数指针、`+0x00/+0x30/+0x60`
+  三份 `{vptr, OnRecv指针, ...}` 0x30 周期记录;
+- vtable `0x413F7A8` 全 .text 仅两处 LEA 引用:ctor(`0x1b3eaf6`)与
+  dtor(`0x1b3ece0`)——不存在第二个构造点,该值只能是残留;
+- OnRecv 推进函数 `45e5` 字节解码(见 §7.3)对该对象的容器**不终止**
+  (等价模拟 4096 跳)——OnRecv 不可能在其上运行;
+- 哨兵链穿透 0x1A0 边界(链途经 M+0x568/M+0x968 等)——工厂分配尺寸
+  0x1A0(`b78946: mov ecx,0x1a0; call 分配器`),越界即异物。
+
+其 +0x170 的 64+ 节点环(prev/next 互指、节点内含命令名字符串)判定为
+**复用该内存的别的活结构**,与本设计无关。
+
+### 7.2 活 Manager 定位链(静态闭环,已实现于 observe-msf 与 g2.rs)
+
+```
+SC ctor 0xB78380 (vptr 0x3FD3E28,ctor/dtor 独占引用)
+  └─ lea rcx,[rsi+0x150]; call 0xB78946     (SC+0x150 = 工厂 out 槽)
+工厂 0xB78946: alloc 0x1A0; call 0x1B3EADC; [out] = Manager
+```
+
+→ **活 Manager = \*(SC+0x150)**,验 `*(Manager) == wrapper+0x413F7A8`。
+transport 反查(owner+0x110)在 20016 上零命中(严格判据),弃用。
+
+### 7.3 +0x170 容器 = libc++ `__tree`(std::map/set)
+
+- 容器 ctor `0x3cea`(经 `0x3ba6` cookie 包装)字节解码:
+  `[C]=C+0x08; [C+0x08..0x18]=0` ≡ `{begin_node→end_node, root=0, size=0}`;
+- OnRecv 终点 `M+0x178` = **内嵌 end_node 地址**(libc++ `end()` 迭代器);
+- 推进函数 `45e5` 字节解码 ≡ libc++ `__tree_next`:
+  `m=[n+8](right); m≠0 ? tree_min(m)(沿[x+0]即left走到0) : 沿[parent@+0x10]爬升至[p]==n`;
+  节点几何 `{left@0, right@8, parent@0x10, is_black@0x18, value@0x20}`;
+- OnRecv 三循环(推送 slot6 +0x30 / 请求完成 slot5 +0x28 / 请求分派
+  slot9 +0x48)全部 = 从 `*(M+0x170)` 到 end_node 的**中序遍历**。
+
+§6 "链方向"之谜的最终解释:按 +0x08 盲走实为树的 right 子链/或复用内存
+的链表,不是遍历序;4096 跳不终止正是"非树结构冒充树"的表现。
+
+### 7.4 路线 B(最终路线):begin_node 单指针交换
+
+插入 RB 树需面对 libc++ 重平衡,不采用。最小触碰:
+
+1. `B0 = *(M+0x170)`(现 begin_node = 全树最左,`B0.left == 0`);
+2. 原子写 `*(M+0x170) = Ours`,其中
+   `Ours = {left:0, right:B0, parent:0, is_black:1, value@+0x20: {我们的监听器对象, 0...}}`;
+3. OnRecv:`n = Ours ≠ end_node` → 通知我们(`tree_min(B0)==B0`,B0 本为最左);
+   `__tree_next(Ours) = tree_min(B0) = B0` → **其后原序原样**;
+   空树时 `right = end_node` 同样成立(`tree_min(end_node)=end_node`→终止);
+4. 窗口结束:座位仍是 Ours → 写回 B0;被 QQ 覆写(begin 重算)→ **不回写**
+   stale B0(会搁浅新插入节点),如实记录座位丢失;
+5. QQ 窗口内插入:BST 插入从 root 出发不受影响;libc++ 重算 begin 会覆盖
+   我们的座位(丢失可检测);若比较优化先解引用 begin(即 Ours),其 value
+   零值按空键处理,无越界解引用。
+
+slot6 处理器:捕获 msg pair 对象头 0x40 字节入环,无转发需求(QQ 监听器
+被原生遍历通知)。slot5/slot9 = no-op。
+
+LAB(`caligo-bridge::g2::tests`,假宿主 = 45e5 忠实模拟 + OnRecv 等价遍历):
+- `route_b_swap_preserves_order_and_restores`:挂钩后访问序 `[ours, 3,5,8]`,
+  恢复对称 ✓
+- `route_b_empty_tree_terminates_after_ours`:空树通知一次后终止 ✓
+- `route_b_concurrent_insert_recomputes_begin_seat_loss_detected`:座位丢失
+  检测且不回写 ✓
+- 全仓 22 套件 0 失败。
+
+### 7.5 运行时复验清单(待 QQ 重登录,阻塞项)
+
+QQ 主进程(wrapper 加载者)于本轮分析中途退出(20016 消失,现存 5 进程
+均未加载 wrapper = 登录窗状态)。重登录后:
+
+1. `observe-msf --pid <新PID>`:验 SC 扫描命中、`*(SC+0x150)` vptr 过验、
+   容器 `{begin, root, size}` 快照合理(证据 t 系列);
+2. 注入 + `--g2-run-report`:验 g2_manager/g2_swap/g2_restore 阶段全 true、
+   无座位丢失;
+3. 采样:10 私聊 + 10 群唯一编号消息 → captured fixture 回填 P5 字段验证。

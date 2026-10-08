@@ -1,33 +1,54 @@
-//! G2 接收:单观察者指针交换(设计:`qq-native-receive-design.md` §2b)。
+//! G2 接收:Manager+0x170 通知树 begin_node 单指针交换。
 //!
-//! OnRecv(`1B41AE6`)在 push 路径上通知 `this+0x140` 的单观察者:
-//! `obs->vtbl[1](obs, &msg_pair)`(msg_pair = {obj, ctrl} 借用,调用期内有效)。
-//! 本模块:保存原观察者 O0 → 原子写入自有对象(slot1 = 复制 + 转发)→
-//! 窗口结束恢复 O0。**零发送**;回调边界内不落盘、不传播 panic。
+//! 静态证据链(R2/R3 反编译+字节解码,详见 `qq-native-receive-design.md` §7):
+//! - 通知结构属 `msf::internal::Manager`(vtable `0x413F7A8`,大小 0x1A0,
+//!   唯一构造链 SC ctor `0xB78380` → 工厂 `0xB78946` → ctor `0x1B3EADC`);
+//! - Manager+0x170 = libc++ `__tree` 容器 `{begin_node@+0x170, end_node@+0x178,
+//!   size@+0x180}`,end_node 内嵌;
+//! - OnRecv(`1B41AE6`)推送循环:`for (n = *(M+0x170); n != M+0x178;
+//!   n = __tree_next(n)) notify_listener(*(n+0x20))`,回调 vtbl slot6(+0x30);
+//!   `45e5` 字节码解码 ≡ libc++ `__tree_next`(`{left@0,right@8,parent@0x10}`,
+//!   nil=nullptr);slot5(+0x28)/slot9(+0x48) 循环走同一树。
+//!
+//! 本模块(路线 B,主路线):保存原 begin_node B0 → 原子写入伪树节点
+//! `Ours{left:0, right:B0, listener@+0x20 = 我们的对象}` → OnRecv 首个
+//! 通知我们(`tree_min(B0)==B0`,因 B0 本为最左)、其后原序不变 → 窗口结束
+//! 验证后写回 B0。QQ 自身监听器被原生遍历通知,无需转发。
+//! 路线 A(+0x140 单观察者交换)保留为弃用代码(§8),运行时不再选择。
 //!
 //! 纪律:
-//! - 转发保真:O0 的 slot1 在我们的处理器内被调用,QQ 行为不变;
 //! - 证据:msg 对象头 0x40 字节 opaque hexdump(captured fixture,P5 字段
 //!   验证回填用)——**不解析、不猜字段**;
-//! - 环形缓冲:回调只做内存拷贝,落盘由观测线程在窗口结束后统一进行。
+//! - 环形缓冲:回调只做内存拷贝,落盘由运行线程在窗口结束后统一进行;
+//! - 伪节点 value(+0x20 起)除 listener 指针外全零:若窗口内 QQ 插入节点
+//!   触发 begin 重算/键比较,零值按"空键"处理,不会解引用越界;
+//!   若 begin 被 QQ 覆写(座位丢失),**不回写** stale B0(会搁浅 QQ 新节点),
+//!   如实记录。
 
 use core::ffi::c_void;
-use std::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
-/// getter 机器级原型(72DE38;同 g1)。
+/// getter 机器级原型(72DE38;同 g1,作 wrapper 身份核验)。
 type GetterFn = unsafe extern "system" fn(out: *mut ServicePair) -> *mut ServicePair;
 
-/// OnRecv 通知点:MSFService 对象 +0x140(单观察者指针)。
-pub const FIELD_OBSERVER: usize = 0x140;
 /// GETTER_RVA(同 g1)。
 const GETTER_RVA: usize = 0x72DE38;
 const ANCHOR_SVC_VTBL_RVA: usize = 0x3F6DED8;
 
+/// SC vtable RVA(0xB78380 ctor 独占;全 .text 仅 ctor/dtor 两处引用)。
+const SC_VTBL_RVA: usize = 0x3FD3E28;
+/// Manager vtable RVA(RTTI msf::internal::Manager;ctor 1B3EADC/dtor 独占)。
+const MANAGER_VTBL_RVA: usize = 0x413F7A8;
+/// Manager = *(SC+0x150)(SC ctor:`lea rcx,[rsi+0x150]; call 工厂`)。
+const SC_FIELD_MANAGER: usize = 0x150;
+/// libc++ __tree 容器位:begin_node@+0x170,end_node(内嵌)@+0x178,size@+0x180。
+const FIELD_BEGIN_NODE: usize = 0x170;
+
 pub const OK: u32 = 0;
-pub const ERR_NO_OBSERVER: u32 = 21;
+pub const ERR_NO_OBSERVER: u32 = 21; // getter/锚点失败(沿用 v1 语义)
 pub const ERR_SWAP_STATE: u32 = 22;
-pub const ERR_NO_INNER: u32 = 23;
+pub const ERR_NO_MANAGER: u32 = 24; // SC/Manager 定位失败
 
 #[repr(C)]
 pub struct G2Ctx {
@@ -38,7 +59,7 @@ pub struct G2Ctx {
 
 /// 捕获环(回调侧 push,窗口结束 drain)。有界:满则丢弃并计数。
 struct Ring {
-    items: Mutex<Vec<(u64, u64)>>, // (msg_obj_ptr 前 8 字节, 次八字节)
+    items: Mutex<Vec<(u64, u64)>>, // (msg_obj 头 8 字节, 次八字节)
     dropped: AtomicU64,
     pushed: AtomicU64,
     cap: usize,
@@ -55,31 +76,32 @@ fn ring() -> &'static Ring {
     })
 }
 
-/// O0(原观察者)——交换期间由本模块独占写。
-static O0: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
-
-/// 我们的单一对象实例:vptr 槽 + 冗余(地址稳定性由 static 保证)。
+/// 我们的单一监听器对象(vptr 槽;地址稳定性由 static 保证)。
 static mut OUR_OBJECT: [*mut c_void; 4] = [core::ptr::null_mut(); 4];
 static OUR_OBJECT_READY: AtomicU64 = AtomicU64::new(0);
 
-/// 我们的 vtable:slot0..slot15;slot1 = 处理器,其余 = no-op。
+/// 我们的 vtable:slot5(+0x28)请求完成=no-op,slot6(+0x30)推送=处理器,
+/// slot9(+0x48)请求分派=no-op;其余槽位合法 no-op(未定证 QQ 只用这三槽)。
 static mut OUR_VTABLE: [usize; 16] = [0; 16];
 
-unsafe extern "system" fn g2_noop(_this: *mut c_void) -> u64 {
-    0
-}
+/// 伪树节点(libc++ __tree_node 几何):{left@0, right@8, parent@0x10,
+/// is_black@0x18, value@0x20};value.first = 监听器对象,其余置零。
+static mut OUR_NODE: [u64; 5] = [0; 5];
+static OUR_NODE_READY: AtomicU64 = AtomicU64::new(0);
 
 unsafe extern "system" fn g2_noop2(_a: *mut c_void, _b: *mut c_void) {}
 
-/// slot1 处理器:捕获 msg 对象头 → 原样转发 O0。
-unsafe extern "system" fn g2_slot1(_this: *mut c_void, msg_pair: *mut c_void) {
-    // SAFETY: 边界内只做有界内存读 + ring 拷贝 + 转发;panic 隔离。
+unsafe extern "system" fn g2_noop3(_a: *mut c_void, _b: *mut c_void, _c: *mut c_void) {}
+
+/// slot6 处理器:捕获 msg 对象头 → 环。无转发需求(QQ 监听器被原生遍历通知)。
+unsafe extern "system" fn g2_slot6(_this: *mut c_void, msg_pair: *mut c_void) {
+    // SAFETY: 边界内只做有界内存读 + ring 拷贝;panic 隔离。
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if !msg_pair.is_null() {
             let pair = *(msg_pair as *const [u64; 2]); // {obj, ctrl}
             let obj = pair[0] as usize;
             if obj != 0 {
-                // 捕获头 0x40 字节(opaque;16 qword)。
+                // 捕获头 0x40 字节(opaque;8 qword)。
                 let mut head = [0u64; 8];
                 for (i, h) in head.iter_mut().enumerate() {
                     // SAFETY: QQ 构造的 msg 对象;读失败保持 0。
@@ -96,36 +118,95 @@ unsafe extern "system" fn g2_slot1(_this: *mut c_void, msg_pair: *mut c_void) {
                 } else {
                     r.dropped.fetch_add(1, Ordering::Relaxed);
                 }
-                drop(q);
             }
-        }
-        // 转发 O0(slot1 原语义)。
-        let o0 = O0.load(Ordering::Acquire);
-        if !o0.is_null() {
-            let vptr = unsafe { core::ptr::read_volatile(o0 as *const usize) };
-            let slot = unsafe { core::ptr::read_volatile((vptr + 8) as *const usize) };
-            let f: unsafe extern "system" fn(*mut c_void, *mut c_void) =
-                unsafe { core::mem::transmute(slot) };
-            unsafe { f(o0, msg_pair) };
         }
     }));
 }
 
-fn init_object() -> *mut c_void {
-    // SAFETY: OUR_OBJECT/OUR_VTABLE 仅在启动阶段由本函数初始化一次
+fn init_object_and_node() -> (*mut c_void, *mut u64) {
+    // SAFETY: OUR_OBJECT/OUR_VTABLE/OUR_NODE 仅在启动阶段由本函数初始化一次
     // (单远程线程;READY 原子闸防重入),此后只读。
     unsafe {
         if OUR_OBJECT_READY.load(Ordering::Acquire) == 0 {
-            OUR_VTABLE[0] = g2_noop as usize;
-            OUR_VTABLE[1] = g2_slot1 as usize;
-            for slot in OUR_VTABLE.iter_mut().skip(2) {
+            for slot in OUR_VTABLE.iter_mut() {
                 *slot = g2_noop2 as usize;
             }
+            OUR_VTABLE[0] = g2_noop2 as usize; // slot0
+            OUR_VTABLE[5] = g2_noop2 as usize; // slot5 +0x28 请求完成
+            OUR_VTABLE[6] = g2_slot6 as usize; // slot6 +0x30 推送
+            OUR_VTABLE[9] = g2_noop3 as usize; // slot9 +0x48 请求分派
             OUR_OBJECT[0] = OUR_VTABLE.as_mut_ptr() as *mut c_void;
             OUR_OBJECT_READY.store(1, Ordering::Release);
         }
-        OUR_OBJECT.as_mut_ptr() as *mut c_void
+        if OUR_NODE_READY.load(Ordering::Acquire) == 0 {
+            OUR_NODE = [0; 5]; // left/parent/value 其余位全零
+            OUR_NODE_READY.store(1, Ordering::Release);
+        }
+        (
+            OUR_OBJECT.as_mut_ptr() as *mut c_void,
+            OUR_NODE.as_mut_ptr() as *mut u64,
+        )
     }
+}
+
+/// 进程内定位活 Manager:扫描自身 MEM_PRIVATE 提交区找 SC vptr needle →
+/// m = *(SC+0x150),验 *(m) == Manager vptr。返回 (manager, 候选数)。
+fn locate_manager(wrapper_base: usize) -> Option<(usize, usize)> {
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS,
+        VirtualQuery,
+    };
+    let needle = (wrapper_base + SC_VTBL_RVA) as u64;
+    let mut addr = 0x10000usize;
+    let max = 0x7FFFFFFEFFFFusize;
+    let mut candidates = 0usize;
+    while addr < max {
+        // SAFETY: 自进程查询;mbi 由系统填写。
+        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
+        let q = unsafe {
+            VirtualQuery(
+                addr as *const c_void,
+                &mut mbi,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
+        if q == 0 {
+            break;
+        }
+        let region = mbi.RegionSize as usize;
+        let base_addr = mbi.BaseAddress as usize;
+        let protect = mbi.Protect;
+        if mbi.State == MEM_COMMIT
+            && mbi.Type == MEM_PRIVATE
+            && region >= 0x1000
+            && region < 0x4000_0000
+            && protect & PAGE_GUARD == 0
+            && protect & PAGE_NOACCESS == 0
+        {
+            // SAFETY: 已提交可读私有内存的进程内读取;越界不可读由调用侧
+            // 前提(commit+可读 protect)保证,单 qword 对齐读。
+            let end = base_addr + region;
+            let mut p = base_addr;
+            while p + 8 <= end {
+                let v = unsafe { (p as *const u64).read_volatile() };
+                if v == needle {
+                    candidates += 1;
+                    let m = unsafe { ((p + SC_FIELD_MANAGER) as *const u64).read_volatile() as usize };
+                    let vptr = if m != 0 {
+                        unsafe { (m as *const u64).read_volatile() }
+                    } else {
+                        0
+                    };
+                    if vptr == (wrapper_base + MANAGER_VTBL_RVA) as u64 {
+                        return Some((m, candidates));
+                    }
+                }
+                p += 8;
+            }
+        }
+        addr = base_addr + region;
+    }
+    None
 }
 
 /// 阶段日志(同 g1 独立实现)。
@@ -163,11 +244,26 @@ fn stage(path: *const u16, stage: &str, ok: bool, detail: &str) {
     }
 }
 
-/// G2 监听运行(有界同步;同 g1_native_run 形态):
-/// 1. getter 租约 → anchor 核验;
-/// 2. 读 O0 = *(obj+0x140)(null → 失败;记录 O0 vptr);
-/// 3. 原子交换为我们的对象 → 观测窗口(capture 环就绪,回调转发 O0);
-/// 4. 恢复 O0 → drain 环到 JSONL(captured fixture)。
+fn hex64(v: u64) -> String {
+    format!("{v:#x}")
+}
+
+fn report_path_str(path: *const u16) -> String {
+    // SAFETY: loader 写入的 NUL 结尾 UTF-16。
+    unsafe {
+        let mut len = 0usize;
+        while len < 32 * 1024 && *path.add(len) != 0 {
+            len += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(path, len))
+    }
+}
+
+/// G2 监听运行(有界同步;路线 B):
+/// 1. getter 租约 + 锚点核验(wrapper 身份);
+/// 2. 进程内 SC 扫描 → 活 Manager;
+/// 3. 读 B0 = *(M+0x170) → 原子写伪节点 → 观测窗口;
+/// 4. 验证后写回(座位被 QQ 覆写则不回写,如实记录)→ drain 环。
 ///
 /// # Safety
 ///
@@ -178,7 +274,7 @@ pub unsafe fn g2_listen_run(ctx: *const G2Ctx) -> u32 {
         unsafe { ((*ctx).wrapper_base, (*ctx).report_path, (*ctx).observe_ms) };
     let observe_ms = observe_ms.min(120_000).max(500);
 
-    // 租约。
+    // wrapper 身份核验(getter 租约 + 锚点;沿用 v1 机械)。
     let getter: GetterFn = unsafe { core::mem::transmute(wrapper_base + GETTER_RVA) };
     let mut pair = ServicePair { obj: core::ptr::null_mut(), ctrl: core::ptr::null_mut() };
     // SAFETY: getter 契约(R2 §4)。
@@ -192,28 +288,53 @@ pub unsafe fn g2_listen_run(ctx: *const G2Ctx) -> u32 {
         stage(report_path, "g2_adopt", false, "anchor mismatch");
         return ERR_SWAP_STATE;
     }
-    stage(report_path, "g2_adopt", true, &format!("obj={}", pair.obj as u64));
+    stage(report_path, "g2_adopt", true, &format!("svc={}", pair.obj as u64));
 
-    // O0 读取 + 交换。
-    let o0: *mut c_void =
-        unsafe { core::ptr::read_volatile((pair.obj as usize + FIELD_OBSERVER) as *mut *mut c_void) };
-    if o0.is_null() {
-        stage(report_path, "o0", false, "*(obj+0x140) null (observer not registered yet)");
-        return ERR_NO_OBSERVER;
-    }
-    let o0_vptr = unsafe { core::ptr::read_volatile(o0 as *const u64) };
+    // 活 Manager 定位(SC+0x150 正路)。
+    let Some((manager, sc_n)) = locate_manager(wrapper_base) else {
+        stage(report_path, "g2_manager", false, "SC scan found no verified Manager");
+        return ERR_NO_MANAGER;
+    };
+    let m_vptr = unsafe { core::ptr::read_volatile(manager as *const u64) };
     stage(
         report_path,
-        "o0",
+        "g2_manager",
         true,
-        &format!("addr={} vptr={} vptr_rva={:#x}", o0 as u64, hex64(o0_vptr), (o0_vptr as usize).wrapping_sub(wrapper_base)),
+        &format!(
+            "manager={} vptr={} sc_candidates={sc_n}",
+            manager as u64,
+            hex64(m_vptr)
+        ),
     );
-    let ours = init_object();
-    // 原子交换:x64 对齐指针的 xchg 为单指令;此处读-改-写经 AtomicPtr。
-    let slot = (pair.obj as usize + FIELD_OBSERVER) as *mut AtomicPtr<c_void>;
-    let prev = unsafe { (*slot).swap(ours, Ordering::AcqRel) };
-    O0.store(o0, Ordering::Release);
-    stage(report_path, "swap", prev == o0, &format!("prev={}", prev as u64));
+
+    // 容器快照 + 交换。
+    let end_node = (manager + FIELD_BEGIN_NODE + 8) as u64;
+    let begin_slot = (manager + FIELD_BEGIN_NODE) as *mut AtomicU64;
+    let b0 = unsafe { (*begin_slot).load(Ordering::Acquire) };
+    let root = unsafe { core::ptr::read_volatile((end_node as usize) as *const u64) };
+    let size = unsafe { core::ptr::read_volatile((end_node as usize + 8) as *const u64) };
+    stage(
+        report_path,
+        "g2_tree",
+        true,
+        &format!("b0={} end={end_node:#x} root={root:#x} size={size}", hex64(b0)),
+    );
+    let (ours_obj, our_node) = init_object_and_node();
+    // SAFETY: our_node 指向 OUR_NODE(5 qword);仅初始化线程写。
+    unsafe {
+        *our_node = 0; // left
+        *our_node.add(1) = b0; // right = B0(空树时 = end_node,同样成立)
+        *our_node.add(2) = 0; // parent
+        *our_node.add(3) = 1; // is_black
+        *our_node.add(4) = ours_obj as u64; // value.first = 监听器
+    }
+    let prev = unsafe { (*begin_slot).swap(our_node as u64, Ordering::AcqRel) };
+    stage(
+        report_path,
+        "g2_swap",
+        prev == b0,
+        &format!("ours={:x} prev={}", our_node as usize, hex64(prev)),
+    );
 
     // 观测窗口。
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(observe_ms as u64);
@@ -221,19 +342,18 @@ pub unsafe fn g2_listen_run(ctx: *const G2Ctx) -> u32 {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
 
-    // 恢复(仅当仍是我们的对象;O0 变化则如实记录不覆盖)。
-    let cur: *mut c_void =
-        unsafe { core::ptr::read_volatile((pair.obj as usize + FIELD_OBSERVER) as *mut *mut c_void) };
-    if cur == ours {
-        unsafe {
-            core::ptr::write_volatile(
-                (pair.obj as usize + FIELD_OBSERVER) as *mut *mut c_void,
-                o0,
-            );
-        }
-        stage(report_path, "restore", true, "O0 restored");
+    // 恢复(仅当座位仍是我们的;被 QQ 覆写则不回写 stale B0)。
+    let cur = unsafe { (*begin_slot).load(Ordering::Acquire) };
+    if cur == our_node as u64 {
+        unsafe { (*begin_slot).store(b0, Ordering::Release) };
+        stage(report_path, "g2_restore", true, "B0 restored");
     } else {
-        stage(report_path, "restore", false, &format!("slot changed during window: {:#x}", cur as u64));
+        stage(
+            report_path,
+            "g2_restore",
+            false,
+            &format!("begin changed during window: {} (B0 not rewritten)", hex64(cur)),
+        );
     }
 
     // drain 环 → captured fixture。
@@ -256,21 +376,6 @@ pub unsafe fn g2_listen_run(ctx: *const G2Ctx) -> u32 {
     OK
 }
 
-fn hex64(v: u64) -> String {
-    format!("{v:#x}")
-}
-
-fn report_path_str(path: *const u16) -> String {
-    // SAFETY: loader 写入的 NUL 结尾 UTF-16。
-    unsafe {
-        let mut len = 0usize;
-        while len < 32 * 1024 && *path.add(len) != 0 {
-            len += 1;
-        }
-        String::from_utf16_lossy(std::slice::from_raw_parts(path, len))
-    }
-}
-
 /// getter 输出 pair(与 g1 同几何;避免跨模块私有依赖)。
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -279,82 +384,234 @@ struct ServicePair {
     ctrl: *mut c_void,
 }
 
+/// ===== 路线 A(弃用,保留供回滚/对照)=====
+///
+/// +0x140 单观察者指针交换(v1 实现)。2026-10-08 深夜起不再被
+/// [`g2_listen_run`] 选择:活 Manager 上该字段为 0(陈旧对象亦然),且路线 B
+/// 无转发负担。保留原因:若未来观测到 o0 非空,本路线是最小耦合备份。
+///
+/// 原设计(§2b):OnRecv 在树遍历后通知 `*(M+0x140)` 的单观察者
+/// `obs->vtbl[1](obs, &msg_pair)`;交换为我们的对象并转发 O0。
+#[cfg(test)]
+mod route_a_deprecated {
+    use super::*;
+
+    pub const FIELD_OBSERVER: usize = 0x140;
+
+    /// O0(原观察者)——交换期间由本模块独占写。
+    pub static O0: std::sync::atomic::AtomicPtr<c_void> =
+        std::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+    /// slot1 处理器:捕获 msg 对象头 → 原样转发 O0。
+    pub unsafe extern "system" fn g2_slot1(_this: *mut c_void, msg_pair: *mut c_void) {
+        // SAFETY: 边界内只做有界内存读 + ring 拷贝 + 转发;panic 隔离。
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if !msg_pair.is_null() {
+                let pair = *(msg_pair as *const [u64; 2]);
+                let obj = pair[0] as usize;
+                if obj != 0 {
+                    let mut head = [0u64; 8];
+                    for (i, h) in head.iter_mut().enumerate() {
+                        // SAFETY: QQ 构造的 msg 对象;读失败保持 0。
+                        *h = unsafe { core::ptr::read_volatile((obj + i * 8) as *const u64) };
+                    }
+                    let r = ring();
+                    let mut q = r.items.lock().unwrap();
+                    if q.len() < r.cap {
+                        for c in 0..4 {
+                            q.push((head[c * 2], head[c * 2 + 1]));
+                        }
+                        r.pushed.fetch_add(4, Ordering::Relaxed);
+                    } else {
+                        r.dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+            let o0 = O0.load(Ordering::Acquire);
+            if !o0.is_null() {
+                let vptr = unsafe { core::ptr::read_volatile(o0 as *const usize) };
+                let slot = unsafe { core::ptr::read_volatile((vptr + 8) as *const usize) };
+                let f: unsafe extern "system" fn(*mut c_void, *mut c_void) =
+                    unsafe { core::mem::transmute(slot) };
+                unsafe { f(o0, msg_pair) };
+            }
+        }));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::Mutex as SyncMutex;
 
-    /// 假 MSFService:+0x140 槽 + O0(vtbl slot1 记录转发调用)。
-    struct FakeSetup {
-        svc_obj: *mut c_void,
-        o0_obj: *mut c_void,
-        forwarded: Arc<SyncMutex<Vec<u64>>>, // O0 收到的 msg obj 指针
-    }
-
-    unsafe extern "system" fn fake_o0_slot1(_this: *mut c_void, msg_pair: *mut c_void) {
-        // SAFETY: 测试构造的 pair。
+    /// libc++ __tree_next 的忠实模拟(45e5 字节解码;nil=nullptr)。
+    /// node = [left@0, right@8, parent@0x10];值区从 +0x20 起(此处用数组模拟)。
+    fn tree_next(n: *mut u64) -> *mut u64 {
+        // SAFETY: 测试构造的节点几何。
         unsafe {
-            let pair = *(msg_pair as *const [u64; 2]);
-            // 全局转存(测试单线程)。
-            FORWARDED.with(|f| f.borrow_mut().push(pair[0]));
+            let m = *n.add(1) as *mut u64; // right
+            if !m.is_null() {
+                let mut x = m;
+                while *x != 0 {
+                    x = *x as *mut u64; // left
+                }
+                return x;
+            }
+            let mut cur = n;
+            let mut p = *cur.add(2) as *mut u64; // parent
+            loop {
+                if p.is_null() {
+                    // libc++ 在头节点处必返回;测试树保证 parent 链到头。
+                    return p;
+                }
+                if *p as *mut u64 == cur {
+                    return p; // cur 是 parent 的左子 → 后继 = parent
+                }
+                cur = p;
+                p = *cur.add(2) as *mut u64;
+            }
         }
     }
 
-    thread_local! {
-        static FORWARDED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// OnRecv 推送循环等价(起点 *(begin_slot),终点 end_node)。
+    fn onrecv_walk(begin_slot: *mut u64, end_node: *mut u64, visit: &mut Vec<usize>) {
+        // SAFETY: 测试构造。
+        unsafe {
+            let mut n = *begin_slot as *mut u64;
+            while n != end_node {
+                // notify(*(n+0x20)) —— 测试只记录访问序。
+                let listener = *n.add(4) as usize;
+                visit.push(listener);
+                n = tree_next(n);
+            }
+        }
+    }
+
+    /// 建节点:[left, right, parent, is_black, listener]。
+    fn node(left: usize, right: usize, parent: usize, listener: usize) -> Box<[u64; 5]> {
+        Box::new([left as u64, right as u64, parent as u64, 1, listener as u64])
+    }
+
+    /// QQ 假监听器:被通知时记录自身 id。
+    struct QQ {
+        notified: Arc<SyncMutex<Vec<usize>>>,
     }
 
     #[test]
-    fn swap_forward_restore_symmetry() {
-        // O0:vptr → vtable(slot1 = fake_o0_slot1)。
-        let mut o0_vtable: [usize; 4] = [0; 4];
-        o0_vtable[1] = fake_o0_slot1 as usize;
-        let o0_storage = Box::leak(Box::new([o0_vtable.as_mut_ptr() as *mut c_void]));
-        let o0_obj = o0_storage.as_mut_ptr() as *mut c_void;
+    fn route_b_swap_preserves_order_and_restores() {
+        // 树:header(end_node)root=5;5 为根,3/8 为子;中序 = 3,5,8。
+        let end = Box::leak(Box::new([0u64; 5])); // end_node:left=root@0
+        let n3 = Box::leak(node(0, 0, end.as_mut_ptr() as usize, 0x3000));
+        let n5 = Box::leak(node(n3.as_mut_ptr() as usize, 0, 0, 0x5000));
+        let n8 = Box::leak(node(0, 0, n5.as_mut_ptr() as usize, 0x8000));
+        // 修几何:root=5 → end.left=5;5.left=3,5.right=8;3.parent=5,8.parent=5。
+        end[0] = n5.as_mut_ptr() as u64;
+        n5[0] = n3.as_mut_ptr() as u64;
+        n5[1] = n8.as_mut_ptr() as u64;
+        n3[2] = n5.as_mut_ptr() as u64;
+        n8[2] = n5.as_mut_ptr() as u64;
+        // libc++:begin_node = 最左 = 3;header 左子 = root(见上)。
+        let begin_slot = Box::leak(Box::new(n3.as_mut_ptr() as u64));
+        // parent 指针:libc++ 最左.parent 指向祖先链,这里 3.parent=5 够用;
+        // 根 5.parent=0(无头父),爬升路径测试含 end 终止 —— 5 的后继:
+        // 5.right=8≠0 → tree_min(8)=8。8 后继:8.right=0 → 爬 8.parent=5;
+        // *5 != 8(5.left=3)→ cur=5, p=5.parent=0 → 测试树返回 null?? 
+        // libc++ 真树:根.parent = &end_node(头节点!)。补上:5.parent=end。
+        n5[2] = end.as_mut_ptr() as u64;
+        // 8 的后继:爬到 5,*5==3≠8 → cur=5,p=end;*end==5(root)==cur → 返回 end ✓
+        // (5 是 end 的"左子" —— libc++ 头节点几何约定)。
 
-        // 假 MSFService:+0x140 = O0。
-        let mut svc = vec![0u64; 0x148 / 8];
-        svc[FIELD_OBSERVER / 8] = o0_obj as u64;
-        let svc_ptr = svc.as_mut_ptr() as *mut c_void;
+        // 未挂钩的基线遍历。
+        let mut base = Vec::new();
+        onrecv_walk(begin_slot, end.as_mut_ptr() as *mut u64, &mut base);
+        assert_eq!(base, vec![0x3000, 0x5000, 0x8000], "基线中序 3,5,8");
 
-        // 交换(不经 getter:直接用 svc 指针模拟 g2_listen_run 的中间段)。
-        let o0: *mut c_void =
-            unsafe { core::ptr::read_volatile((svc_ptr as usize + FIELD_OBSERVER) as *mut *mut c_void) };
-        assert_eq!(o0, o0_obj);
-        let ours = init_object();
-        let slot = (svc_ptr as usize + FIELD_OBSERVER) as *mut AtomicPtr<c_void>;
-        let prev = unsafe { (*slot).swap(ours, Ordering::AcqRel) };
-        assert_eq!(prev, o0_obj, "交换返回原观察者");
-        // 生产流程同款:swap 后登记 O0(处理器经它转发)。
-        O0.store(o0_obj, Ordering::Release);
+        // 挂钩:伪节点 right=B0(=3)。
+        let (ours_obj, our_node) = init_object_and_node();
+        // SAFETY: 测试线程独占初始化。
+        unsafe {
+            *our_node = 0;
+            *our_node.add(1) = n3.as_mut_ptr() as u64;
+            *our_node.add(2) = 0;
+            *our_node.add(3) = 1;
+            *our_node.add(4) = ours_obj as u64;
+            let slot = begin_slot as *mut u64 as *mut AtomicU64;
+            let prev = (*slot).swap(our_node as u64, Ordering::AcqRel);
+            assert_eq!(prev, n3.as_mut_ptr() as u64, "换出原 begin");
 
-        // 模拟 OnRecv:调用 *(svc+0x140) 的 slot1,传 msg pair。
-        let cur = unsafe { core::ptr::read_volatile(slot as *mut *mut c_void) };
-        let vptr = unsafe { core::ptr::read_volatile(cur as *const usize) };
-        let f: unsafe extern "system" fn(*mut c_void, *mut c_void) =
-            unsafe { core::mem::transmute(*(vptr as *const usize).byte_add(8)) };
-        let msg_obj = [0xDEADBEEFu64, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8];
-        let pair = [msg_obj.as_ptr() as u64, 0u64];
-        // SAFETY: 测试构造。
-        unsafe { f(cur, &pair as *const _ as *mut c_void) };
+            // 挂钩后遍历:我们最先,其后原序不变。
+            let mut hooked = Vec::new();
+            onrecv_walk(begin_slot, end.as_mut_ptr() as *mut u64, &mut hooked);
+            let ours = ours_obj as usize;
+            assert_eq!(hooked, vec![ours, 0x3000, 0x5000, 0x8000], "伪节点最先 + 原序保持");
 
-        // 转发达 O0。
-        FORWARDED.with(|f| assert_eq!(*f.borrow(), vec![msg_obj.as_ptr() as u64]));
-        // 环捕获了头部。
-        let r = ring();
-        assert!(r.pushed.load(Ordering::Relaxed) >= 4, "头 0x40 字节已入环");
-
-        // 恢复。
-        let cur = unsafe { core::ptr::read_volatile(slot as *mut *mut c_void) };
-        if cur == ours {
-            unsafe { core::ptr::write_volatile(slot as *mut *mut c_void, o0_obj) };
+            // 恢复对称。
+            let cur = (*slot).load(Ordering::Acquire);
+            assert_eq!(cur, our_node as u64);
+            (*slot).store(prev, Ordering::Release);
+            assert_eq!(
+                *begin_slot as usize,
+                n3.as_mut_ptr() as usize,
+                "恢复后 B0 回位"
+            );
         }
-        assert_eq!(
-            unsafe { core::ptr::read_volatile(slot as *mut *mut c_void) },
-            o0_obj,
-            "恢复后 O0 回位"
-        );
-        O0.store(core::ptr::null_mut(), Ordering::Release);
+    }
+
+    #[test]
+    fn route_b_empty_tree_terminates_after_ours() {
+        // 空树:begin = end_node;root = 0。
+        let end = Box::leak(Box::new([0u64; 5]));
+        let begin_slot = Box::leak(Box::new(end.as_mut_ptr() as u64));
+        let (ours_obj, our_node) = init_object_and_node();
+        // SAFETY: 测试构造。
+        unsafe {
+            *our_node = 0;
+            *our_node.add(1) = end.as_mut_ptr() as u64; // right = end(空树语义)
+            *our_node.add(2) = 0;
+            *our_node.add(3) = 1;
+            *our_node.add(4) = ours_obj as u64;
+            let slot = begin_slot as *mut u64 as *mut AtomicU64;
+            let _ = (*slot).swap(our_node as u64, Ordering::AcqRel);
+
+            let mut visit = Vec::new();
+            onrecv_walk(begin_slot, end.as_mut_ptr() as *mut u64, &mut visit);
+            // succ(ours): right=end≠0 → tree_min(end):end.left=root=0 → 返回 end
+            // → 终止。只有我们被通知一次。
+            assert_eq!(visit, vec![ours_obj as usize], "空树:仅我们一次后终止");
+        }
+    }
+
+    #[test]
+    fn route_b_concurrent_insert_recomputes_begin_seat_loss_detected() {
+        // 窗口内 QQ 插入更小键(成为新最左)→ begin 被覆写为真节点;
+        // 我们的恢复路径必须检测到并放弃回写。
+        let end = Box::leak(Box::new([0u64; 5]));
+        let n5 = Box::leak(node(0, 0, end.as_mut_ptr() as usize, 0x5000));
+        end[0] = n5.as_mut_ptr() as u64; // root=5,单节点
+        let begin_slot = Box::leak(Box::new(n5.as_mut_ptr() as u64)); // begin=5
+        let (_ours_obj, our_node) = init_object_and_node();
+        // SAFETY: 测试构造。
+        unsafe {
+            *our_node = 0;
+            *our_node.add(1) = n5.as_mut_ptr() as u64;
+            *our_node.add(2) = 0;
+            *our_node.add(3) = 1;
+            *our_node.add(4) = 0x1234; // value(键为零键:QQ 比较视为空)
+            let slot = begin_slot as *mut u64 as *mut AtomicU64;
+            let prev = (*slot).swap(our_node as u64, Ordering::AcqRel);
+
+            // QQ 并发插入 3(<5):BST 从 root 插入为新最左,libc++ 重算 begin。
+            let n3 = Box::leak(node(0, 0, n5.as_mut_ptr() as usize, 0x3000));
+            n5[0] = n3.as_mut_ptr() as u64;
+            *begin_slot = n3.as_mut_ptr() as u64;
+
+            // 恢复路径:cur != ours → 不回写。
+            let cur = (*slot).load(Ordering::Acquire);
+            assert_ne!(cur, our_node as u64, "座位已被 QQ 覆写");
+            // 不执行 store(prev) —— 分支与运行时一致(检测即放弃)。
+            assert_eq!(*begin_slot as usize, n3.as_mut_ptr() as usize);
+            let _ = prev;
+        }
     }
 }

@@ -159,6 +159,62 @@ fn print_summary(r: &ObserveReport) {
             "[observe-msf] Manager: sc={:#x}(vptr_rva={:?}) manager={:#x}(vptr_rva={:?}) o0={:#x} list_head={:#x}",
             m.sc, m.sc_vptr_rva, m.manager, m.manager_vptr_rva, m.o0, m.list_head
         );
+        if let Some(c) = &m.chain {
+            println!(
+                "[observe-msf]   Manager 区域 +0x00..+0xA0: {:?}",
+                c.region_qwords[..20].iter().map(|v| format!("{v:#x}")).collect::<Vec<_>>()
+            );
+            println!(
+                "[observe-msf]   Manager 区域 +0xA0..+0x140: {:?}",
+                c.region_qwords[20..40].iter().map(|v| format!("{v:#x}")).collect::<Vec<_>>()
+            );
+            println!(
+                "[observe-msf]   Manager 区域 +0x140..+0x1A0: {:?}",
+                c.region_qwords[40..].iter().map(|v| format!("{v:#x}")).collect::<Vec<_>>()
+            );
+            println!(
+                "[observe-msf]   链头区 M+0x160..0x190: {:?}",
+                c.header_qwords.iter().map(|v| format!("{v:#x}")).collect::<Vec<_>>()
+            );
+            println!(
+                "[observe-msf]   E_a={:#x} = {:?}",
+                c.header_qwords[1],
+                c.ea_qwords.iter().map(|v| format!("{v:#x}")).collect::<Vec<_>>()
+            );
+            println!(
+                "[observe-msf]   45e5 等价访问序: {} 访问,终止={note}",
+                c.visit_count,
+                note = c.visit_note
+            );
+            println!(
+                "[observe-msf]   succ 首跳 leftmost 途经: {:?}",
+                c.succ_trace_first.iter().map(|v| format!("{v:#x}")).collect::<Vec<_>>()
+            );
+            for n in &c.visits {
+                println!(
+                    "[observe-msf]     visit {:#x} = {{{:?}}} listener={:#x} vptr={:#x} ({}+{:#x})",
+                    n.addr,
+                    n.qwords.iter().map(|v| format!("{v:#x}")).collect::<Vec<_>>(),
+                    n.listener_obj,
+                    n.listener_vptr,
+                    n.listener_vptr_module.as_deref().unwrap_or("?"),
+                    n.listener_vptr_rva.unwrap_or(u64::MAX)
+                );
+            }
+        }
+        if !m.all_instances.is_empty() {
+            println!("[observe-msf]   全部 Manager 候选:");
+            for c in &m.all_instances {
+                println!(
+                    "[observe-msf]     {:#x} o0={:#x} head={:#x} [{}]{}",
+                    c.addr,
+                    c.o0,
+                    c.list_head,
+                    c.via,
+                    if c.addr == m.manager { " (主报告)" } else { "" }
+                );
+            }
+        }
     }
     if let Some(g) = &r.global_dispatcher {
         println!(
@@ -292,6 +348,49 @@ struct ManagerReport {
     list_head: u64,
     /// 哨兵节点头 4 qword——定链方向。
     sentinel_head: [u64; 4],
+    /// +0x170 监听链全走查(定方向/闭合/监听器身份)。
+    chain: Option<ChainDump>,
+    /// 堆扫发现的所有 Manager 候选(含未选中的)。
+    all_instances: Vec<ManagerCandidate>,
+}
+
+#[derive(serde::Serialize)]
+struct ManagerCandidate {
+    addr: u64,
+    o0: u64,
+    list_head: u64,
+    /// 命中途径(含来源地址)。
+    via: String,
+}
+
+/// 单个链节点:头 6 qword(+0x00..+0x28)+ 监听器身份。
+#[derive(serde::Serialize)]
+struct ChainNodeDump {
+    addr: u64,
+    qwords: [u64; 6],
+    /// *(node+0x20) = 监听器对象地址。
+    listener_obj: u64,
+    /// *(*(node+0x20)) = 监听器 vptr(真实类身份)。
+    listener_vptr: u64,
+    listener_vptr_rva: Option<u64>,
+    listener_vptr_module: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ChainDump {
+    /// Manager+0x000..+0x1E0 全区域原值(38 qword,定 vptr 副本/容器布局)。
+    region_qwords: Vec<u64>,
+    /// Manager+0x160..+0x190 头区原值(+0x160/+0x168/+0x170/+0x178/+0x180/+0x188)。
+    header_qwords: [u64; 6],
+    /// 容器1哨兵下第一元素 (*(M+0x168)) 的 6 qword。
+    ea_qwords: [u64; 6],
+    /// 精确模拟 45e5 的 OnRecv 访问序:从 *(Manager+0x170) 起,
+    /// `next(n) = m=[n+8]; m≠0 ? leftmost(m)(沿[x]走到[x]==0) : 攀爬[n+0x10]至[p]==n`。
+    visits: Vec<ChainNodeDump>,
+    visit_count: u64,
+    visit_note: String,
+    /// 首个 succ 的 leftmost 逐跳途经地址(≤64)。
+    succ_trace_first: Vec<u64>,
 }
 
 #[derive(serde::Serialize)]
@@ -419,12 +518,67 @@ fn observe(pid: u32, planted_idx: Option<u64>, self_test: bool) -> Result<Observ
         None
     };
 
-    // Manager 定位:transport 指针(单例 +0x60)反查 SC(堆扫 needle)→
-    // SC+0x158 = Manager。SC vtable RVA 0x3FD3E28,Manager vtable RVA
-    // 0x413F7A8(RTTI msf::internal::Manager)。
+    // Manager 定位。正路(静态链闭环):SC ctor(0xB78380)在 SC+0x150 上调
+    // 工厂(0xB78946,分配 0x1A0 并以 1B3EADC 构造)→ 活 Manager = *(SC+0x150)。
+    // 先堆扫 SC vptr(0x3FD3E28);Manager vptr 堆扫仅作对照(已证实会命中
+    // 陈旧拷贝:构造后 +0x08 必为字节 1,陈旧对象处是函数指针)。
     let mut manager = None;
     if base != 0 {
-        manager = find_manager(&obs, base);
+        let mut all: Vec<ManagerCandidate> = Vec::new();
+        let mut primary: Option<u64> = None;
+        for sc in scan_heap_needle(&obs, base + SC_VTBL_RVA, 0, base) {
+            let m = obs.q(sc.addr + 0x150).unwrap_or(0);
+            let m_vptr = if m != 0 { obs.q(m).unwrap_or(0) } else { 0 };
+            let ok = m != 0 && m_vptr == base + MANAGER_VTBL_RVA;
+            let m_vptr_rva = m_vptr.checked_sub(base);
+            all.push(ManagerCandidate {
+                addr: m,
+                o0: obs.q(m + 0x140).unwrap_or(0),
+                list_head: obs.q(m + 0x170).unwrap_or(0),
+                via: format!(
+                    "SC{:#x}+0x150→{:#x}(vptr={:#x} rva={:?}){}",
+                    sc.addr,
+                    m,
+                    m_vptr,
+                    m_vptr_rva,
+                    if ok { "" } else { "(未过验)" }
+                ),
+            });
+            if ok && primary.is_none() {
+                primary = Some(m);
+            }
+        }
+        let via_v = scan_heap_needle(&obs, base + MANAGER_VTBL_RVA, 0, base);
+        match primary {
+            Some(addr) => {
+                let mut rep = manager_report(&obs, addr, base, "SC+0x150");
+                rep.all_instances = all;
+                rep.all_instances.extend(via_v);
+                manager = Some(rep);
+            }
+            None => {
+                match via_v.first() {
+                    Some(m) => {
+                        let addr = m.addr;
+                        let mut rep = manager_report(&obs, addr, base, "vptr堆扫(回退)");
+                        rep.all_instances = all;
+                        rep.all_instances.extend(via_v);
+                        manager = Some(rep);
+                    }
+                    None => {
+                        if let Some(c) = all.first() {
+                            // 只有 SC 候选而无过验 Manager:如实报该候选。
+                            let mut rep = manager_report(&obs, c.addr, base, "SC候选(Manager未过验)");
+                            rep.all_instances = all;
+                            manager = Some(rep);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(m) = manager.as_mut() {
+            m.chain = dump_chain(&obs, m.manager);
+        }
     }
 
     let executor_static = if base != 0 {
@@ -850,23 +1004,24 @@ fn now_unix_ms() -> u64 {
 }
 
 
-// —— Manager 定位(堆扫 transport 指针反查 SC;P6 G2)——
+// —— Manager 定位(SC+0x150 正路,vptr 堆扫对照;P6 G2)——
 
-const SC_VTBL_RVA: u64 = 0x3FD3E28;
 const MANAGER_VTBL_RVA: u64 = 0x413F7A8;
+const SC_VTBL_RVA: u64 = 0x3FD3E28;
 
-/// 遍历已提交私有内存,找 qword == Manager vptr(base+0x413F7A8)的对象;
-/// 每个命中即 Manager 实例,读 +0x140/+0x170。返回首个。
-fn find_manager(obs: &Observer, base: u64) -> Option<ManagerReport> {
+/// 堆扫 needle:MEM_PRIVATE 提交区逐区 RPM,找 qword == needle 的地址;
+/// delta != 0 时候选 owner = hit - delta,并验证 owner vptr 落在 wrapper。
+/// 返回全部候选(读 +0x140/+0x170 快照)。
+fn scan_heap_needle(obs: &Observer, needle: u64, owner_delta: u64, base: u64) -> Vec<ManagerCandidate> {
     use core::ffi::c_void;
-    let mut found: Option<ManagerReport> = None;
+    let mut out = Vec::new();
     use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows_sys::Win32::System::Memory::{
         MEM_COMMIT, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, VirtualQueryEx,
     };
     // SAFETY: 只读遍历目标地址空间;RPM 失败即跳过区域。
     unsafe {
-        let needle = (base + MANAGER_VTBL_RVA).to_le_bytes();
+        let needle_bytes = needle.to_le_bytes();
         let mut addr = 0x10000u64;
         let max = 0x7FFFFFFEFFFFu64;
         while addr < max {
@@ -892,33 +1047,23 @@ fn find_manager(obs: &Observer, base: u64) -> Option<ManagerReport> {
                     buf.truncate(got);
                     let mut i = 0;
                     while i + 8 <= buf.len() {
-                        if &buf[i..i + 8] == &needle {
-                            let candidate = base_addr + i as u64;
-                            if candidate > 0x10000 {
-                                let o0 = obs.q(candidate + 0x140).unwrap_or(0);
-                                let head = obs.q(candidate + 0x170).unwrap_or(0);
-                                // 哨兵节点(=head 值)头 4 qword(next/prev/...)。
-                                let mut sentinel_head = [0u64; 4];
-                                if head != 0 {
-                                    for (k, h) in sentinel_head.iter_mut().enumerate() {
-                                        *h = obs.q(head + (k * 8) as u64).unwrap_or(0);
-                                    }
-                                }
-                                // 全部命中都报(通常 1 个);首个带 O0/链状态的优先。
-                                let m = ManagerReport {
-                                    sc: 0,
-                                    sc_vptr_rva: None,
-                                    manager: candidate,
-                                    manager_vptr_rva: Some(MANAGER_VTBL_RVA),
-                                    o0,
-                                    list_head: head,
-                                    sentinel_head,
-                                };
-                                if o0 != 0 || head != 0 {
-                                    return Some(m);
-                                }
-                                if found.is_none() {
-                                    found = Some(m);
+                        if &buf[i..i + 8] == &needle_bytes {
+                            let hit = base_addr + i as u64;
+                            let owner = hit.wrapping_sub(owner_delta);
+                            if owner > 0x10000 {
+                                // owner_delta=0(vptr 扫描)时 owner 即对象本身;
+                                // transport 反查时验证 owner vptr 是 wrapper 内地址。
+                                let vptr_ok = obs
+                                    .q(owner)
+                                    .map(|v| v.checked_sub(base).is_some_and(|r| r < 0x800_0000))
+                                    .unwrap_or(false);
+                                if owner_delta == 0 || vptr_ok {
+                                    out.push(ManagerCandidate {
+                                        addr: owner,
+                                        o0: obs.q(owner + 0x140).unwrap_or(0),
+                                        list_head: obs.q(owner + 0x170).unwrap_or(0),
+                                        via: if owner_delta == 0 { "vptr堆扫".to_string() } else { "transport反查".to_string() },
+                                    });
                                 }
                             }
                         }
@@ -929,5 +1074,154 @@ fn find_manager(obs: &Observer, base: u64) -> Option<ManagerReport> {
             addr = base_addr + region as u64;
         }
     }
-    None
+    out
+}
+
+/// 组装 Manager 报告(vptr 验证 + 哨兵快照)。
+fn manager_report(obs: &Observer, candidate: u64, base: u64, _via: &str) -> ManagerReport {    let vptr = obs.q(candidate).unwrap_or(0);
+    let head = obs.q(candidate + 0x170).unwrap_or(0);
+    let mut sentinel_head = [0u64; 4];
+    if head != 0 {
+        for (k, h) in sentinel_head.iter_mut().enumerate() {
+            *h = obs.q(head + (k * 8) as u64).unwrap_or(0);
+        }
+    }
+    ManagerReport {
+        sc: 0,
+        sc_vptr_rva: None,
+        manager: candidate,
+        manager_vptr_rva: vptr.checked_sub(base).filter(|r| *r < 0x800_0000),
+        o0: obs.q(candidate + 0x140).unwrap_or(0),
+        list_head: head,
+        sentinel_head,
+        chain: None,
+        all_instances: Vec::new(),
+    }
+}
+
+/// +0x170 容器全走查(只读)。OnRecv(1B41AE6,汇编实证):
+/// `for (n = *(M+0x170); n != M+0x178; n = succ45e5(n)) notify(*(n+0x20))`,
+/// succ45e5(RVA 0x45e5 原字节解码):
+/// `m=[n+8]; m!=0 ? (沿[x]走到[x]==0 返回 x) : (沿[p=[n+0x10]] 攀爬至 [p]==n 返回 p)`。
+/// 本走查精确模拟该推进函数,输出 OnRecv 的真实访问序、每访问节点 6 qword
+/// 与监听器对象/vptr 身份。不写入、不调用。
+fn dump_chain(obs: &Observer, manager: u64) -> Option<ChainDump> {
+    let start = obs.q(manager + 0x170).unwrap_or(0);
+    if start == 0 {
+        return None;
+    }
+    let end_marker = manager + 0x178;
+    let mut header_qwords = [0u64; 6];
+    for (k, h) in header_qwords.iter_mut().enumerate() {
+        *h = obs.q(manager + 0x160 + (k * 8) as u64).unwrap_or(0);
+    }
+    let mut region_qwords = Vec::new();
+    for k in 0..52u64 {
+        // Manager 对象大小 0x1A0(工厂 b78946 分配尺寸),全量快照。
+        region_qwords.push(obs.q(manager + k * 8).unwrap_or(0));
+    }
+    let mut ea_qwords = [0u64; 6];
+    let ea = header_qwords[1]; // *(M+0x168)
+    if ea != 0 {
+        for (k, q) in ea_qwords.iter_mut().enumerate() {
+            *q = obs.q(ea + (k * 8) as u64).unwrap_or(0);
+        }
+    }
+
+    // 45e5 原义推进;带 leftmost 链的逐跳 trace(首跳记录,定结构用)。
+    const SPINE_LIMIT: usize = 4096;
+    let first_spine: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+    let succ = |n: u64| -> Result<u64, String> {
+        let m = obs.q(n + 0x08).ok_or(format!("{n:#x}+0x08 不可读"))?;
+        if m != 0 {
+            let mut x = m;
+            let mut trace = first_spine.lock().unwrap();
+            let tracing = trace.len() < 64;
+            for _ in 0..SPINE_LIMIT {
+                if tracing && trace.len() < 64 {
+                    trace.push(x);
+                }
+                let nx = obs.q(x).ok_or_else(|| format!("leftmost 链 {x:#x} 不可读"))?;
+                if nx == 0 {
+                    return Ok(x);
+                }
+                x = nx;
+            }
+            Err("leftmost 链超限".into())
+        } else {
+            let mut cur = n;
+            let mut p = obs.q(cur + 0x10).ok_or(format!("{cur:#x}+0x10 不可读"))?;
+            for _ in 0..SPINE_LIMIT {
+                if p == 0 {
+                    return Err("parent 链到 0".into());
+                }
+                let pl = obs.q(p).ok_or_else(|| format!("parent {p:#x} 不可读"))?;
+                if pl == cur {
+                    return Ok(p);
+                }
+                cur = p;
+                p = obs.q(cur + 0x10).ok_or_else(|| format!("{cur:#x}+0x10 不可读"))?;
+            }
+            Err("parent 链超限".into())
+        }
+    };
+
+    let dump_node = |addr: u64| -> ChainNodeDump {
+        let mut qwords = [0u64; 6];
+        for (k, q) in qwords.iter_mut().enumerate() {
+            *q = obs.q(addr + (k * 8) as u64).unwrap_or(0);
+        }
+        let lobj = qwords[4]; // *(node+0x20)
+        let vptr = if lobj != 0 { obs.q(lobj).unwrap_or(0) } else { 0 };
+        ChainNodeDump {
+            addr,
+            qwords,
+            listener_obj: lobj,
+            listener_vptr: vptr,
+            listener_vptr_rva: vptr.checked_sub(obs.base).filter(|r| *r < 0x800_0000),
+            listener_vptr_module: obs.module_of(vptr).map(|m| m.to_string()),
+        }
+    };
+
+    // OnRecv 主循环等价模拟。
+    let mut visits: Vec<ChainNodeDump> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut n = start;
+    let mut note = String::new();
+    loop {
+        if n == end_marker {
+            note = format!("正常终止于端标记 {end_marker:#x}");
+            break;
+        }
+        if n == 0 {
+            note = "空指针终止".into();
+            break;
+        }
+        if !seen.insert(n) {
+            note = format!("环:回访 {n:#x}");
+            break;
+        }
+        if visits.len() >= 256 {
+            note = format!("256 访问上限(cur={n:#x})");
+            break;
+        }
+        visits.push(dump_node(n));
+        match succ(n) {
+            Ok(nx) => n = nx,
+            Err(e) => {
+                note = e;
+                break;
+            }
+        }
+    }
+
+    Some(ChainDump {
+        region_qwords,
+        header_qwords,
+        ea_qwords,
+        visit_count: visits.len() as u64,
+        visits,
+        visit_note: note,
+        succ_trace_first: first_spine.into_inner().unwrap(),
+    })
 }

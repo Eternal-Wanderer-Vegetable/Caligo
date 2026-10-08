@@ -362,7 +362,8 @@ pub unsafe extern "system" fn caligo_g1_native_run(ctx: *const g1::G1NativeCtx) 
     unsafe { g1::g1_native_run(ctx) }
 }
 
-/// G2 接收监听(P6;`g2.rs`):+0x140 指针交换 + slot1 转发,有界窗口。
+/// G2 接收监听(P6;`g2.rs`):Manager+0x170 通知树 begin_node 交换,
+/// 有界窗口(路线 B;+0x140 交换为弃用备份)。
 ///
 /// K4-D0 门控:普通构建返回 [`gate::ERR_RESEARCH_DISABLED`]。
 ///
