@@ -44,3 +44,13 @@ QQ 进程存活且响应正常(证据:identity-invalidation-observations §EXP-K
 
 本文件是加载路线的唯一决定记录。任何偏离(引入 shim、更换注入原语、支持多版本)必须:
 1) 在本文件追加"变更记录"小节;2) 更新 source-register;3) 更新 version-adapter-manifest(如涉及版本)。
+
+## 4. R3 增补：原生路线冻结不影响本决定（2026-10-08）
+
+K4 原生路线已冻结（`k4-native-route-decision.md`）：选定原生 MSF/SSO，服务族 MSFService（getter `72DE38`），配套 `docs/contracts/qq-9.9.33-52230.capability-profile.json`。
+
+对本文件约束的影响：
+
+- **加载决定不变**：仍是自有 Rust 加载器 + 自有 bridge（§1），原生路线同样经该注入器进入；capability profile 的 `gates.loading = admitted` 即指此层。
+- **新增概念区分**："加载"（bridge 进 QQ 进程）与"原生引导"（在准入线程调 `72DE38` 取服务 pair + transport 状态观测）从此解耦——原生引导不需要 V8 isolate/context，不再受 §3 会话入口层 Node-API 线索的约束；§3 的 napi 线索降级为 V8 备选路线资产的一部分。
+- 原生引导的准入判据 = observe-msf 锚点核对（profile `resolver.method`）；锚点不匹配 → unsupported-build，拒绝全部原生能力。

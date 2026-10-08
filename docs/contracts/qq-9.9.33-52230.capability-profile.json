@@ -1,0 +1,150 @@
+{
+  "$schema_note": "Caligo 原生能力 profile(计划 §6.4/§7-P2 交付物)。与 version-adapter-manifest.json 的 SHA 门配合:manifest 拒绝错版后,本 profile 定义该版本内每个能力的准入状态。未知/未列能力一律按 rejected 处理。所有 RVA 仅对 wrapper.node SHA 63112AB9…87A5F0 有效;image base 0x180000000。",
+  "schema_version": 1,
+  "generated": "2026-10-08",
+  "evidence_basis": {
+    "static": [
+      "docs/research/qq-native-thread-contract.md (R3, 含 §10 现场闭合)",
+      "docs/research/qq-native-lifetime-contract.md (R3)",
+      "E:/stella/_reference/qq-native-r2-20261008/reports/*.md (R2)",
+      "E:/stella/_reference/qq-native-r3-p1-20261008/ (phaseA-J)"
+    ],
+    "field_observation": [
+      "docs/execution/2026-10-08-native-contract-recovery/evidence/p1-observe-field-47524-t1.json",
+      "docs/execution/2026-10-08-native-contract-recovery/evidence/p1-observe-field-47524-t2.json",
+      "docs/execution/2026-10-08-native-contract-recovery/evidence/p1-observe-field-47524-t3.json"
+    ],
+    "field_instance": { "pid": 47524, "created_utc": "2026-10-08T11:58:14Z", "anchor_matched": true }
+  },
+  "module_identity": {
+    "baseline_id": "qq-9.9.33-52230",
+    "arch": "x64",
+    "wrapper_sha256": "63112ab9161e127f5f7e17998a7196e143808923fb54cbbf7b4e21426187a5f0",
+    "wrapper_size_bytes": 115118632
+  },
+  "resolver": {
+    "algorithm_version": "r3-anchor-v1",
+    "method": "运行时锚点核对(observe-msf):单例槽 vptr 与冻结锚点 RVA 全等才准入;不匹配 -> unsupported-build,拒绝全部原生能力",
+    "anchors": {
+      "msf_service_vtable": "0x3f6ded8",
+      "msf_core_service_vtable": "0x3f70c18",
+      "executor_singleton_vtable": "0x3fad868",
+      "msf_service_singleton_slot": "0x674d2c0",
+      "msf_service_ctrlblk_slot": "0x674d2c8",
+      "msf_core_singleton_slot": "0x674d3e8",
+      "executor_tls_index_var": "0x6753454",
+      "global_dispatcher_obj": "0x67510a8",
+      "login_request_impl_vtable_b": "0x3f67bb8"
+    }
+  },
+  "getter_selection": {
+    "candidates": [
+      { "rva": "0x72de38", "family": "MSFService", "selection_reason": "Snow 选择算法复现:107775_switch predicate 750756 唯一调用方(R2 §5);实例 47524 现场唯一被调用并构造" },
+      { "rva": "0x74203c", "family": "MSFCoreService", "selection_reason": "72de38 true 分支被调;现场未构造" }
+    ],
+    "selected": "0x72de38",
+    "runtime_switch_evidence": "instance-47524: core getter never called; service singleton live (strong 149->501)"
+  },
+  "service_family": {
+    "selected": {
+      "name": "MSFService",
+      "getter": "0x72de38",
+      "ctor": "0x72df56",
+      "ctor_alloc_size": "0x380",
+      "allocators": { "alloc": "0xb75000", "free": "0xb75029" },
+      "getter_output": "{obj, ctrlblk} pair; ctrlblk+8 强引用 LOCK 递增(控制块非零时)",
+      "subobjects": [
+        { "offset": "0x00", "vtable": "0x3f6ded8", "slots": 31 },
+        { "offset": "0x08", "vtable": "0x3f6dfd8", "slots": 60 },
+        { "offset": "0x10", "vtable": "0x3f6e1c8", "slots": 8 },
+        { "offset": "0x18", "vtable": "0x3f6e210", "slots": 1 },
+        { "offset": "0x20", "vtable": "0x3f6e228", "slots": 3 }
+      ],
+      "deleting_dtor": "0x7378a4 -> 0x737a2e"
+    },
+    "unsupported": [
+      {
+        "name": "MSFCoreService",
+        "reason": "无独立合同;现场未构造(getter 0x74203c 未被调用);不得套用 MSFService 原型"
+      }
+    ]
+  },
+  "ffi_layouts": [
+    {
+      "symbol": "send_entry",
+      "rva": "0x732a80",
+      "prototype": "int(uint64 this, tagged_string* command, {begin,end,end}* body, uint8 reply_flag, callback_manager* mgr)",
+      "ownership": "command/body 被深复制(调用期内有效即可);mgr move-like 转移(31c5f8 协议);返回值非业务成功凭据",
+      "wrappers": ["0x7329f6 (this-10, reply=1)", "0x7333ac (this-10, reply=0, empty cb)"]
+    },
+    {
+      "symbol": "transport_submit",
+      "rva": "0x1b4e4ec",
+      "vtable_slot": "transport_vtable+0x38 (slot7)",
+      "live_vtable_rva": "0x41403b8",
+      "prototype": "uint64(transport*, cmd_copy, request_holder*, callback_wrapper, uint64* out_token, small_storage*)",
+      "semantics": "锁 transport+0x30 pair 取内联连接对象;为空 -> *out_token=0 且返回 0(未连接即同步失败);否则 b78d06 取 token,转交 0xb7ce8a",
+      "state_check": "0xb7ce8a 校验内联对象 vtable+0x30 状态,(state & 0xfffffffe) != 4 走失败分支"
+    },
+    {
+      "symbol": "task_submit_primitive",
+      "rva": "0xd32138",
+      "prototype": "int(target_obj, closure, callback_mgr*)",
+      "semantics": "调用 *target_obj 的 vtable slot0(self, closure, moved_mgr, {0,0}*);callback_mgr 源被释放"
+    }
+  ],
+  "control_block": {
+    "size": "0x28",
+    "layout": { "plus_0x00": "vptr(0x3f6f4d8, 4 slots)", "plus_0x08": "int32 strong", "plus_0x10": "int32 weak", "plus_0x18": "managed obj" },
+    "acquire_sites": ["getter 72de38(+8)", "1687c bind(+8)", "LoginRequestImpl ctor 6e5b80(+0x10 weak)", "TLS installer d32e5a(+8)"],
+    "release_discipline": "从 QQ 取回的 pair 必须以 QQ 侧释放家族对称释放(具体函数 P4 ABI 冻结时逐一定证);禁止自有 allocator 释放;禁止解引用内部计数"
+  },
+  "dispatch_contract": {
+    "send_chain": "732a80 -> transport slot7 0x1b4e4ec -> 0xb7ce8a -> d32138 -> global dispatcher (static 0x67510a8, vtable 0x43b6088)",
+    "receive_chain": "1b41ae6 -> 1b3f740 -> d32d98(TLS index var 0x6753454) -> per-thread dispatcher (vtable 0x43b6088)",
+    "dispatcher_class": {
+      "vtable_rva": "0x43b6088",
+      "ctor": "0x31f878c",
+      "slot0": "0x31f8cee",
+      "enqueue": "0x31f88ea",
+      "notes": "全局实例与每线程实例同类;入队带 owner-TID 自检与跨线程唤醒;回调在 QQ worker 池执行,与提交者并发"
+    },
+    "not_in_play": { "executor_singleton_0x750088": "实例 47524 现场未构造(vptr=None);无运行证据,不准入" },
+    "callback_rules": [
+      "回调参数(reason/body)只在调用期内有效,进入 Rust 前完成拥有复制",
+      "回调可能迟到/重复/并行;禁止在回调内重入持有锁或等待 IPC",
+      "Rust panic / C++ exception 不得跨回调边界"
+    ]
+  },
+  "gates": {
+    "loading": { "state": "admitted", "basis": "K1 注入器路线已验证(loading-route-decision §1);本 profile 不改变加载方式" },
+    "attach": {
+      "state": "admitted-conditional",
+      "basis": "observe-msf 锚点核对即接入判据;锚点不匹配 -> unsupported-build",
+      "residual": "P4 自有 adapter 的 attach 尚未实现"
+    },
+    "session_ready": {
+      "state": "blocked",
+      "basis": "LoginRequestImpl 观察者形状已知(slot1 成功/slot2 状态码,弱 pair)但观察者注册方未闭合;非零 UIN/SSO 可读均不构成 ready",
+      "unblock": "P4/P6 闭合观察者注册或等价 ready 信号"
+    },
+    "receive": {
+      "state": "lab-only",
+      "basis": "包布局经 QQ 本体+Snow 双向交叉(R2);hook 安装点 Core+0x40 slot5 已知;自有接收 adapter 属 P4;无现场准入"
+    },
+    "send": {
+      "state": "lab-only-conditional",
+      "basis": "ABI/实际目标/提交拓扑闭合(R3.1 §10);线程准入为有条件(无显式 guard,下游全 dispatcher)——G1 受控观测通过前拒绝一切真实发送",
+      "unblock": "P4 LAB T11-T16 -> P5 编解码 -> P6 G1"
+    },
+    "lifecycle_stop": {
+      "state": "rejected",
+      "basis": "stop/cancel/drain 无合同;主动停止原语不准入;关闭语义维持保守(Clean 若排空确认,Quarantined 若未确认)"
+    }
+  },
+  "update_policy": {
+    "on_new_hash": "unsupported-build;走离线调查 -> 补证 -> 新 profile -> LAB -> 指定实例现场 -> 发布,一次结构扫描不自动准入",
+    "on_anchor_ambiguity": "拒绝;不支持多候选运行时猜测",
+    "hot_swap": "禁止运行中换 profile/RVA"
+  }
+}

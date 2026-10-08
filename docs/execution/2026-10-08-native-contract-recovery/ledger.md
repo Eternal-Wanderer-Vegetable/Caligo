@@ -28,7 +28,8 @@
 |---|---|---|
 | P0 基线 | PASS | 本文件 P0 表 |
 | P1 原生合同（G-ABI/G-THREAD/G-LIFE） | **IN PROGRESS（首轮有界交付完成；关键间接目标未闭合 → 走计划失败分支的受控观测方案）** | `docs/research/qq-native-thread-contract.md`、`docs/research/qq-native-lifetime-contract.md`；外部证据 `E:/stella/_reference/qq-native-r3-p1-20261008/`（phaseA–G 共 165 函数 + 3 个字节级扫描脚本） |
-| P2 路线冻结 | NOT STARTED | 依赖 P1 闭合项 |
+| P2 路线冻结 | **PASS（文档层；2026-10-08）** | `docs/research/k4-native-route-decision.md`、`docs/contracts/qq-9.9.33-52230.capability-profile.json`；loading-route-decision §4 / source-register S16–S18 增补 |
+| P4–P9 | P4 IN PROGRESS（前置 P2 门已过） | — |
 | P3 公共 IPC/身份/恢复（LAB） | **PASS（LAB 层）** | 本文件 P3 表；`evidence/p3-lab/` |
 | P4–P9 | NOT STARTED | — |
 
@@ -54,6 +55,7 @@ P1 首轮交付的实质进展（细节见两份合同文档）：
 | 2026-10-08 | P1 伴生 | **发现并修复 D9 遗留缺陷**:`qq_entry::bootstrap` 把局部 UTF-8 String 指针登记为全局报告路径,悬空后被按 UTF-16 读取,LAB 运行在 CWD 产生乱码名诊断转储（10 个文件入库混入 P3 提交,已清理）;修复为进程生存期宽字符副本 | 提交 910dc5b |
 | 2026-10-08 | P1 受控观测 | 新增 `caligo-cli observe-msf`（外部只读:OpenProcess 仅 QUERY\|VM_READ,零注入/零写入/零 QQ 函数调用,不消耗实例首次 bootstrap）。读:MSF 双单例槽(+0x50/+0x60 transport/控制块计数)、执行器单例、全线程 TLS 提交目标(经验校准 TEB 布局,本机实证 TlsSlots@0x1480 非 0xE10)。self-test 全机械验证通过(含植入 pair 命中路径) | `crates/caligo-cli/src/observe_msf.rs`;`evidence/p1-observe-selftest.json` |
 | 2026-10-08 | P1 现场闭合 | **实例 47524**（创建 2026-10-08T11:58:14Z UTC,9.9.33-52230,锚点命中）三次外部只读采样 t1/t2/t3:this+0x60 transport **已安装**（vtable RVA 0x41403B8,slot7=**0x1B4E4EC** 发送实际目标,未连接时同步失败返回 0）;全局 dispatcher（0x67510A8,发送链提交目标）与 41 个 TLS dispatcher**同类**（vtable 0x43B6088,slot0=0x31F8CEE,入队+owner-TID 跨线程唤醒）;执行器单例 0x750088 **未构造**;MSFCoreService **未构造**（运行时 switch 选了 MSFService——首个运行时分支证据）。phaseH/I/J 静态反编译交叉定性 | `evidence/p1-observe-field-47524-t{1,2,3}.json`;`docs/research/qq-native-thread-contract.md` §10 |
+| 2026-10-08 | P2 | 路线冻结:原生 MSF/SSO(服务族 MSFService,getter 72DE38;运行时分支现场证据);V8 降为备选研究资产(须修 C6-C8/C10+补等价线程证据方可独立评估);MSFCoreService/0x750088 执行器单例/stop-cancel-drain 原语显式禁用;capability profile 逐门标注(loading=admitted, attach=admitted-conditional, session_ready=blocked, receive/send=lab-only*, lifecycle_stop=rejected) | `k4-native-route-decision.md`;`qq-9.9.33-52230.capability-profile.json` |
 
 ### P3 反例与验证（LAB,2026-10-08）
 
