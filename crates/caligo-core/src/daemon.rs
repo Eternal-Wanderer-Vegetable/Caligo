@@ -382,21 +382,24 @@ impl Daemon {
                         let _ = actor.bridge_result(&request_id, result);
                     }
                     BridgeMsg::Event { event } => {
+                        // wire seq = worker 本地序号(EventAck 的回显键;窗口
+                        // 前移以此为准 —— 抑制回显 0 曾致重放风暴,D8 现场)。
+                        let wire_seq = event.event_seq;
                         let mut actor = self.actor.lock().unwrap();
                         let receipt = actor.on_event(self.to_event(event));
                         let (seq, suppressed) = match receipt {
                             Ok(r) => match r {
-                                crate::runtime::EventReceipt::Published { event_seq } => {
-                                    (event_seq, false)
+                                crate::runtime::EventReceipt::Published { .. } => {
+                                    (wire_seq, false)
                                 }
                                 crate::runtime::EventReceipt::DuplicateSuppressed => {
-                                    (0, true)
+                                    (wire_seq, true)
                                 }
-                                crate::runtime::EventReceipt::AuditedOldGeneration { event_seq } => {
-                                    (event_seq, false)
+                                crate::runtime::EventReceipt::AuditedOldGeneration { .. } => {
+                                    (wire_seq, false)
                                 }
                             },
-                            Err(_) => (0, true),
+                            Err(_) => (wire_seq, true),
                         };
                         send_json(&conn, &CoreToBridgeMsg::EventAck { event_seq: seq, suppressed })?;
                     }

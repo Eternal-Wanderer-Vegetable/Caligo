@@ -282,7 +282,7 @@ fn event_roundtrip_through_pipe_and_journal() {
     let mut control = connect_control(&daemon);
 
     let ev = caligo_core::ipc::EventPayload {
-        event_seq: 0,
+        event_seq: 101, // wire seq(worker 本地序号;ACK 回显键)
         session_generation: 1,
         session: serde_json::json!({"account":"10001","kind":"private","peer":"123456"}),
         direction: "incoming".into(),
@@ -297,16 +297,20 @@ fn event_roundtrip_through_pipe_and_journal() {
     let ack = bridge.recv().unwrap();
     match ack {
         CoreToBridgeMsg::EventAck { event_seq, suppressed } => {
-            assert_eq!(event_seq, 1);
+            // ACK 回显 wire seq(D8 协议:抑制时亦回显,供窗口前移)。
+            assert_eq!(event_seq, 101);
             assert!(!suppressed);
         }
         other => panic!("EventAck expected, got {other:?}"),
     }
 
-    // 重复推送同 native_id → 抑制(去重跨管道)。
+    // 重复推送同 native_id → 抑制(去重跨管道),ACK 回显同一 wire seq。
     bridge.send(&BridgeMsg::Event { event: ev }).unwrap();
     match bridge.recv().unwrap() {
-        CoreToBridgeMsg::EventAck { suppressed, .. } => assert!(suppressed),
+        CoreToBridgeMsg::EventAck { event_seq, suppressed } => {
+            assert_eq!(event_seq, 101);
+            assert!(suppressed);
+        }
         other => panic!("{other:?}"),
     }
 

@@ -432,6 +432,9 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
 ) -> (WorkerCounters, WorkerExit) {
     let mut c = WorkerCounters::default();
     let mut backoff = cfg.reconnect_backoff_ms.max(100);
+    // 事件序号与确认游标:跨重连保持(worker 生存期内单调;wire 层身份)。
+    let mut next_local_seq: u64 = 1;
+    let mut acked_high: u64 = 0;
     macro_rules! publish {
         () => {
             c.publish();
@@ -502,6 +505,8 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
             &tick,
             &stop,
             &mut c,
+            &mut next_local_seq,
+            &mut acked_high,
         );
         watchdog_stop.store(true, Ordering::Relaxed);
         match session {
@@ -548,12 +553,13 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
     tick: &Arc<AtomicBool>,
     stop: &Arc<AtomicBool>,
     c: &mut WorkerCounters,
+    next_local_seq: &mut u64,
+    acked_high: &mut u64,
 ) -> SessionEnd {
-    // 未确认事件窗口(EventAck 前移;重连重放)。
+    // 未确认事件窗口(EventAck 前移;重连重放)。序号与游标由 run_worker
+    // 持有(跨重连连续)。
     let mut unacked: VecDeque<(u64, EventPayload)> = VecDeque::new();
     let mut unacked_bytes: usize = 0;
-    let mut next_local_seq: u64 = 1;
-    let mut acked_high: u64 = 0;
     let mut last_heartbeat = Instant::now();
     let mut heartbeat_misses: u32 = 0;
     // resident 未就绪期的待提交队列(owner 初始化完成后补交)。
@@ -627,8 +633,10 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
         }
         // 2) 事件上行:泵钩子经通道转交的 owned 事件(D8)+ 窗口重放。
         while let Ok(ev) = events_rx.try_recv() {
+            let wire_seq = *next_local_seq;
+            *next_local_seq += 1;
             let payload = EventPayload {
-                event_seq: 0, // core 持久化时分配
+                event_seq: wire_seq, // wire 身份 = worker 本地 seq(EventAck 回显键)
                 session_generation: cfg.session_generation,
                 session: serde_json::json!({
                     "account": cfg.account,
@@ -652,8 +660,7 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
                 }
                 .into(),
             };
-            let seq = next_local_seq;
-            next_local_seq += 1;
+            let seq = wire_seq;
             let bytes = payload.native_id.len() + payload.text.len() + 128;
             while unacked.len() + 1 > EVENT_WINDOW_MAX_ITEMS
                 || unacked_bytes + bytes > EVENT_WINDOW_MAX_BYTES
@@ -676,7 +683,7 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
         if !unacked.is_empty() {
             let items: Vec<EventPayload> = unacked
                 .iter()
-                .filter(|(s, _)| *s > acked_high)
+                .filter(|(s, _)| *s > *acked_high)
                 .map(|(_, e)| e.clone())
                 .collect();
             if !items.is_empty() {
@@ -690,11 +697,11 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
         }
         // 2b) 事件上行(重放未确认 → 新事件;窗口满 → 记 Gap 丢最旧)。
         let mut replay: Vec<u64> = unacked.iter().map(|(s, _)| *s).collect();
-        replay.retain(|s| *s > acked_high);
+        replay.retain(|s| *s > *acked_high);
         if !replay.is_empty() {
             let items: Vec<EventPayload> = unacked
                 .iter()
-                .filter(|(s, _)| *s > acked_high)
+                .filter(|(s, _)| *s > *acked_high)
                 .map(|(_, e)| e.clone())
                 .collect();
             for e in items {
@@ -703,49 +710,6 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
                 }
                 c.events_sent += 1;
             }
-        }
-        for ev in resident.take_events() {
-            // 方向判据:senderUin == 本账号 → SelfSent(不伪装 incoming);
-            // 会话种类:chatType 1=private 2=group(opaque 透传;peer=peerUid)。
-            let is_self = !cfg.account.is_empty() && ev.sender_uin == cfg.account;
-            let payload = EventPayload {
-                event_seq: 0, // core 持久化时分配;本地 seq 仅用于 ACK 关联
-                session_generation: cfg.session_generation,
-                session: serde_json::json!({
-                    "account": cfg.account,
-                    "kind": if ev.chat_type == 2 { "group" } else { "private" },
-                    "peer": ev.peer_uid,
-                }),
-                direction: if is_self { "self_sent" } else { "incoming" }.into(),
-                sender: ev.sender_uin.clone(),
-                native_id: ev.native_id.clone(),
-                text: ev.text.clone(),
-                platform_time: ev.msg_time,
-                observed_at_unix_ms: 0,
-                source: match ev.source {
-                    crate::resident::EventSourceKind::Recv => "recv",
-                    crate::resident::EventSourceKind::Update => "update",
-                }
-                .into(),
-            };
-            let seq = next_local_seq;
-            next_local_seq += 1;
-            let bytes = payload.native_id.len() + 128;
-            while unacked.len() + 1 > EVENT_WINDOW_MAX_ITEMS
-                || unacked_bytes + bytes > EVENT_WINDOW_MAX_BYTES
-            {
-                if let Some((s, _)) = unacked.pop_front() {
-                    unacked_bytes -= 64; // 近似回收;精确字节在 push 时累计
-                    c.events_gap_dropped += 1;
-                    let _ = s;
-                }
-            }
-            unacked.push_back((seq, payload));
-            unacked_bytes += bytes;
-            if send_json(conn, &BridgeMsg::Event { event: unacked.back().unwrap().1.clone() }).is_err() {
-                return SessionEnd::Broken;
-            }
-            c.events_sent += 1;
         }
         // 3) 心跳(3 次未响应 → 主动断开重连;计划 §6.4)。
         if last_heartbeat.elapsed() >= Duration::from_millis(cfg.heartbeat_ms) {
@@ -784,14 +748,13 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
                 }
                 wake();
             }
-            Ok(CoreToBridgeMsg::EventAck { event_seq, suppressed }) => {
-                if suppressed {
-                    // 重复已抑制:按已确认处理(不重放)。
-                }
-                acked_high = acked_high.max(event_seq);
-                while unacked.front().map(|(s, _)| *s <= acked_high).unwrap_or(false) {
+            Ok(CoreToBridgeMsg::EventAck { event_seq, suppressed: _ }) => {
+                // daemon 回显 wire seq(首次持久化与重复抑制均如此 —— 修复
+                // 抑制回显 0 导致窗口永不前移的重放风暴,D8 现场实证)。
+                *acked_high = (*acked_high).max(event_seq);
+                while unacked.front().map(|(s, _)| *s <= *acked_high).unwrap_or(false) {
                     if let Some((_, e)) = unacked.pop_front() {
-                        unacked_bytes -= e.native_id.len() + 128;
+                        unacked_bytes -= e.native_id.len() + e.text.len() + 128;
                         c.events_acked += 1;
                     }
                 }
