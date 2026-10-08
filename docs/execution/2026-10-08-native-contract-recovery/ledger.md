@@ -27,10 +27,17 @@
 | 门 | 状态 | 证据 |
 |---|---|---|
 | P0 基线 | PASS | 本文件 P0 表 |
-| P1 原生合同（G-ABI/G-THREAD/G-LIFE） | IN PROGRESS | 待 `qq-native-thread-contract.md` / `qq-native-lifetime-contract.md` |
-| P2 路线冻结 | NOT STARTED | — |
-| P3 公共 IPC/身份/恢复（LAB） | IN PROGRESS | T01–T10 失败测试 → 修复记录 |
+| P1 原生合同（G-ABI/G-THREAD/G-LIFE） | **IN PROGRESS（首轮有界交付完成；关键间接目标未闭合 → 走计划失败分支的受控观测方案）** | `docs/research/qq-native-thread-contract.md`、`docs/research/qq-native-lifetime-contract.md`；外部证据 `E:/stella/_reference/qq-native-r3-p1-20261008/`（phaseA–G 共 165 函数 + 3 个字节级扫描脚本） |
+| P2 路线冻结 | NOT STARTED | 依赖 P1 闭合项 |
+| P3 公共 IPC/身份/恢复（LAB） | **PASS（LAB 层）** | 本文件 P3 表；`evidence/p3-lab/` |
 | P4–P9 | NOT STARTED | — |
+
+P1 首轮交付的实质进展（细节见两份合同文档）：
+1. `[corrected]` D32138 = 通用任务调用原语（slot0 4 参 vcall），非"执行器派发"——R2 语义更正（汇编凭据）。
+2. `[verified]` TLS 提交目标拓扑：index 单例 `6753454`、安装器 `D32E5A`（强引用获取）、安装链 `217D8CC→217DA24`（worker 上下文 +0x30 pair）；访问族封闭（D32DAD 仅 3 个直接调用方）。
+3. `[verified]` 控制块 0x28 布局、强/弱双计数、五类获取位点、析构尾"弱归零→控制块 slot3 自删"、四类删除析构包装同构。
+4. `[verified]` `nt::login::LoginRequestImpl` RTTI 解码、三 vptr、弱 pair 观察者接口形状（slot1 成功记录/slot2 状态码）。
+5. `[unknown]`（按计划失败分支处理）：`732A80` 的 `this+0x60` 安装来源（候选淘汰表 5 组全空，含 dword 误读实锤）；TLS dispatcher 的类别与 slot0 体；stop/cancel/drain；观察者注册方。→ 需要执行者指定测试实例做受控观测（一次一未知）。
 
 ## 变更登记（实现产物按步骤追加，不覆盖历史）
 
