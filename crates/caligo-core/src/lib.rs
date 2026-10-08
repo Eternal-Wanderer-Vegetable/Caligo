@@ -8,6 +8,7 @@
 pub mod daemon;
 pub mod ipc;
 pub mod journal;
+pub mod qq_protocol;
 pub mod runtime;
 pub mod transport;
 
