@@ -33,6 +33,11 @@ const NAME_UTF8_DTOR: &str = "??1Utf8Value@String@v8@@QEAA@XZ";
 const NAME_UTF8_DEREF: &str = "??DUtf8Value@String@v8@@QEAAPEADXZ";
 const NAME_CTX_ENTER: &str = "?Enter@Context@v8@@QEAAXXZ";
 const NAME_CTX_EXIT: &str = "?Exit@Context@v8@@QEAAXXZ";
+const NAME_TRYCATCH_CTOR: &str = "??0TryCatch@v8@@QEAA@PEAVIsolate@1@@Z";
+const NAME_TRYCATCH_DTOR: &str = "??1TryCatch@v8@@QEAA@XZ";
+const NAME_TRYCATCH_CAUGHT: &str = "?HasCaught@TryCatch@v8@@QEBA_NXZ";
+const NAME_TRYCATCH_EXC: &str =
+    "?Exception@TryCatch@v8@@QEBA?AV?$Local@VValue@v8@@@2@XZ";
 
 type FnScopeCtor = unsafe extern "C" fn(this: *mut c_void, isolate: *mut c_void) -> *mut c_void;
 type FnScopeDtor = unsafe extern "C" fn(this: *mut c_void);
@@ -46,6 +51,10 @@ type FnUtf8Ctor = unsafe extern "C" fn(this: *mut c_void, isolate: *mut c_void, 
 type FnUtf8Dtor = unsafe extern "C" fn(this: *mut c_void);
 type FnUtf8Deref = unsafe extern "C" fn(this: *mut c_void) -> *const u8;
 type FnCtxEnterExit = unsafe extern "C" fn(this: *mut c_void);
+type FnTcCtor = unsafe extern "C" fn(this: *mut c_void, isolate: *mut c_void) -> *mut c_void;
+type FnTcDtor = unsafe extern "C" fn(this: *mut c_void);
+type FnTcCaught = unsafe extern "C" fn(this: *const c_void) -> bool;
+type FnTcExc = unsafe extern "C" fn(this: *const c_void, sret: *mut usize);
 
 #[derive(Debug, Clone, Copy)]
 pub struct V8Symbols {
@@ -62,6 +71,10 @@ pub struct V8Symbols {
     pub utf8_deref: usize,
     pub ctx_enter: usize,
     pub ctx_exit: usize,
+    pub trycatch_ctor: usize,
+    pub trycatch_dtor: usize,
+    pub trycatch_caught: usize,
+    pub trycatch_exc: usize,
 }
 
 impl V8Symbols {
@@ -88,11 +101,15 @@ impl V8Symbols {
             utf8_deref: get(NAME_UTF8_DEREF)?,
             ctx_enter: get(NAME_CTX_ENTER)?,
             ctx_exit: get(NAME_CTX_EXIT)?,
+            trycatch_ctor: get(NAME_TRYCATCH_CTOR)?,
+            trycatch_dtor: get(NAME_TRYCATCH_DTOR)?,
+            trycatch_caught: get(NAME_TRYCATCH_CAUGHT)?,
+            trycatch_exc: get(NAME_TRYCATCH_EXC)?,
         })
     }
 
     /// LAB 注入。
-    pub fn from_raw(parts: [usize; 13]) -> Self {
+    pub fn from_raw(parts: [usize; 17]) -> Self {
         Self {
             scope_ctor: parts[0],
             scope_dtor: parts[1],
@@ -107,6 +124,10 @@ impl V8Symbols {
             utf8_deref: parts[10],
             ctx_enter: parts[11],
             ctx_exit: parts[12],
+            trycatch_ctor: parts[13],
+            trycatch_dtor: parts[14],
+            trycatch_caught: parts[15],
+            trycatch_exc: parts[16],
         }
     }
 
@@ -187,7 +208,44 @@ pub unsafe fn exec_script(
         let ctx_exit: FnCtxEnterExit = to_fn(syms.ctx_exit);
         (ctx_enter)(ctx as *mut c_void);
 
+        // TryCatch:捕获未捕获 JS 异常并读取消息(RunEmpty 确切原因)。
+        let tc_ctor: FnTcCtor = to_fn(syms.trycatch_ctor);
+        let tc_dtor: FnTcDtor = to_fn(syms.trycatch_dtor);
+        let mut tc = [0usize; 4];
+        tc_ctor(tc.as_mut_ptr().cast(), isolate);
+
         let r = exec_in_scope(syms, isolate, ctx, js, &mut scope);
+
+        // RunEmpty + TryCatch 已捕获 → 读取确切 JS 异常消息。
+        let caught: FnTcCaught = to_fn(syms.trycatch_caught);
+        if r == Err(V8Error::RunEmpty) && (caught)(tc.as_ptr().cast() as *const c_void) {
+            let exc: FnTcExc = to_fn(syms.trycatch_exc);
+            let mut exc_local = 0usize;
+            exc(tc.as_ptr().cast() as *const c_void, &mut exc_local);
+            if exc_local != 0 {
+                let utf8_ctor: FnUtf8Ctor = to_fn(syms.utf8_ctor);
+                let utf8_dtor: FnUtf8Dtor = to_fn(syms.utf8_dtor);
+                let utf8_deref: FnUtf8Deref = to_fn(syms.utf8_deref);
+                let mut u8b = [0usize; 3];
+                utf8_ctor(u8b.as_mut_ptr().cast(), isolate, exc_local);
+                let p = utf8_deref(u8b.as_mut_ptr().cast());
+                if !p.is_null() {
+                    let msg = core::str::from_utf8(core::slice::from_raw_parts(
+                        p,
+                        strlen_bounded(p, 4096),
+                    ))
+                    .unwrap_or("?")
+                    .to_string();
+                    crate::qq_entry::append_stage_simple(
+                        "v8_exc",
+                        false,
+                        &format!("uncaught: {}", &msg[..msg.len().min(400)]),
+                    );
+                }
+                utf8_dtor(u8b.as_mut_ptr().cast());
+            }
+        }
+        tc_dtor(tc.as_mut_ptr().cast());
 
         // RunEmpty 诊断(D9 现场):区分"上下文不可执行"与"脚本自身问题"。
         if matches!(r, Err(V8Error::RunEmpty)) {

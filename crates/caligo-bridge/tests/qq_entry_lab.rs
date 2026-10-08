@@ -343,7 +343,6 @@ mod fake_v8 {
     use std::sync::Mutex;
 
     static LOCALS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-    static NEXT: AtomicU64 = AtomicU64::new(1);
     pub static CURRENT: AtomicUsize = AtomicUsize::new(0x1DEA_0001);
     pub static CTX: AtomicUsize = AtomicUsize::new(0xCAFE_0002);
     pub static SCOPE_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -414,6 +413,10 @@ mod fake_v8 {
     pub unsafe extern "C" fn utf8_dtor(_this: *mut core::ffi::c_void) {}
     pub unsafe extern "C" fn ctx_enter(_this: *mut core::ffi::c_void) {}
     pub unsafe extern "C" fn ctx_exit(_this: *mut core::ffi::c_void) {}
+    pub unsafe extern "C" fn tc_ctor(_this: *mut core::ffi::c_void, _i: *mut core::ffi::c_void) -> *mut core::ffi::c_void { _this }
+    pub unsafe extern "C" fn tc_dtor(_this: *mut core::ffi::c_void) {}
+    pub unsafe extern "C" fn tc_caught(_this: *const core::ffi::c_void) -> bool { false }
+    pub unsafe extern "C" fn tc_exc(_this: *const core::ffi::c_void, sret: *mut usize) { *sret = 0; }
     pub unsafe extern "C" fn utf8_deref(this: *mut core::ffi::c_void) -> *const u8 {
         let h = (this as *const usize).read();
         let s = get_local(h);
@@ -434,6 +437,10 @@ fn install_fake_v8() {
     type FUtf8Dtor = unsafe extern "C" fn(*mut core::ffi::c_void);
     type FUtf8Deref = unsafe extern "C" fn(*mut core::ffi::c_void) -> *const u8;
     type FCtxEE = unsafe extern "C" fn(*mut core::ffi::c_void);
+    type FTcCtor = unsafe extern "C" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+    type FTcDtor = unsafe extern "C" fn(*mut core::ffi::c_void);
+    type FTcCaught = unsafe extern "C" fn(*const core::ffi::c_void) -> bool;
+    type FTcExc = unsafe extern "C" fn(*const core::ffi::c_void, *mut usize);
     let p1: FScopeCtor = fake_v8::scope_ctor;
     let p2: FScopeDtor = fake_v8::scope_dtor;
     let p3: FGetCurrent = fake_v8::get_current;
@@ -447,20 +454,14 @@ fn install_fake_v8() {
     let p11: FUtf8Deref = fake_v8::utf8_deref;
     let p12: FCtxEE = fake_v8::ctx_enter;
     let p13: FCtxEE = fake_v8::ctx_exit;
+    let p14: FTcCtor = fake_v8::tc_ctor;
+    let p15: FTcDtor = fake_v8::tc_dtor;
+    let p16: FTcCaught = fake_v8::tc_caught;
+    let p17: FTcExc = fake_v8::tc_exc;
     caligo_bridge::qq_v8::store_symbols_raw(caligo_bridge::qq_v8::V8Symbols::from_raw([
-        p1 as usize,
-        p2 as usize,
-        p3 as usize,
-        p4 as usize,
-        p5 as usize,
-        p6 as usize,
-        p7 as usize,
-        p8 as usize,
-        p9 as usize,
-        p10 as usize,
-        p11 as usize,
-        p12 as usize,
-        p13 as usize,
+        p1 as usize, p2 as usize, p3 as usize, p4 as usize, p5 as usize, p6 as usize,
+        p7 as usize, p8 as usize, p9 as usize, p10 as usize, p11 as usize, p12 as usize,
+        p13 as usize, p14 as usize, p15 as usize, p16 as usize, p17 as usize,
     ]));
 }
 
