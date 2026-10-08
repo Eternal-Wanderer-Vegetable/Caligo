@@ -102,47 +102,56 @@ unsafe extern "system" fn g2_noop2(_a: *mut c_void, _b: *mut c_void) {}
 unsafe extern "system" fn g2_noop3(_a: *mut c_void, _b: *mut c_void, _c: *mut c_void) {}
 
 /// slot6 处理器:捕获 msg 对象头 → 环。无转发需求(QQ 监听器被原生遍历通知)。
-unsafe extern "system" fn g2_slot6(_this: *mut c_void, msg_pair: *mut c_void) {
-    // 边界纪律(2026-10-09 崩溃教训):回调线程是 QQ 接收线程,任何直接
-    // 解引用的硬件异常(不可读地址)不受 catch_unwind 保护 → 进程终止。
-    // 全部读取经 safe_read_qword(RPM-self):坏地址返回 None,跳过并计数。
+/// 读对象头 0x40 字节(8 qword,全 RPM-self)。任一不可读返回 None。
+fn read_head(obj: usize) -> Option<[u64; 8]> {
+    let mut head = [0u64; 8];
+    for (i, h) in head.iter_mut().enumerate() {
+        *h = safe_read_qword(obj + i * 8)?;
+    }
+    Some(head)
+}
+
+fn push_head(head: [u64; 8]) {
+    let r = ring();
+    let mut q = r.items.lock().unwrap();
+    if q.len() < r.cap {
+        // 打包 8 qword → 4 条 (u64,u64) 记录(顺序保留)。
+        for c in 0..4 {
+            q.push((head[c * 2], head[c * 2 + 1]));
+        }
+        r.pushed.fetch_add(4, Ordering::Relaxed);
+    } else {
+        r.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+unsafe extern "system" fn g2_slot6(_this: *mut c_void, payload: *mut c_void) {
+    // 边界纪律(2026-10-09 两次崩溃教训):回调线程是 QQ 接收线程,任何直接
+    // 解引用的硬件异常不受 catch_unwind 保护 → 进程终止;全部读取经
+    // safe_read_qword。
+    // 载荷形状(汇编实证):
+    //   A. 原版推送 1B41AE6:`MOV RDX,[RBP+0x70]` —— arg2 = msg 对象指针本身;
+    //   B. +0x140 观察者路径 / 部分垫片:arg2 = &{obj, ctrl} 对。
+    // 先 A 后 B,都失败如实计数。
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        if !msg_pair.is_null() {
-            // {obj, ctrl} 对读(垫片传参形状未定证,逐 qword 安全读)。
-            let pair0 = safe_read_qword(msg_pair as usize);
-            if let Some(pair0) = pair0 {
-                let obj = pair0 as usize;
-                if obj != 0 {
-                    // 捕获头 0x40 字节(opaque;8 qword);任一不可读即整体放弃。
-                    let mut head = [0u64; 8];
-                    let mut ok = true;
-                    for (i, h) in head.iter_mut().enumerate() {
-                        match safe_read_qword(obj + i * 8) {
-                            Some(v) => *h = v,
-                            None => {
-                                ok = false;
-                                break;
-                            }
-                        }
-                    }
-                    if ok {
-                        let r = ring();
-                        let mut q = r.items.lock().unwrap();
-                        if q.len() < r.cap {
-                            // 打包 8 qword → 4 条 (u64,u64) 记录(顺序保留)。
-                            for c in 0..4 {
-                                q.push((head[c * 2], head[c * 2 + 1]));
-                            }
-                            r.pushed.fetch_add(4, Ordering::Relaxed);
-                        } else {
-                            r.dropped.fetch_add(1, Ordering::Relaxed);
-                        }
-                    } else {
-                        r_unreadable().fetch_add(1, Ordering::Relaxed);
-                    }
+        if payload.is_null() {
+            return;
+        }
+        let pl = payload as usize;
+        if let Some(head) = read_head(pl) {
+            push_head(head);
+            return;
+        }
+        if let Some(inner) = safe_read_qword(pl) {
+            let obj = inner as usize;
+            if obj != 0 {
+                if let Some(head) = read_head(obj) {
+                    push_head(head);
+                    return;
                 }
             }
         }
+        r_unreadable().fetch_add(1, Ordering::Relaxed);
     }));
 }
 
@@ -534,38 +543,18 @@ mod route_a_deprecated {
     pub unsafe extern "system" fn g2_slot1(_this: *mut c_void, msg_pair: *mut c_void) {
         // SAFETY: 边界内只做有界内存读 + ring 拷贝 + 转发;panic 隔离。
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            if !msg_pair.is_null() {
-                // 同 slot6 纪律:全部 RPM-self 读,硬件异常不可捕获。
-                if let Some(pair0) = safe_read_qword(msg_pair as usize) {
-                    let obj = pair0 as usize;
-                    if obj != 0 {
-                        let mut head = [0u64; 8];
-                        let mut ok = true;
-                        for (i, h) in head.iter_mut().enumerate() {
-                            match safe_read_qword(obj + i * 8) {
-                                Some(v) => *h = v,
-                                None => {
-                                    ok = false;
-                                    break;
-                                }
-                            }
-                        }
-                        if ok {
-                            let r = ring();
-                            let mut q = r.items.lock().unwrap();
-                            if q.len() < r.cap {
-                                for c in 0..4 {
-                                    q.push((head[c * 2], head[c * 2 + 1]));
-                                }
-                                r.pushed.fetch_add(4, Ordering::Relaxed);
-                            } else {
-                                r.dropped.fetch_add(1, Ordering::Relaxed);
-                            }
-                        } else {
-                            r_unreadable().fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
+            // 同 slot6 纪律与双形状逻辑。
+            if let Some(head) = read_head(msg_pair as usize) {
+                push_head(head);
+            } else if let Some(inner) = safe_read_qword(msg_pair as usize) {
+                let obj = inner as usize;
+                if let Some(head) = read_head(obj) {
+                    push_head(head);
+                } else {
+                    r_unreadable().fetch_add(1, Ordering::Relaxed);
                 }
+            } else {
+                r_unreadable().fetch_add(1, Ordering::Relaxed);
             }
             let o0 = O0.load(Ordering::Acquire);
             if !o0.is_null() {

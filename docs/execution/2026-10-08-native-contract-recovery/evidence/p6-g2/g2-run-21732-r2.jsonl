@@ -1,0 +1,13 @@
+{"ts":1791503777879,"tid":17236,"stage":"g2_adopt","ok":true,"detail":"svc=2159105933312"}
+{"ts":1791503777879,"tid":17236,"stage":"g2_scan","ok":true,"detail":"SC scan begin (RPM-self)"}
+{"ts":1791503778013,"tid":17236,"stage":"g2_scan","ok":true,"detail":"SC scan done"}
+{"ts":1791503778013,"tid":17236,"stage":"g2_manager","ok":true,"detail":"manager=2159102978496 vptr=0x7fff1bb0f7a8 (raw) sc_candidates=1"}
+{"ts":1791503778014,"tid":17236,"stage":"g2_tree","ok":true,"detail":"b0=0x1f6b4c27350 end=0x1f6b490eb38 root=0x1f6b4c27350 size=2"}
+{"ts":1791503778014,"tid":17236,"stage":"g2_swap","ok":true,"detail":"ours=7fff728ea300 prev=0x1f6b4c27350"}
+{"ts":1791503786027,"tid":17236,"stage":"g2_restore","ok":true,"detail":"B0 restored"}
+{"kind":"msg_head","i":0,"q0":3834311752136274708,"q1":3420727}
+{"kind":"msg_head","i":0,"q0":0,"q1":3666876097}
+{"kind":"msg_head","i":0,"q0":49,"q1":37}
+{"kind":"msg_head","i":0,"q0":3578337291024,"q1":2160331993056}
+{"kind":"summary","pushed":4,"dropped":0,"unreadable":0}
+{"ts":1791503786027,"tid":17236,"stage":"g2_done","ok":true,"detail":"captured=4 unreadable=0"}

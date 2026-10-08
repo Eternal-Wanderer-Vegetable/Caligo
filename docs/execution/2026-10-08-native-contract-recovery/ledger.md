@@ -221,3 +221,17 @@ P1 首轮交付的实质进展（细节见两份合同文档）：
 - **附带修复**:cargo test 会以非 research 配置重写 target/debug 的
   bridge DLL —— 注入前必须以 research 构建为最后一步;改用独立
   `--target-dir target/g2`(DLL 被目标进程锁定时同样必要)。
+
+## 2026-10-09(续):G2 现场打通(21732,raw 实例)
+
+- **r1(修复后首跑)**:全链 PASS+QQ 存活,`captured=0 unreadable=1` ——
+  监听器**被通知 1 次**但载荷不可读。根因:原版 OnRecv 汇编
+  `MOV RDX,[RBP+0x70]`——推送循环 arg2 = **msg 对象指针本身**;
+  {obj,ctrl} 对指针是 +0x140 观察者路径(§2b)的形状。
+- **处理器双形状修正**:先按形状 A(arg2=对象)读头 0x40 字节,失败再按
+  形状 B(arg2=&pair)解一层;全部 RPM-self。
+- **r2(21732,raw,8s 窗口)**:全链 PASS,`captured=4 unreadable=0`,
+  恢复对称,QQ 存活。空闲期到达的一条通知被完整捕获(8 qword 头,
+  q0 呈内联字符串形态)。**G2 注册机制现场闭环。**
+- 下一步:120s 长窗口 + 用户采样(10 私聊+10 群唯一编号)→ fixture
+  回填 P5 → G2 判定 → 解封 G3。
