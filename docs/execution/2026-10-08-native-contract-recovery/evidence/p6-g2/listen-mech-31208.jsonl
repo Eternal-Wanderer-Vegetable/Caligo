@@ -1,0 +1,2 @@
+{"ts":1791468333073,"tid":25704,"stage":"g2_adopt","ok":true,"detail":"obj=2594476326912"}
+{"ts":1791468333073,"tid":25704,"stage":"o0","ok":false,"detail":"*(obj+0x140) null (observer not registered yet)"}
