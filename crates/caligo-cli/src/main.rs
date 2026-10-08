@@ -41,6 +41,7 @@ caligo-cli <K1 probe>
   caligo-cli rtti <module-path> --contains <substr>
   caligo-cli envscan --pid <n> --vtable <rva-hex[:member-off-hex]> [--include-mapped]
                      [--context <bytes>] [--out <report.json>]
+  caligo-cli observe-msf --pid <n> [--out <report.json>] [--self-test]
   caligo-cli inject --pid <n> --bridge <bridge.dll> --manifest <manifest.json>
                     --report <report.json> --confirm-designated-test-instance
                     [--obs-report <obs.json>] [--env-report <env.jsonl>]
@@ -55,6 +56,8 @@ caligo-cli <K1 probe>
   且执行者显式确认目标实例已按 docs/research/test-scope.md 指定。
   bytes/rtti 是离线静态分析工具(读文件字节)。
   envscan 是外部只读内存扫描(ReadProcessMemory,零注入;仍须记录目标实例)。
+  observe-msf 是 P1 受控观测(外部只读,零注入/零写入/零 QQ 函数调用;
+  不消耗实例的首次 bootstrap 机会;输出记录 PID 与进程创建时间)。
   --intr-env 0 为干跑(只验证链路,不调用 RequestInterrupt)。
   --async-mode 0/1/2 = 干跑 / uv_async 原子载荷 / JS 枚举 major(K2-03)。
 ";
