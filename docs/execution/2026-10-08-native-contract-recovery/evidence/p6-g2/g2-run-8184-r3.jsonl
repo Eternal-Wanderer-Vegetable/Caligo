@@ -1,0 +1,6 @@
+{"ts":1791502940436,"tid":20072,"stage":"g2_adopt","ok":true,"detail":"svc=2697658105856"}
+{"ts":1791502940436,"tid":20072,"stage":"g2_scan","ok":true,"detail":"SC scan begin (RPM-self)"}
+{"ts":1791502940618,"tid":20072,"stage":"g2_scan","ok":true,"detail":"SC scan done"}
+{"ts":1791502940619,"tid":20072,"stage":"g2_manager","ok":true,"detail":"manager=2697651743168 vptr=0x27419d20008 (shim(堆垫片vtable)) sc_candidates=1"}
+{"ts":1791502940619,"tid":20072,"stage":"g2_tree","ok":true,"detail":"b0=0x27418f871d0 end=0x2741892eb38 root=0x27418f871d0 size=2"}
+{"ts":1791502940619,"tid":20072,"stage":"g2_swap","ok":true,"detail":"ours=7fff76b5a2f8 prev=0x27418f871d0"}

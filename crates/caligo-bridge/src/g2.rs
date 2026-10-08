@@ -67,6 +67,13 @@ struct Ring {
 
 static RING: std::sync::OnceLock<Ring> = std::sync::OnceLock::new();
 
+/// 头部读取不可读计数(坏指针/已释放对象;RPM-self 返回 None 的次数)。
+static UNREADABLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn r_unreadable() -> &'static std::sync::atomic::AtomicU64 {
+    &UNREADABLE
+}
+
 fn ring() -> &'static Ring {
     RING.get_or_init(|| Ring {
         items: Mutex::new(Vec::new()),
@@ -96,28 +103,43 @@ unsafe extern "system" fn g2_noop3(_a: *mut c_void, _b: *mut c_void, _c: *mut c_
 
 /// slot6 处理器:捕获 msg 对象头 → 环。无转发需求(QQ 监听器被原生遍历通知)。
 unsafe extern "system" fn g2_slot6(_this: *mut c_void, msg_pair: *mut c_void) {
-    // SAFETY: 边界内只做有界内存读 + ring 拷贝;panic 隔离。
+    // 边界纪律(2026-10-09 崩溃教训):回调线程是 QQ 接收线程,任何直接
+    // 解引用的硬件异常(不可读地址)不受 catch_unwind 保护 → 进程终止。
+    // 全部读取经 safe_read_qword(RPM-self):坏地址返回 None,跳过并计数。
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if !msg_pair.is_null() {
-            let pair = *(msg_pair as *const [u64; 2]); // {obj, ctrl}
-            let obj = pair[0] as usize;
-            if obj != 0 {
-                // 捕获头 0x40 字节(opaque;8 qword)。
-                let mut head = [0u64; 8];
-                for (i, h) in head.iter_mut().enumerate() {
-                    // SAFETY: QQ 构造的 msg 对象;读失败保持 0。
-                    *h = unsafe { core::ptr::read_volatile((obj + i * 8) as *const u64) };
-                }
-                let r = ring();
-                let mut q = r.items.lock().unwrap();
-                if q.len() < r.cap {
-                    // 打包 8 qword → 4 条 (u64,u64) 记录(顺序保留)。
-                    for c in 0..4 {
-                        q.push((head[c * 2], head[c * 2 + 1]));
+            // {obj, ctrl} 对读(垫片传参形状未定证,逐 qword 安全读)。
+            let pair0 = safe_read_qword(msg_pair as usize);
+            if let Some(pair0) = pair0 {
+                let obj = pair0 as usize;
+                if obj != 0 {
+                    // 捕获头 0x40 字节(opaque;8 qword);任一不可读即整体放弃。
+                    let mut head = [0u64; 8];
+                    let mut ok = true;
+                    for (i, h) in head.iter_mut().enumerate() {
+                        match safe_read_qword(obj + i * 8) {
+                            Some(v) => *h = v,
+                            None => {
+                                ok = false;
+                                break;
+                            }
+                        }
                     }
-                    r.pushed.fetch_add(4, Ordering::Relaxed);
-                } else {
-                    r.dropped.fetch_add(1, Ordering::Relaxed);
+                    if ok {
+                        let r = ring();
+                        let mut q = r.items.lock().unwrap();
+                        if q.len() < r.cap {
+                            // 打包 8 qword → 4 条 (u64,u64) 记录(顺序保留)。
+                            for c in 0..4 {
+                                q.push((head[c * 2], head[c * 2 + 1]));
+                            }
+                            r.pushed.fetch_add(4, Ordering::Relaxed);
+                        } else {
+                            r.dropped.fetch_add(1, Ordering::Relaxed);
+                        }
+                    } else {
+                        r_unreadable().fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         }
@@ -462,13 +484,23 @@ pub unsafe fn g2_listen_run(ctx: *const G2Ctx) -> u32 {
         }
         let _ = writeln!(
             f,
-            "{{\"kind\":\"summary\",\"pushed\":{},\"dropped\":{}}}",
+            "{{\"kind\":\"summary\",\"pushed\":{},\"dropped\":{},\"unreadable\":{}}}",
             r.pushed.load(Ordering::Relaxed),
-            r.dropped.load(Ordering::Relaxed)
+            r.dropped.load(Ordering::Relaxed),
+            UNREADABLE.load(Ordering::Relaxed)
         );
     }
     drop(q);
-    stage(report_path, "g2_done", true, &format!("captured={}", r.pushed.load(Ordering::Relaxed)));
+    stage(
+        report_path,
+        "g2_done",
+        true,
+        &format!(
+            "captured={} unreadable={}",
+            r.pushed.load(Ordering::Relaxed),
+            UNREADABLE.load(Ordering::Relaxed)
+        ),
+    );
     OK
 }
 
@@ -503,23 +535,35 @@ mod route_a_deprecated {
         // SAFETY: 边界内只做有界内存读 + ring 拷贝 + 转发;panic 隔离。
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if !msg_pair.is_null() {
-                let pair = *(msg_pair as *const [u64; 2]);
-                let obj = pair[0] as usize;
-                if obj != 0 {
-                    let mut head = [0u64; 8];
-                    for (i, h) in head.iter_mut().enumerate() {
-                        // SAFETY: QQ 构造的 msg 对象;读失败保持 0。
-                        *h = unsafe { core::ptr::read_volatile((obj + i * 8) as *const u64) };
-                    }
-                    let r = ring();
-                    let mut q = r.items.lock().unwrap();
-                    if q.len() < r.cap {
-                        for c in 0..4 {
-                            q.push((head[c * 2], head[c * 2 + 1]));
+                // 同 slot6 纪律:全部 RPM-self 读,硬件异常不可捕获。
+                if let Some(pair0) = safe_read_qword(msg_pair as usize) {
+                    let obj = pair0 as usize;
+                    if obj != 0 {
+                        let mut head = [0u64; 8];
+                        let mut ok = true;
+                        for (i, h) in head.iter_mut().enumerate() {
+                            match safe_read_qword(obj + i * 8) {
+                                Some(v) => *h = v,
+                                None => {
+                                    ok = false;
+                                    break;
+                                }
+                            }
                         }
-                        r.pushed.fetch_add(4, Ordering::Relaxed);
-                    } else {
-                        r.dropped.fetch_add(1, Ordering::Relaxed);
+                        if ok {
+                            let r = ring();
+                            let mut q = r.items.lock().unwrap();
+                            if q.len() < r.cap {
+                                for c in 0..4 {
+                                    q.push((head[c * 2], head[c * 2 + 1]));
+                                }
+                                r.pushed.fetch_add(4, Ordering::Relaxed);
+                            } else {
+                                r.dropped.fetch_add(1, Ordering::Relaxed);
+                            }
+                        } else {
+                            r_unreadable().fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 }
             }

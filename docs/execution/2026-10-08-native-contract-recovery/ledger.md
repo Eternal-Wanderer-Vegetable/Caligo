@@ -205,3 +205,19 @@ P1 首轮交付的实质进展（细节见两份合同文档）：
   (远程线程按 QQ CWD 解析相对路径的缺陷一并修复)、等待宽限 15s→60s。
 - **待办**:用户重启 QQ → 重新注入(修复版)→ 验证 g2_scan/g2_manager/
   g2_tree/g2_swap/g2_restore 全链 → 采样。
+
+## 2026-10-09(续):8184 第二次实例损失 —— 回调内硬件异常,已修复
+
+- **g2 链前 5 阶段全 PASS**(g2-run-8184-r3.jsonl):adopt ✓ → RPM-self 扫描
+  182ms ✓ → manager 指纹过验(shim)✓ → 树快照与 observe 一致
+  (b0=root,size=2)✓ → swap ✓;**QQ 在 8s 窗口内崩溃**,无 restore/done。
+- **根因(崩溃转储 QQ.exe.8184.dmp 解析)**:崩溃线程 tid=41888 = QQ 接收
+  线程,正在执行 slot3 处理器链(rip=bridge+0x104096,rcx=0x7,
+  rax=0x600000002);处理器内 `read_volatile(obj)` 撞不可读地址 ——
+  **硬件访问违例不受 catch_unwind 保护**;垫片传参实参形状与原版
+  {obj,ctrl} 共享对不保证同形,任何直接解引用都是崩溃点。
+- **修复**:slot3/slot6 处理器与弃用路线 A 处理器内全部读取改
+  safe_read_qword;不可读计数 UNREADABLE 并入 summary/done 阶段日志。
+- **附带修复**:cargo test 会以非 research 配置重写 target/debug 的
+  bridge DLL —— 注入前必须以 research 构建为最后一步;改用独立
+  `--target-dir target/g2`(DLL 被目标进程锁定时同样必要)。
