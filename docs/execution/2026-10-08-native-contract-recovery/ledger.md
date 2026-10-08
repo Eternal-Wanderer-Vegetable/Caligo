@@ -29,7 +29,7 @@
 | P0 基线 | PASS | 本文件 P0 表 |
 | P1 原生合同（G-ABI/G-THREAD/G-LIFE） | **IN PROGRESS（首轮有界交付完成；关键间接目标未闭合 → 走计划失败分支的受控观测方案）** | `docs/research/qq-native-thread-contract.md`、`docs/research/qq-native-lifetime-contract.md`；外部证据 `E:/stella/_reference/qq-native-r3-p1-20261008/`（phaseA–G 共 165 函数 + 3 个字节级扫描脚本） |
 | P2 路线冻结 | **PASS（文档层；2026-10-08）** | `docs/research/k4-native-route-decision.md`、`docs/contracts/qq-9.9.33-52230.capability-profile.json`；loading-route-decision §4 / source-register S16–S18 增补 |
-| P4–P9 | **P6 G1 首次原生调用 PASS**(2026-10-08,实例 31208;见 P6 表);P4 已完成、P5 第一批已交付;P5 残余:真实抓包 fixture 替换字段验证;G1 完整收口余:常驻 adapter 接线 + 停止观察 | 本文件 P6 表 |
+| P4–P9 | **P6 G1 准入 PASS**(含收口常驻观测,2026-10-08,实例 31208;见 P6 表);P4/P5 已交付;**G2 接收设计已定稿**(`docs/research/qq-native-receive-design.md`:push 监听器链 +0x170/slot6 注册方案);待实现:注册函数定位→LAB→现场采样 | 本文件 P6 表 + 接收设计文档 |
 | P3 公共 IPC/身份/恢复（LAB） | **PASS（LAB 层）** | 本文件 P3 表；`evidence/p3-lab/` |
 | P4–P9 | NOT STARTED | — |
 
