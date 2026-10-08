@@ -176,6 +176,16 @@ fn print_summary(r: &ObserveReport) {
                 "[observe-msf]   链头区 M+0x160..0x190: {:?}",
                 c.header_qwords.iter().map(|v| format!("{v:#x}")).collect::<Vec<_>>()
             );
+            if !m.sc_manager_region.is_empty() {
+                println!(
+                    "[observe-msf]   SC+0x150 对象区域: {:?}",
+                    m.sc_manager_region.iter().map(|v| format!("{v:#x}")).collect::<Vec<_>>()
+                );
+                println!(
+                    "[observe-msf]   其 vptr 块(vptr-0x8 起 8 qword): {:?}",
+                    m.sc_manager_vptr_block.iter().map(|v| format!("{v:#x}")).collect::<Vec<_>>()
+                );
+            }
             println!(
                 "[observe-msf]   E_a={:#x} = {:?}",
                 c.header_qwords[1],
@@ -352,6 +362,10 @@ struct ManagerReport {
     chain: Option<ChainDump>,
     /// 堆扫发现的所有 Manager 候选(含未选中的)。
     all_instances: Vec<ManagerCandidate>,
+    /// SC+0x150 对象的全区域快照(0x1A0;不论 vptr 是否过验)。
+    sc_manager_region: Vec<u64>,
+    /// SC+0x150 对象 vptr 指向的堆 vtable 块(8 qword)。
+    sc_manager_vptr_block: Vec<u64>,
 }
 
 #[derive(serde::Serialize)]
@@ -526,24 +540,50 @@ fn observe(pid: u32, planted_idx: Option<u64>, self_test: bool) -> Result<Observ
     if base != 0 {
         let mut all: Vec<ManagerCandidate> = Vec::new();
         let mut primary: Option<u64> = None;
+        let mut sc_region: Vec<u64> = Vec::new();
+        let mut sc_vptr_block: Vec<u64> = Vec::new();
         for sc in scan_heap_needle(&obs, base + SC_VTBL_RVA, 0, base) {
             let m = obs.q(sc.addr + 0x150).unwrap_or(0);
             let m_vptr = if m != 0 { obs.q(m).unwrap_or(0) } else { 0 };
-            let ok = m != 0 && m_vptr == base + MANAGER_VTBL_RVA;
+            // 指纹:ctor 字节 +0x08==1(低位);vptr = 原版 vtable 或垫片
+            // (前 5 槽落 wrapper;2026-10-09 活实例实证)。
+            let flag_ok = obs.q(m + 8).map(|f| f & 0xFF == 1).unwrap_or(false);
+            let shim_slots = if m_vptr >= 0x10000 {
+                (0..5).filter(|k| {
+                    obs.q(m_vptr + k * 8)
+                        .map(|s| s.checked_sub(base).is_some_and(|r| r < 0x800_0000))
+                        .unwrap_or(false)
+                }).count()
+            } else {
+                0
+            };
+            let raw = m_vptr == base + MANAGER_VTBL_RVA;
+            let ok = m != 0 && flag_ok && (raw || shim_slots >= 4) &&
+                obs.q(m + 0x170).is_some_and(|b| b != 0);
             let m_vptr_rva = m_vptr.checked_sub(base);
             all.push(ManagerCandidate {
                 addr: m,
                 o0: obs.q(m + 0x140).unwrap_or(0),
                 list_head: obs.q(m + 0x170).unwrap_or(0),
                 via: format!(
-                    "SC{:#x}+0x150→{:#x}(vptr={:#x} rva={:?}){}",
+                    "SC{:#x}+0x150→{:#x}(vptr={:#x} rva={:?} {}){}",
                     sc.addr,
                     m,
                     m_vptr,
                     m_vptr_rva,
+                    if raw { "raw" } else if shim_slots >= 4 { "shim" } else { "?" },
                     if ok { "" } else { "(未过验)" }
                 ),
             });
+            if sc_region.is_empty() {
+                // 首个 SC 候选:快照 *(SC+0x150) 对象区域与其 vptr 块。
+                for k in 0..52u64 {
+                    sc_region.push(obs.q(m + k * 8).unwrap_or(0));
+                }
+                for k in 0..8u64 {
+                    sc_vptr_block.push(obs.q(m_vptr.wrapping_sub(8) + k * 8).unwrap_or(0));
+                }
+            }
             if ok && primary.is_none() {
                 primary = Some(m);
             }
@@ -554,6 +594,8 @@ fn observe(pid: u32, planted_idx: Option<u64>, self_test: bool) -> Result<Observ
                 let mut rep = manager_report(&obs, addr, base, "SC+0x150");
                 rep.all_instances = all;
                 rep.all_instances.extend(via_v);
+                rep.sc_manager_region = sc_region;
+                rep.sc_manager_vptr_block = sc_vptr_block;
                 manager = Some(rep);
             }
             None => {
@@ -563,6 +605,8 @@ fn observe(pid: u32, planted_idx: Option<u64>, self_test: bool) -> Result<Observ
                         let mut rep = manager_report(&obs, addr, base, "vptr堆扫(回退)");
                         rep.all_instances = all;
                         rep.all_instances.extend(via_v);
+                        rep.sc_manager_region = sc_region;
+                        rep.sc_manager_vptr_block = sc_vptr_block;
                         manager = Some(rep);
                     }
                     None => {
@@ -570,6 +614,8 @@ fn observe(pid: u32, planted_idx: Option<u64>, self_test: bool) -> Result<Observ
                             // 只有 SC 候选而无过验 Manager:如实报该候选。
                             let mut rep = manager_report(&obs, c.addr, base, "SC候选(Manager未过验)");
                             rep.all_instances = all;
+                            rep.sc_manager_region = sc_region;
+                            rep.sc_manager_vptr_block = sc_vptr_block;
                             manager = Some(rep);
                         }
                     }
@@ -1096,6 +1142,8 @@ fn manager_report(obs: &Observer, candidate: u64, base: u64, _via: &str) -> Mana
         sentinel_head,
         chain: None,
         all_instances: Vec::new(),
+        sc_manager_region: Vec::new(),
+        sc_manager_vptr_block: Vec::new(),
     }
 }
 

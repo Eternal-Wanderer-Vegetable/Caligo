@@ -80,8 +80,9 @@ fn ring() -> &'static Ring {
 static mut OUR_OBJECT: [*mut c_void; 4] = [core::ptr::null_mut(); 4];
 static OUR_OBJECT_READY: AtomicU64 = AtomicU64::new(0);
 
-/// 我们的 vtable:slot5(+0x28)请求完成=no-op,slot6(+0x30)推送=处理器,
-/// slot9(+0x48)请求分派=no-op;其余槽位合法 no-op(未定证 QQ 只用这三槽)。
+/// 我们的 vtable:slot3(+0x18)推送=捕获处理器(垫片路径,活实例实证),
+/// slot6(+0x30)=同处理器(原版 1B41AE6 路径备份;一次分派只会走其一),
+/// slot5(+0x28)/slot9(+0x48)请求=no-op;其余槽位合法 no-op。
 static mut OUR_VTABLE: [usize; 16] = [0; 16];
 
 /// 伪树节点(libc++ __tree_node 几何):{left@0, right@8, parent@0x10,
@@ -132,9 +133,10 @@ fn init_object_and_node() -> (*mut c_void, *mut u64) {
                 *slot = g2_noop2 as usize;
             }
             OUR_VTABLE[0] = g2_noop2 as usize; // slot0
+            OUR_VTABLE[3] = g2_slot6 as usize; // slot3 +0x18 推送(垫片路径,实证)
             OUR_VTABLE[5] = g2_noop2 as usize; // slot5 +0x28 请求完成
-            OUR_VTABLE[6] = g2_slot6 as usize; // slot6 +0x30 推送
-            OUR_VTABLE[9] = g2_noop3 as usize; // slot9 +0x48 请求分派
+            OUR_VTABLE[6] = g2_slot6 as usize; // slot6 +0x30 推送(原版路径备份)
+            OUR_VTABLE[9] = g2_noop3 as usize; // slot9 +0x48 请求分派(1B3F740)
             OUR_OBJECT[0] = OUR_VTABLE.as_mut_ptr() as *mut c_void;
             OUR_OBJECT_READY.store(1, Ordering::Release);
         }
@@ -149,8 +151,96 @@ fn init_object_and_node() -> (*mut c_void, *mut u64) {
     }
 }
 
+/// RPM-self 安全读:经内核侧校验,页面已释放/去提交时返回 None 而非异常。
+/// (直接解引用与 QQ 堆释放存在竞态 —— 2026-10-09 实例损失根因,禁用。)
+fn safe_read_qword(addr: usize) -> Option<u64> {
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut out = 0u64;
+    let mut got = 0usize;
+    // SAFETY: 自进程 RPM;缓冲在栈上。
+    let ok = unsafe {
+        ReadProcessMemory(
+            GetCurrentProcess(),
+            addr as *const c_void,
+            (&mut out as *mut u64).cast(),
+            8,
+            &mut got,
+        )
+    };
+    if ok == 0 || got != 8 {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// RPM-self 区块读取(4MB 分块,坏块截断不臆测)。
+fn read_region_chunked(base: usize, size: usize) -> Vec<u8> {
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    const CHUNK: usize = 4 * 1024 * 1024;
+    let mut out = Vec::with_capacity(size);
+    let mut off = 0usize;
+    while off < size {
+        let n = CHUNK.min(size - off);
+        let begin = out.len();
+        out.resize(begin + n, 0);
+        let mut got = 0usize;
+        // SAFETY: 自进程 RPM;缓冲由 out 持有。
+        let ok = unsafe {
+            ReadProcessMemory(
+                GetCurrentProcess(),
+                (base + off) as *const c_void,
+                out[begin..].as_mut_ptr().cast(),
+                n,
+                &mut got,
+            )
+        };
+        if ok == 0 || got != n {
+            out.truncate(begin);
+            break;
+        }
+        off += n;
+    }
+    out
+}
+
+/// Manager 结构指纹(2026-10-09 活实例实证):ctor 字节不变量 +0x08 低位
+/// 字节 == 1;vptr 要么是原版 Manager vtable,要么是堆垫片 vtable(前 5 槽
+/// 全落在 wrapper 模块内,2026-10-09 实测);+0x170 begin_node 可读非零。
+fn manager_fingerprint(m: usize, wrapper_base: usize) -> Option<(bool, u64)> {
+    // 全部经 RPM-self 读取:对象可能在读取瞬间被 QQ 释放。
+    let flag = safe_read_qword(m + 8)?;
+    if flag & 0xFF != 1 {
+        return None;
+    }
+    let vptr = safe_read_qword(m)?;
+    if vptr < 0x10000 {
+        return None;
+    }
+    let mut shim_slots = 0usize;
+    for k in 0..5usize {
+        let slot = safe_read_qword(vptr as usize + k * 8)?;
+        let rva = (slot as usize).wrapping_sub(wrapper_base);
+        if rva < 0x800_0000 {
+            shim_slots += 1;
+        }
+    }
+    let raw = vptr == (wrapper_base + MANAGER_VTBL_RVA) as u64;
+    if !raw && shim_slots < 4 {
+        return None;
+    }
+    let begin = safe_read_qword(m + FIELD_BEGIN_NODE)?;
+    if begin == 0 {
+        return None;
+    }
+    Some((shim_slots >= 4, vptr))
+}
+
 /// 进程内定位活 Manager:扫描自身 MEM_PRIVATE 提交区找 SC vptr needle →
-/// m = *(SC+0x150),验 *(m) == Manager vptr。返回 (manager, 候选数)。
+/// m = *(SC+0x150),按结构指纹过验(原版 vtable 或垫片 vtable)。
+/// 返回 (manager, 候选数)。
 fn locate_manager(wrapper_base: usize) -> Option<(usize, usize)> {
     use windows_sys::Win32::System::Memory::{
         MEM_COMMIT, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS,
@@ -183,25 +273,20 @@ fn locate_manager(wrapper_base: usize) -> Option<(usize, usize)> {
             && protect & PAGE_GUARD == 0
             && protect & PAGE_NOACCESS == 0
         {
-            // SAFETY: 已提交可读私有内存的进程内读取;越界不可读由调用侧
-            // 前提(commit+可读 protect)保证,单 qword 对齐读。
-            let end = base_addr + region;
-            let mut p = base_addr;
-            while p + 8 <= end {
-                let v = unsafe { (p as *const u64).read_volatile() };
-                if v == needle {
-                    candidates += 1;
-                    let m = unsafe { ((p + SC_FIELD_MANAGER) as *const u64).read_volatile() as usize };
-                    let vptr = if m != 0 {
-                        unsafe { (m as *const u64).read_volatile() }
-                    } else {
-                        0
-                    };
-                    if vptr == (wrapper_base + MANAGER_VTBL_RVA) as u64 {
-                        return Some((m, candidates));
+            let buf = read_region_chunked(base_addr, region);
+            let mut i = 0usize;
+            while i + 8 <= buf.len() {
+                if u64::from_le_bytes(buf[i..i + 8].try_into().unwrap()) == needle {
+                    let p = base_addr + i;
+                    if let Some(m) = safe_read_qword(p + SC_FIELD_MANAGER) {
+                        let m = m as usize;
+                        if m != 0 && manager_fingerprint(m, wrapper_base).is_some() {
+                            candidates += 1;
+                            return Some((m, candidates));
+                        }
                     }
                 }
-                p += 8;
+                i += 8;
             }
         }
         addr = base_addr + region;
@@ -291,28 +376,39 @@ pub unsafe fn g2_listen_run(ctx: *const G2Ctx) -> u32 {
     stage(report_path, "g2_adopt", true, &format!("svc={}", pair.obj as u64));
 
     // 活 Manager 定位(SC+0x150 正路)。
+    stage(report_path, "g2_scan", true, "SC scan begin (RPM-self)");
     let Some((manager, sc_n)) = locate_manager(wrapper_base) else {
         stage(report_path, "g2_manager", false, "SC scan found no verified Manager");
         return ERR_NO_MANAGER;
     };
-    let m_vptr = unsafe { core::ptr::read_volatile(manager as *const u64) };
+    stage(report_path, "g2_scan", true, "SC scan done");
+    let m_vptr = safe_read_qword(manager).unwrap_or(0);
     stage(
         report_path,
         "g2_manager",
         true,
         &format!(
-            "manager={} vptr={} sc_candidates={sc_n}",
+            "manager={} vptr={} ({}) sc_candidates={sc_n}",
             manager as u64,
-            hex64(m_vptr)
+            hex64(m_vptr),
+            if m_vptr == (wrapper_base + MANAGER_VTBL_RVA) as u64 {
+                "raw"
+            } else {
+                "shim(堆垫片vtable)"
+            }
         ),
     );
 
     // 容器快照 + 交换。
     let end_node = (manager + FIELD_BEGIN_NODE + 8) as u64;
     let begin_slot = (manager + FIELD_BEGIN_NODE) as *mut AtomicU64;
-    let b0 = unsafe { (*begin_slot).load(Ordering::Acquire) };
-    let root = unsafe { core::ptr::read_volatile((end_node as usize) as *const u64) };
-    let size = unsafe { core::ptr::read_volatile((end_node as usize + 8) as *const u64) };
+    let b0 = safe_read_qword(manager + FIELD_BEGIN_NODE).unwrap_or(0);
+    if b0 == 0 {
+        stage(report_path, "g2_tree", false, "begin_node unreadable/zero (Manager freed?)");
+        return ERR_NO_MANAGER;
+    }
+    let root = safe_read_qword(end_node as usize).unwrap_or(0);
+    let size = safe_read_qword(end_node as usize + 8).unwrap_or(0);
     stage(
         report_path,
         "g2_tree",
@@ -343,7 +439,7 @@ pub unsafe fn g2_listen_run(ctx: *const G2Ctx) -> u32 {
     }
 
     // 恢复(仅当座位仍是我们的;被 QQ 覆写则不回写 stale B0)。
-    let cur = unsafe { (*begin_slot).load(Ordering::Acquire) };
+    let cur = safe_read_qword(manager + FIELD_BEGIN_NODE).unwrap_or(0);
     if cur == our_node as u64 {
         unsafe { (*begin_slot).store(b0, Ordering::Release) };
         stage(report_path, "g2_restore", true, "B0 restored");
@@ -554,6 +650,21 @@ mod tests {
                 *begin_slot as usize,
                 n3.as_mut_ptr() as usize,
                 "恢复后 B0 回位"
+            );
+
+            // 垫片路径通知(活实例实证):listener->vtbl slot3(+0x18) 落入捕获环。
+            let pushed_before = ring().pushed.load(Ordering::Relaxed);
+            let msg_obj = [0xCADEu64, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8];
+            let pair = [msg_obj.as_ptr() as u64, 0u64];
+            let lptr = ours_obj as *mut usize;
+            let vptr = *lptr; // 我们的对象 vptr = OUR_VTABLE
+            // SAFETY: vtable[3] = g2_slot6(捕获);测试构造的 pair。
+            let f: unsafe extern "system" fn(*mut c_void, *mut c_void) =
+                unsafe { core::mem::transmute(core::ptr::read_volatile((vptr + 3 * 8) as *const usize)) };
+            unsafe { f(ours_obj, core::ptr::from_ref(&pair).cast::<c_void>().cast_mut()) };
+            assert!(
+                ring().pushed.load(Ordering::Relaxed) > pushed_before,
+                "slot3(+0x18) 通知已入捕获环"
             );
         }
     }

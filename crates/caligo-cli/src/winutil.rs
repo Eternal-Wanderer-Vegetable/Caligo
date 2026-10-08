@@ -740,7 +740,15 @@ pub unsafe fn inject_and_probe(
                 if wrapper_base == 0 {
                     return Err("wrapper.node base unresolved in target (g2)".into());
                 }
-                let g2_wide = to_wide(&g2_path.to_string_lossy());
+                // 绝对化:远程线程按目标进程 CWD 解析相对路径,必须传全路径。
+                let g2_abs = if g2_path.is_absolute() {
+                    g2_path.to_path_buf()
+                } else {
+                    std::env::current_dir()
+                        .map_err(|e| format!("current_dir: {e}"))?
+                        .join(g2_path)
+                };
+                let g2_wide = to_wide(&g2_abs.to_string_lossy());
                 let remote_g2_path = alloc_and_write(&g2_wide, "alloc g2 report path")?;
                 buf_obs = Some(remote_g2_path);
                 let mut ctx_bytes = Vec::with_capacity(24);
@@ -766,9 +774,10 @@ pub unsafe fn inject_and_probe(
                 if g2_thread.is_null() {
                     return Err(format!("CreateRemoteThread(g2): Win32 error {}", GetLastError()));
                 }
+                // 宽限 60s:定位扫描(MEM_PRIVATE 全量)在繁忙实例上可达数十秒。
                 let wait_g2 = WaitForSingleObject(
                     g2_thread,
-                    if g2_run_ms > 0 { g2_run_ms.saturating_add(15_000) } else { 20_000 },
+                    if g2_run_ms > 0 { g2_run_ms.saturating_add(60_000) } else { 65_000 },
                 );
                 let mut code: u32 = u32::MAX;
                 GetExitCodeThread(g2_thread, &mut code);
