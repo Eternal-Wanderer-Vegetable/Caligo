@@ -750,21 +750,32 @@ impl crate::host_adapter::HostAdapter for QqOwnerAdapter {
     }
     fn env_valid(&self) -> bool {
         // 每次进入宿主 API 前重读新鲜度门(不缓存 —— K3 教训)。
+        let expected = (ENTRY.qqnt_base.load(Ordering::Acquire) as u64)
+            .wrapping_add(EXPECTED_VTABLE_RVA as u64);
         match read_usize_checked(self.handle_env()) {
-            Some(v) => v as u64
-                == (ENTRY.qqnt_base.load(Ordering::Acquire) as u64)
-                    .wrapping_add(EXPECTED_VTABLE_RVA as u64),
-            None => false,
+            Some(v) => {
+                let ok = v as u64 == expected;
+                if !ok {
+                    append_stage_simple(
+                        "env_valid_false",
+                        false,
+                        &format!("vfptr={v:#x} expected={expected:#x}"),
+                    );
+                }
+                ok
+            }
+            None => {
+                append_stage_simple("env_valid_false", false, "page unreadable");
+                false
+            }
         }
     }
+    /// 范围界定(计划 §5.1 + K2-03 r3 实证):quiet uv 轮转点 GetCurrent
+    /// 合法为 0,entered/incumbent 才是有效上下文证明。D7/D8/D9 的 pump 面
+    /// (监听器/轮询/发送经 HandleScope)由 qq_v8::exec_script 的阶梯上下文
+    /// 校验把守 —— 本方法承载 owner 线程 + env 新鲜之外的第三重:loop 存活。
     fn current_context_ok(&self) -> bool {
-        // SAFETY: 符号地址经 bootstrap 校验。
-        unsafe {
-            let get_current: FnIsolateGetCurrent =
-                EntrySymbols::to_fn(ENTRY.sym_isolate_get_current.load(Ordering::Acquire));
-            let current = (get_current)() as usize;
-            current != 0 && current == ENTRY.isolate.load(Ordering::Acquire)
-        }
+        uv_loop_alive()
     }
     fn native_op(&mut self, op: crate::host_adapter::HostOp) -> Result<crate::host_adapter::HostOpResult, crate::host_adapter::HostError> {
         use crate::host_adapter::{HostError, HostOp, HostOpResult};
