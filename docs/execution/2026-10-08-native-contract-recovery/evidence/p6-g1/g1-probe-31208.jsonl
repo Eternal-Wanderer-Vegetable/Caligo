@@ -1,0 +1,7 @@
+{"ts":1791466241545,"tid":4672,"stage":"pre_state","ok":true,"detail":"tid=4672 obj=0x25c12d70000 ctrl=0x25c12d4e6c0 strong=433"}
+{"ts":1791466241545,"tid":4672,"stage":"getter_called","ok":true,"detail":"out_obj=0x25c12d70000 out_ctrl=0x25c12d4e6c0"}
+{"ts":1791466241545,"tid":4672,"stage":"anchor","ok":true,"detail":"vptr_rva=0x3f6ded8 expect=0x3f6ded8"}
+{"ts":1791466241545,"tid":4672,"stage":"refcount","ok":true,"detail":"pre=433 post=434 (lease: no release; family unpinned)"}
+{"ts":1791466241545,"tid":4672,"stage":"transport","ok":true,"detail":"addr=0x25c1280dc60 vptr_rva=0x41403b8 expect=0x41403b8"}
+{"ts":1791466241545,"tid":4672,"stage":"inner_pair","ok":true,"detail":"addr=0x25c1284ea40"}
+{"ts":1791466241546,"tid":4672,"stage":"g1_probe_done","ok":true,"detail":"getter admitted on loader thread; no send; lease held"}

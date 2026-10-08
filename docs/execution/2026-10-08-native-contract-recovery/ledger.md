@@ -29,7 +29,7 @@
 | P0 基线 | PASS | 本文件 P0 表 |
 | P1 原生合同（G-ABI/G-THREAD/G-LIFE） | **IN PROGRESS（首轮有界交付完成；关键间接目标未闭合 → 走计划失败分支的受控观测方案）** | `docs/research/qq-native-thread-contract.md`、`docs/research/qq-native-lifetime-contract.md`；外部证据 `E:/stella/_reference/qq-native-r3-p1-20261008/`（phaseA–G 共 165 函数 + 3 个字节级扫描脚本） |
 | P2 路线冻结 | **PASS（文档层；2026-10-08）** | `docs/research/k4-native-route-decision.md`、`docs/contracts/qq-9.9.33-52230.capability-profile.json`；loading-route-decision §4 / source-register S16–S18 增补 |
-| P4–P9 | P4 **基本完成**(第二批=resident 锁范围改造已交付;真实 shutdown 导出的 lib.rs 接线归 P6 native 入口)、P5 第一批已交付;P5 残余:真实抓包 fixture 替换字段验证 | 本文件 P4/P5 表 |
+| P4–P9 | **P6 G1 首次原生调用 PASS**(2026-10-08,实例 31208;见 P6 表);P4 已完成、P5 第一批已交付;P5 残余:真实抓包 fixture 替换字段验证;G1 完整收口余:常驻 adapter 接线 + 停止观察 | 本文件 P6 表 |
 | P3 公共 IPC/身份/恢复（LAB） | **PASS（LAB 层）** | 本文件 P3 表；`evidence/p3-lab/` |
 | P4–P9 | NOT STARTED | — |
 
@@ -80,7 +80,32 @@ P1 首轮交付的实质进展（细节见两份合同文档）：
 - workspace 119 + core research 70 + bridge research 45 = **234 passed / 0 failed**(分套计数;`evidence/p4-lab/after-b.txt` 为单次全量日志)。
 - 重入红验证:改造前 drain 内联 token() 必死锁(std Mutex 不可重入),测试 timeout 击杀;改造后绿。
 
-### P5 反例与验证(2026-10-08,4/4 绿 + 模块单测 17 绿)
+### P6 — G1 首次原生调用(2026-10-08,实例 31208)
+
+**实例登记**(P6 纪律:新实例新 PID):
+- PID **31208**,创建 2026-10-08T13:17:19Z(UTC),QQNT 9.9.33-52230;
+- 探针前外部核对(observe-msf t1):锚点命中,单例活跃,transport 已安装;
+- manifest 全模块 PASS(双门控之 gate 1),执行者重启实例即为指定确认(gate 2)。
+
+**首次原生调用**(inject → caligo_g1_probe_run,loader 新建线程 tid=4672):
+
+| 阶段 | 结果 |
+|---|---|
+| pre_state | 单例在位 obj=0x25c12d70000 strong=433 |
+| **getter 72DE38 调用** | **成功**——非 QQ 线程被准入,返回 pair(线程准入问题的首个运行时答案) |
+| anchor | obj vptr RVA 0x3f6ded8 == 锚点 |
+| refcount | strong 433→**434**(恰 +1,getter 契约成立) |
+| transport | +0x60 在位,vptr RVA 0x41403b8 == R3.1 现场观测值 |
+| inner_pair | transport+0x60 在位(0x25c1284ea40)—— 会话已连接 |
+| 纪律 | **零发送**;无释放(家族未定证,租约持有至进程退出,如实记录) |
+
+**事后**:QQ 实例存活(同 PID/创建时间);t2 外部复查 strong=465(自身活动平稳)、锚点仍命中。
+
+**结论**:G1 的"线程准入 + 真实对象/引用 + 账号连接状态"三项全部通过;getter 从非 QQ worker 线程可调用是 capability profile `gates.send` 有条件准入的关键证据。G1 完整收口(常驻 adapter 接线 + 停止链观察)随 native 入口实现推进;G2 收消息门未动。
+
+证据:`evidence/p6-g1/`(observe t1/t2、probe json、g1 jsonl);工具 `crates/caligo-bridge/src/g1.rs` + `caligo-cli observe-msf/inject --g1-report`。
+
+## P5 反例与验证(2026-10-08,4/4 绿 + 模块单测 17 绿)
 
 | ID | 场景 | 结果 |
 |---|---|---|

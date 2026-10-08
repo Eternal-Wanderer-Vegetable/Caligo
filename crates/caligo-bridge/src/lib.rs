@@ -59,6 +59,7 @@ pub mod obs;
 pub mod qq_entry;
 #[cfg(feature = "research")]
 pub mod qq_v8;
+pub mod g1;
 pub mod register;
 pub mod resident;
 
@@ -319,6 +320,27 @@ pub unsafe extern "system" fn caligo_obs_run(report_path: *const u16) -> u32 {
 /// 远程已写入的 NUL 结尾 UTF-16 缓冲。
 ///
 /// K4-D0 门控:普通构建返回 [`gate::ERR_RESEARCH_DISABLED`]。
+
+/// G1 首次原生调用探针(P6;`g1.rs`):getter 72DE38 + 只读核验,不发送。
+/// 上下文/报告纪律同 [`caligo_obs_run2`]。
+///
+/// K4-D0 门控:普通构建返回 [`gate::ERR_RESEARCH_DISABLED`]。
+///
+/// # Safety
+///
+/// `ctx` 必须指向本进程内有效的 [`g1::G1Ctx`]。
+#[no_mangle]
+pub unsafe extern "system" fn caligo_g1_probe_run(ctx: *const g1::G1Ctx) -> u32 {
+    if let Some(code) = gate::reject_legacy() {
+        return code;
+    }
+    if ctx.is_null() {
+        return probe_code::ERR_NULL_PATH;
+    }
+    // SAFETY: ctx 由 loader 写入且位于本进程。
+    unsafe { g1::g1_probe_run(ctx) }
+}
+
 pub unsafe extern "system" fn caligo_obs_run2(ctx: *const obs::ObsCtx) -> u32 {
     if let Some(code) = gate::reject_legacy() {
         return code;

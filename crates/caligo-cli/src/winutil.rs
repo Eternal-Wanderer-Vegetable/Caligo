@@ -257,6 +257,8 @@ pub struct InjectOutcome {
     pub obs_exit_code: Option<u32>,
     /// `caligo_register_entry` 的返回码(仅在 register_entry 提供时)。
     pub register_exit_code: Option<u32>,
+    /// `caligo_g1_probe_run` 的返回码(仅在 g1_report 提供时)。
+    pub g1_exit_code: Option<u32>,
     /// `caligo_env_start` 的返回码(仅在 env_report 提供时;链路线程异步执行)。
     pub env_exit_code: Option<u32>,
     /// `caligo_interrupt_run` 的返回码(仅在 intr 提供时;同步执行)。
@@ -339,6 +341,7 @@ pub unsafe fn inject_and_probe(
     intr: Option<&IntrRequest>,
     async_req: Option<&AsyncRequest>,
     exec_req: Option<&ExecRequest>,
+    g1_report: Option<&Path>,
 ) -> Result<InjectOutcome, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
@@ -409,6 +412,31 @@ pub unsafe fn inject_and_probe(
                     return Err(format!(
                         "{step}: WriteProcessMemory incomplete ({written}/{size})"
                     ));
+                }
+                Ok(remote)
+            };
+            // 字节版本(G1 ctx 等非 UTF-16 载荷)。
+            let alloc_and_write_bytes = |bytes: &[u8],
+                                          step: &str|
+             -> Result<*mut core::ffi::c_void, String> {
+                let remote = VirtualAllocEx(
+                    proc_h,
+                    std::ptr::null(),
+                    bytes.len(),
+                    MEM_COMMIT | MEM_RESERVE,
+                    PAGE_READWRITE,
+                );
+                if remote.is_null() {
+                    return Err(format!("{step}: Win32 error {}", GetLastError()));
+                }
+                let mut written: usize = 0;
+                let ok =
+                    WriteProcessMemory(proc_h, remote, bytes.as_ptr().cast(), bytes.len(), &mut written);
+                if ok == 0 || written != bytes.len() {
+                    VirtualFreeEx(proc_h, remote, 0, MEM_RELEASE);
+                    return Err(format!(
+                        "{step}: WriteProcessMemory incomplete ({written}/{})"
+                    , bytes.len()));
                 }
                 Ok(remote)
             };
@@ -571,6 +599,58 @@ pub unsafe fn inject_and_probe(
                 return Err(format!(
                     "probe remote thread wait failed (remote buffers retained): code {wait:#x}"
                 ));
+            }
+
+            // 可选:G1 首次原生调用探针(caligo_g1_probe_run;P6)。ctx =
+            // {wrapper_base, report_path},均在远程内存;线程准入即本实验目标。
+            let mut g1_exit: Option<u32> = None;
+            if let Some(g1_path) = g1_report {
+                let g1_addr = match read_remote_export(proc_h, remote_base, "caligo_g1_probe_run") {
+                    Ok(Some(a)) => a,
+                    Ok(None) => return Err("caligo_g1_probe_run not found in remote".into()),
+                    Err(e) => return Err(format!("remote export lookup (g1): {e}")),
+                };
+                let wrapper_base = *module_bases_in(pid)?.get("wrapper.node").unwrap_or(&0);
+                if wrapper_base == 0 {
+                    return Err("wrapper.node base unresolved in target (g1)".into());
+                }
+                let g1_wide = to_wide(&g1_path.to_string_lossy());
+                let remote_g1_path = alloc_and_write(&g1_wide, "alloc g1 report path")?;
+                buf_obs = Some(remote_g1_path); // 复用回收登记(进程退出清理)
+                // G1Ctx repr(C): {usize, *const u16} = 16 字节。
+                let mut ctx_bytes = Vec::with_capacity(16);
+                ctx_bytes.extend_from_slice(&wrapper_base.to_le_bytes());
+                ctx_bytes.extend_from_slice(&(remote_g1_path as usize).to_le_bytes());
+                let remote_g1_ctx = alloc_and_write_bytes(&ctx_bytes, "alloc g1 ctx")?;
+                buf_report = Some(remote_g1_ctx); // 复用回收登记
+                let g1_fn: unsafe extern "system" fn(*const core::ffi::c_void) -> u32 =
+                    std::mem::transmute::<usize, unsafe extern "system" fn(*const core::ffi::c_void) -> u32>(g1_addr);
+                let start_g1: RemoteThreadFn =
+                    std::mem::transmute::<usize, RemoteThreadFn>(g1_fn as usize);
+                let g1_thread = CreateRemoteThread(
+                    proc_h,
+                    std::ptr::null(),
+                    0,
+                    Some(start_g1),
+                    remote_g1_ctx,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if g1_thread.is_null() {
+                    return Err(format!(
+                        "CreateRemoteThread(g1): Win32 error {}",
+                        GetLastError()
+                    ));
+                }
+                let wait_g1 =
+                    WaitForSingleObject(g1_thread, if wait_ms > 0 { wait_ms } else { INFINITE });
+                let mut code: u32 = u32::MAX;
+                GetExitCodeThread(g1_thread, &mut code);
+                CloseHandle(g1_thread);
+                if wait_g1 != 0 {
+                    return Err(format!("g1 remote thread wait failed: code {wait_g1:#x}"));
+                }
+                g1_exit = Some(code);
             }
 
             // 可选:只读运行时观测 v2(caligo_obs_run2;基址由本加载器进程解析,
@@ -1047,6 +1127,7 @@ pub unsafe fn inject_and_probe(
                 probe_exit_code: exit_code,
                 obs_exit_code: obs_exit,
                 register_exit_code: register_exit,
+                g1_exit_code: g1_exit,
                 env_exit_code: env_exit,
                 intr_exit_code: intr_exit,
                 async_exit_code: async_exit,

@@ -45,6 +45,7 @@ caligo-cli <K1 probe>
   caligo-cli inject --pid <n> --bridge <bridge.dll> --manifest <manifest.json>
                     --report <report.json> --confirm-designated-test-instance
                     [--obs-report <obs.json>] [--env-report <env.jsonl>]
+                    [--g1-report <g1.jsonl>]
                     [--register-entry] [--wait-ms <ms>]
                     [--intr-report <intr.jsonl> --intr-env <ptr-hex>]
                     [--intr-vftable <va-hex>] [--intr-wait-ms <ms>]
@@ -909,6 +910,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut manifest: Option<PathBuf> = None;
     let mut report: Option<PathBuf> = None;
     let mut obs_report: Option<PathBuf> = None;
+    let mut g1_report: Option<PathBuf> = None;
     let mut env_report: Option<PathBuf> = None;
     let mut register_entry = false;
     let mut confirmed = false;
@@ -962,6 +964,13 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => report = Some(PathBuf::from(v)),
                 None => {
                     eprintln!("--report 需要路径参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g1-report" => match next(&mut i) {
+                Some(v) => g1_report = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("--g1-report 需要路径参数");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1146,6 +1155,16 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     }
+    let g1_report = match g1_report {
+        Some(p) => match p.canonicalize() {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("--g1-report 路径无效: {e}");
+                return ExitCode::FAILURE;
+            }
+        },
+        None => None,
+    };
     let obs_report = match obs_report {
         Some(p) => {
             let abs = match to_absolute(&p) {
@@ -1374,6 +1393,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             intr.as_ref(),
             async_req.as_ref(),
             exec_req.as_ref(),
+            g1_report.as_deref(),
         )
     };
     match outcome {
