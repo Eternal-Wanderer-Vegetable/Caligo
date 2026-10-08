@@ -591,8 +591,19 @@ pub fn bootstrap(cfg: &EntryConfig, symbols: &EntrySymbols) -> Result<EntryHandl
         true,
         &format!("isolate={isolate:#x} loop={loop_ptr:#x}"),
     );
-    // 发布(ready 之前;回调以 Acquire 读取)。
-    REPORT_PATH_PTR.store(cfg.report_path.as_ptr() as usize, Ordering::Release);
+    // 发布(ready 之前;回调以 Acquire 读取)。必须登记**进程生存期**的宽字符
+    // 副本:此前存的是局部 UTF-8 String 的指针,bootstrap 返回即悬空,
+    // 后续 append_stage_simple 经悬空指针按 UTF-16 解析出乱码路径,在当前
+    // 工作目录创建乱码名垃圾文件(D9 现场遗留的磁盘症状之一)。
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = std::ffi::OsStr::new(&cfg.report_path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let leaked: &'static mut [u16] = Box::leak(wide.into_boxed_slice());
+        REPORT_PATH_PTR.store(leaked.as_ptr() as usize, Ordering::Release);
+    }
     ENTRY.qqnt_base.store(cfg.qqnt_base, Ordering::Release);
     ENTRY.env.store(cfg.env, Ordering::Release);
     ENTRY.isolate.store(isolate, Ordering::Release);
