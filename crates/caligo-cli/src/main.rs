@@ -16,6 +16,7 @@
 
 mod disasm;
 mod envscan;
+mod observe_msf;
 mod pe;
 mod qqentry;
 mod rtti;
@@ -90,6 +91,15 @@ fn main() -> ExitCode {
         Some("qq-entry-stop") => qqentry::cmd_qq_entry_stop(&args[1..]),
         Some("qq-status") => qqentry::cmd_qq_status(&args[1..]),
         Some("daemon-control") => cmd_daemon_control(&args[1..]),
+        Some("observe-msf") => {
+            match observe_msf::cmd_observe_msf(&args[1..]) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("observe-msf error: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         _ => {
             eprintln!("{USAGE}");
             ExitCode::FAILURE

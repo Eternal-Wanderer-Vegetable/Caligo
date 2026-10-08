@@ -1,0 +1,96 @@
+{
+  "kind": "caligo-observe-msf-v1",
+  "pid": 31608,
+  "observed_at_unix_ms": 1791460415549,
+  "target_process_created_unix_ms": 1791460415536,
+  "wrapper": null,
+  "wrapper_sha256_expected": "63112ab9161e127f5f7e17998a7196e143808923fb54cbbf7b4e21426187a5f0",
+  "singletons": [],
+  "executor_static": {
+    "storage_rva": 7667848,
+    "vptr": null,
+    "vptr_rva": null,
+    "vptr_matches_anchor": false
+  },
+  "tls": {
+    "index_storage_rva": 108344404,
+    "index_raw": null,
+    "index_valid": false,
+    "calibration": [
+      "校准: 本进程 TEB=0x7a6e77d000 idx=2 magic=0xb5ca11a5eed0001",
+      "校准: 魔数命中 TEB+0x1490",
+      "校准: 非经典内联布局 TlsSlots@0x1480"
+    ]
+  },
+  "threads": [
+    {
+      "tid": 45956,
+      "teb": 525839355904,
+      "slot_rule": "inline(校准)",
+      "pair": 2078769299712,
+      "dispatcher_obj": 2078769300224,
+      "vptr": 140711595741776,
+      "vptr_rva": 140711595741776,
+      "vptr_module": "ntdll.dll",
+      "slots": [
+        "0x25b8d18b4c",
+        "0x17ffe03082504f6",
+        "0xc32ecdc3050f0375",
+        "0x841f0f",
+        "0x26b8d18b4c",
+        "0x17ffe03082504f6",
+        "0xc32ecdc3050f0375",
+        "0x841f0f"
+      ],
+      "ctrl": null,
+      "ctrl_strong": null,
+      "ctrl_weak": null
+    },
+    {
+      "tid": 11556,
+      "teb": 525839364096,
+      "slot_rule": null,
+      "pair": null,
+      "dispatcher_obj": null,
+      "vptr": null,
+      "vptr_rva": null,
+      "vptr_module": null,
+      "slots": [],
+      "ctrl": null,
+      "ctrl_strong": null,
+      "ctrl_weak": null
+    },
+    {
+      "tid": 7364,
+      "teb": 525839372288,
+      "slot_rule": null,
+      "pair": null,
+      "dispatcher_obj": null,
+      "vptr": null,
+      "vptr_rva": null,
+      "vptr_module": null,
+      "slots": [],
+      "ctrl": null,
+      "ctrl_strong": null,
+      "ctrl_weak": null
+    },
+    {
+      "tid": 2120,
+      "teb": 525839380480,
+      "slot_rule": null,
+      "pair": null,
+      "dispatcher_obj": null,
+      "vptr": null,
+      "vptr_rva": null,
+      "vptr_module": null,
+      "slots": [],
+      "ctrl": null,
+      "ctrl_strong": null,
+      "ctrl_weak": null
+    }
+  ],
+  "notes": [
+    "wrapper.node 不在目标模块表中(目标不是加载了 wrapper 的 QQ 进程?)",
+    "TLS index=1 全线程读取完成;命中判定 = 值非空且 [值] 的 vptr 落在已知模块"
+  ]
+}
