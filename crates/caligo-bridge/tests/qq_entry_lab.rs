@@ -412,6 +412,8 @@ mod fake_v8 {
         this
     }
     pub unsafe extern "C" fn utf8_dtor(_this: *mut core::ffi::c_void) {}
+    pub unsafe extern "C" fn ctx_enter(_this: *mut core::ffi::c_void) {}
+    pub unsafe extern "C" fn ctx_exit(_this: *mut core::ffi::c_void) {}
     pub unsafe extern "C" fn utf8_deref(this: *mut core::ffi::c_void) -> *const u8 {
         let h = (this as *const usize).read();
         let s = get_local(h);
@@ -431,6 +433,7 @@ fn install_fake_v8() {
     type FUtf8Ctor = unsafe extern "C" fn(*mut core::ffi::c_void, *mut core::ffi::c_void, usize) -> *mut core::ffi::c_void;
     type FUtf8Dtor = unsafe extern "C" fn(*mut core::ffi::c_void);
     type FUtf8Deref = unsafe extern "C" fn(*mut core::ffi::c_void) -> *const u8;
+    type FCtxEE = unsafe extern "C" fn(*mut core::ffi::c_void);
     let p1: FScopeCtor = fake_v8::scope_ctor;
     let p2: FScopeDtor = fake_v8::scope_dtor;
     let p3: FGetCurrent = fake_v8::get_current;
@@ -442,6 +445,8 @@ fn install_fake_v8() {
     let p9: FUtf8Ctor = fake_v8::utf8_ctor;
     let p10: FUtf8Dtor = fake_v8::utf8_dtor;
     let p11: FUtf8Deref = fake_v8::utf8_deref;
+    let p12: FCtxEE = fake_v8::ctx_enter;
+    let p13: FCtxEE = fake_v8::ctx_exit;
     caligo_bridge::qq_v8::store_symbols_raw(caligo_bridge::qq_v8::V8Symbols::from_raw([
         p1 as usize,
         p2 as usize,
@@ -454,6 +459,8 @@ fn install_fake_v8() {
         p9 as usize,
         p10 as usize,
         p11 as usize,
+        p12 as usize,
+        p13 as usize,
     ]));
 }
 

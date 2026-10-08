@@ -31,6 +31,8 @@ const NAME_UTF8_CTOR: &str =
     "??0Utf8Value@String@v8@@QEAA@PEAVIsolate@2@V?$Local@VValue@v8@@@2@@Z";
 const NAME_UTF8_DTOR: &str = "??1Utf8Value@String@v8@@QEAA@XZ";
 const NAME_UTF8_DEREF: &str = "??DUtf8Value@String@v8@@QEAAPEADXZ";
+const NAME_CTX_ENTER: &str = "?Enter@Context@v8@@QEAAXXZ";
+const NAME_CTX_EXIT: &str = "?Exit@Context@v8@@QEAAXXZ";
 
 type FnScopeCtor = unsafe extern "C" fn(this: *mut c_void, isolate: *mut c_void) -> *mut c_void;
 type FnScopeDtor = unsafe extern "C" fn(this: *mut c_void);
@@ -43,6 +45,7 @@ type FnScriptRun = unsafe extern "C" fn(this: usize, sret: *mut usize, ctx: usiz
 type FnUtf8Ctor = unsafe extern "C" fn(this: *mut c_void, isolate: *mut c_void, value: usize) -> *mut c_void;
 type FnUtf8Dtor = unsafe extern "C" fn(this: *mut c_void);
 type FnUtf8Deref = unsafe extern "C" fn(this: *mut c_void) -> *const u8;
+type FnCtxEnterExit = unsafe extern "C" fn(this: *mut c_void);
 
 #[derive(Debug, Clone, Copy)]
 pub struct V8Symbols {
@@ -57,6 +60,8 @@ pub struct V8Symbols {
     pub utf8_ctor: usize,
     pub utf8_dtor: usize,
     pub utf8_deref: usize,
+    pub ctx_enter: usize,
+    pub ctx_exit: usize,
 }
 
 impl V8Symbols {
@@ -81,11 +86,13 @@ impl V8Symbols {
             utf8_ctor: get(NAME_UTF8_CTOR)?,
             utf8_dtor: get(NAME_UTF8_DTOR)?,
             utf8_deref: get(NAME_UTF8_DEREF)?,
+            ctx_enter: get(NAME_CTX_ENTER)?,
+            ctx_exit: get(NAME_CTX_EXIT)?,
         })
     }
 
     /// LAB 注入。
-    pub fn from_raw(parts: [usize; 11]) -> Self {
+    pub fn from_raw(parts: [usize; 13]) -> Self {
         Self {
             scope_ctor: parts[0],
             scope_dtor: parts[1],
@@ -98,6 +105,8 @@ impl V8Symbols {
             utf8_ctor: parts[8],
             utf8_dtor: parts[9],
             utf8_deref: parts[10],
+            ctx_enter: parts[11],
+            ctx_exit: parts[12],
         }
     }
 
@@ -171,7 +180,16 @@ pub unsafe fn exec_script(
         let mut scope = [0usize; 8];
         scope_ctor(scope.as_mut_ptr().cast(), isolate);
 
+        // Context::Enter(V8 规范:Script::Run 需要已进入的上下文;安静轮转点
+        // 上 QQ 侧可能未持有 entered 状态 → 不 Enter 直接 Run 得到空 Local,
+        // D9 现场实证 RunEmpty)。Exit 严格逆序。
+        let ctx_enter: FnCtxEnterExit = to_fn(syms.ctx_enter);
+        let ctx_exit: FnCtxEnterExit = to_fn(syms.ctx_exit);
+        (ctx_enter)(ctx as *mut c_void);
+
         let r = exec_in_scope(syms, isolate, ctx, js, &mut scope);
+
+        (ctx_exit)(ctx as *mut c_void);
         scope_dtor(scope.as_mut_ptr().cast());
         r
     }
