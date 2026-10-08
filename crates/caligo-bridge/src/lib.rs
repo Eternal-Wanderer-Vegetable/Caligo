@@ -46,6 +46,9 @@ pub mod probe_code {
 pub mod asyncrun;
 #[cfg(feature = "research")]
 pub mod daemon_client;
+pub mod native_abi;
+pub mod native_handle;
+pub mod native_msf;
 pub mod envrun;
 pub mod exec;
 pub mod gate;

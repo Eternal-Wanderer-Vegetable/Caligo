@@ -29,7 +29,7 @@
 | P0 基线 | PASS | 本文件 P0 表 |
 | P1 原生合同（G-ABI/G-THREAD/G-LIFE） | **IN PROGRESS（首轮有界交付完成；关键间接目标未闭合 → 走计划失败分支的受控观测方案）** | `docs/research/qq-native-thread-contract.md`、`docs/research/qq-native-lifetime-contract.md`；外部证据 `E:/stella/_reference/qq-native-r3-p1-20261008/`（phaseA–G 共 165 函数 + 3 个字节级扫描脚本） |
 | P2 路线冻结 | **PASS（文档层；2026-10-08）** | `docs/research/k4-native-route-decision.md`、`docs/contracts/qq-9.9.33-52230.capability-profile.json`；loading-route-decision §4 / source-register S16–S18 增补 |
-| P4–P9 | P4 IN PROGRESS（前置 P2 门已过） | — |
+| P4–P9 | P4 IN PROGRESS（第一批已交付,见变更登记;残余:resident 锁范围接线/真实 shutdown 导出/kind2 原型） | 本文件 P4 表 |
 | P3 公共 IPC/身份/恢复（LAB） | **PASS（LAB 层）** | 本文件 P3 表；`evidence/p3-lab/` |
 | P4–P9 | NOT STARTED | — |
 
@@ -54,7 +54,7 @@ P1 首轮交付的实质进展（细节见两份合同文档）：
 | 2026-10-08 | P1 | 两份 R3 静态合同（thread/lifetime）+ 外部证据树 phaseA–G(165 函数)+3 个字节级扫描脚本;D32138 语义更正;TLS 提交目标拓扑定位;+0x60 候选淘汰表;LoginRequestImpl 观察者形状 | `qq-native-thread-contract.md`、`qq-native-lifetime-contract.md`、`E:/stella/_reference/qq-native-r3-p1-20261008/` |
 | 2026-10-08 | P1 伴生 | **发现并修复 D9 遗留缺陷**:`qq_entry::bootstrap` 把局部 UTF-8 String 指针登记为全局报告路径,悬空后被按 UTF-16 读取,LAB 运行在 CWD 产生乱码名诊断转储（10 个文件入库混入 P3 提交,已清理）;修复为进程生存期宽字符副本 | 提交 910dc5b |
 | 2026-10-08 | P1 受控观测 | 新增 `caligo-cli observe-msf`（外部只读:OpenProcess 仅 QUERY\|VM_READ,零注入/零写入/零 QQ 函数调用,不消耗实例首次 bootstrap）。读:MSF 双单例槽(+0x50/+0x60 transport/控制块计数)、执行器单例、全线程 TLS 提交目标(经验校准 TEB 布局,本机实证 TlsSlots@0x1480 非 0xE10)。self-test 全机械验证通过(含植入 pair 命中路径) | `crates/caligo-cli/src/observe_msf.rs`;`evidence/p1-observe-selftest.json` |
-| 2026-10-08 | P1 现场闭合 | **实例 47524**（创建 2026-10-08T11:58:14Z UTC,9.9.33-52230,锚点命中）三次外部只读采样 t1/t2/t3:this+0x60 transport **已安装**（vtable RVA 0x41403B8,slot7=**0x1B4E4EC** 发送实际目标,未连接时同步失败返回 0）;全局 dispatcher（0x67510A8,发送链提交目标）与 41 个 TLS dispatcher**同类**（vtable 0x43B6088,slot0=0x31F8CEE,入队+owner-TID 跨线程唤醒）;执行器单例 0x750088 **未构造**;MSFCoreService **未构造**（运行时 switch 选了 MSFService——首个运行时分支证据）。phaseH/I/J 静态反编译交叉定性 | `evidence/p1-observe-field-47524-t{1,2,3}.json`;`docs/research/qq-native-thread-contract.md` §10 |
+| 2026-10-08 | P1 现场闭合 | **实例 47524**（创建 2026-10-08T11:58:14Z UTC,9.9.33-52230,锚点命中）三次外部只读采样 t1/t2/t3:this+0x60 transport **已安装**（vtable RVA 0x41403B8,slot7=**0x1B4E4EC** 发送实际目标(锁 transport+0x60 pair),未连接时同步失败返回 0）;全局 dispatcher（0x67510A8,发送链提交目标）与 41 个 TLS dispatcher**同类**（vtable 0x43B6088,slot0=0x31F8CEE,入队+owner-TID 跨线程唤醒）;执行器单例 0x750088 **未构造**;MSFCoreService **未构造**（运行时 switch 选了 MSFService——首个运行时分支证据）。phaseH/I/J 静态反编译交叉定性 | `evidence/p1-observe-field-47524-t{1,2,3}.json`;`docs/research/qq-native-thread-contract.md` §10 |
 | 2026-10-08 | P2 | 路线冻结:原生 MSF/SSO(服务族 MSFService,getter 72DE38;运行时分支现场证据);V8 降为备选研究资产(须修 C6-C8/C10+补等价线程证据方可独立评估);MSFCoreService/0x750088 执行器单例/stop-cancel-drain 原语显式禁用;capability profile 逐门标注(loading=admitted, attach=admitted-conditional, session_ready=blocked, receive/send=lab-only*, lifecycle_stop=rejected) | `k4-native-route-decision.md`;`qq-9.9.33-52230.capability-profile.json` |
 
 ### P3 反例与验证（LAB,2026-10-08）
@@ -68,6 +68,27 @@ P1 首轮交付的实质进展（细节见两份合同文档）：
 | T03 | 故障断开后同宿主重连 | **红（实测）**:回退 epoch/reconnect 两处语义后 T03 失败（epoch 不推进,actor 停 Degraded,SendText 被拒） | 绿（`reconnect_requires_same_host_and_advances_epoch`:epoch≥2 且 SendText 受理） |
 | T05 | 同账号同代次不同宿主 nonce | 红（结构上不可表达:原 Hello 无宿主身份字段;`ipc_v3::tests::v2_hello_without_host_identity_fails_to_decode` 证明 v2 消息不再被放行） | 绿（不同宿主被拒;同宿主重连受理且业务可继续） |
 | C4 | 断开前 unacked 内容 | 红（分析实证:原 session_loop:561 每连接重建窗口,seq/ACK 游标却跨连接;另发现重放块重复两份=每轮双发） | 绿（T07 覆盖;窗口随 run_worker 持有） |
+
+| 2026-10-08 | P4 第一批 | 新增 `native_abi.rs`（恢复布局:ctrlblk 0x28/tagged24/byte24/callback move 协议/提交入口签名/panic 边界）、`native_handle.rs`（拥有 pair 句柄:代次绑定/释放对称/缺失释放家族→隔离计数）、`native_msf.rs`（adapter:claim 前置核对→无锁调用边界→独立有界完成通道/调度许可/去重幂等/失效审计/在途账本;真实链接 G1 前恒 None=拒绝占位）。假宿主按同一 C 形状受试。修正:文档 transport pair 偏移 +0x30→**+0x60**（1B4E4EC 的 param_1+0xC 按 longlong* 即 0x60 字节）。LAB 中发现并修正 move 协议语义（转移时销毁 capture→use-after-free;改为 guts 转移+源失效+dst 侧销毁恰一次;真实 op=0 transfer-in 细节留 P6 ABI 冻结定证）。附带修复 daemon_client_lab reconnect 预存在 flake（Stop 前等 worker 首连） | `crates/caligo-bridge/src/native_*.rs`;`tests/native_adapter_contract.rs`;`evidence/p4-lab/after.txt` |
+
+### P4 反例与验证（LAB,2026-10-08,7/7 绿）
+
+| ID | 场景 | 结果 |
+|---|---|---|
+| T11 | inline callback:不死锁、结果恰一次、临时源释放后数据完整（分配对账） | 绿 |
+| T12 | getter/handle/释放对称 ×100 lifecycle 回基线;释放家族缺失→隔离计数（不猜地址） | 绿 |
+| T13 | 重复回调幂等/失效代次只审计/reply 先于 ACK 不改语义 | 绿 |
+| T14 | 在途账本:已提交未终态→pending 分类 Unknown;失效后迟到回执不翻案 | 绿 |
+| T16 | 链接未接线/线程未准入/超短形容量命令 → 全部调用前拒绝,native counter 零 | 绿 |
+| T15 | （既有 resident_lifecycle 已绿,本轮未动） | 绿 |
+| 10k | 10,000 次非发送调度:计数对账、零假宿主分配增长、溢出零 | 绿 |
+
+### P4 验证命令结果（after,2026-10-08）
+
+- 全套命令:**190 passed / 0 failed**;`cargo check` 通过;`git diff --check` 干净。
+- 原始输出:`evidence/p4-lab/after.txt`。
+
+### P3 验证命令结果（after-fix,2026-10-08）
 
 ### P3 验证命令结果（after-fix,2026-10-08）
 

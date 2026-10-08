@@ -83,7 +83,7 @@
       "vtable_slot": "transport_vtable+0x38 (slot7)",
       "live_vtable_rva": "0x41403b8",
       "prototype": "uint64(transport*, cmd_copy, request_holder*, callback_wrapper, uint64* out_token, small_storage*)",
-      "semantics": "锁 transport+0x30 pair 取内联连接对象;为空 -> *out_token=0 且返回 0(未连接即同步失败);否则 b78d06 取 token,转交 0xb7ce8a",
+      "semantics": "锁 transport+0x60 pair 取内联连接对象;为空 -> *out_token=0 且返回 0(未连接即同步失败);否则 b78d06 取 token,转交 0xb7ce8a",
       "state_check": "0xb7ce8a 校验内联对象 vtable+0x30 状态,(state & 0xfffffffe) != 4 走失败分支"
     },
     {

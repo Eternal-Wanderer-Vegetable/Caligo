@@ -189,6 +189,14 @@ fn reconnect_then_hello_then_clean_stop_without_bootstrap() {
     let r = control.request(caligo_core::ipc::ControlMsg::Health {}).unwrap();
     assert!(matches!(r, CoreToControlMsg::HealthAck {}));
 
+    // 高负载下 worker 首连可能晚于 control:Stop 前等 worker 至少接入一次,
+    // 否则 daemon 停止后 worker 永远退避重连、测试超时(预存在 flake)。
+    let dl = Instant::now() + Duration::from_secs(10);
+    while caligo_bridge::daemon_client::counters_snapshot().connects == 0 {
+        assert!(Instant::now() < dl, "worker 未在窗口内完成首连");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
     // Stop:daemon 真实停止协议 → worker 收 Stopped → 干净退出。
     let r = control.request(caligo_core::ipc::ControlMsg::Stop {}).unwrap();
     assert!(matches!(r, CoreToControlMsg::Stopped { .. }));

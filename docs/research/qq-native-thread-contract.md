@@ -142,7 +142,7 @@ RTTI（文件级 COL 解码，`dump-p1-vtables.py` 输出 `p1-vtable-dump.json`�
 | 9 | `0x1B4E846` | |
 
 - vtable `0x41403B8` 的全部 rip 引用仅两处：**ctor `0x1B4DFF8`** 与 dtor `0x1B4E0DA`（§6 的"无写入者"就此终结——写入者此前不在任何已反编译集合里）。
-- **`0x1B4E4EC` 定性**（phaseH 反编译，真函数起点 `0x1B4E4EC..0x1B4E619`）：锁 transport `+0x30` 的 pair 取**内联连接对象**（空 → `*out_token=0` 且返回 0 —— **未连接即同步失败，不排队**）；否则取 token（`0xB78D06`）、复制 command（经自身 slot3）、包装 callback（`0xB7F6F6`），转交 **`0xB7CE8A`**。
+- **`0x1B4E4EC` 定性**（phaseH 反编译，真函数起点 `0x1B4E4EC..0x1B4E619`）：锁 transport `+0x60` 的 pair 取**内联连接对象**（空 → `*out_token=0` 且返回 0 —— **未连接即同步失败，不排队**）；否则取 token（`0xB78D06`）、复制 command（经自身 slot3）、包装 callback（`0xB7F6F6`），转交 **`0xB7CE8A`**。
 - **`0xB7CE8A` 定性**：校验内联对象 vtable `+0x30` 状态（`(state & 0xFFFFFFFE) != 4` → 失败分支）；组装闭包 {command 副本, request 接管, callback 包装, token}，经 **`D32138` 提交到 `0xB816E8` 全局对象的 `+8` 成员**（静态存储 RVA **`0x67510A8`**，guard `0x67510B8`；getter 的 init 桩 `0xB81748` 仅清零，真实构造经 `0x4E91A6` store 路径）。
 - transport 对象出处：`0xB7C6C0`（0x70 字节分配 → ctor → `0xB7C89C` 挂释放钩子 `0xB7827E` → 存入 owner `+0x110`）；`0xB7C6C0` 本身经 manager 类 vtable（.rdata `0x3FD3E70` 槽）间接派发。**最后把该指针写入 MSFService `+0x60` 的那条 store 仍未单独定位**——但对合同不再是必要项：对象身份、slot 语义、状态检查、失败路径均已闭合。
 
@@ -158,7 +158,7 @@ RTTI（文件级 COL 解码，`dump-p1-vtables.py` 输出 `p1-vtable-dump.json`�
 
 ```
 发送: 732A80 ─ this+0x60 (transport vtbl 0x41403B8)
-        └ slot7 0x1B4E4EC ─ 锁 +0x30 pair(内联连接; 空即失败)
+        └ slot7 0x1B4E4EC ─ 锁 +0x60 pair(内联连接; 空即失败)
             └ 0xB7CE8A ─ 状态检查(vtbl+0x30) ─ D32138 → 全局 dispatcher(0x67510A8, vtbl 0x43B6088)
                 └ slot0 0x31F8CEE ─ 0x31F88EA 入队(+8 pair) + 跨线程唤醒
 接收: 1B41AE6 ─ 1B3F740 ─ D32D98(本线程 TLS, index 44) ─ 同类 dispatcher(0x43B6088)
