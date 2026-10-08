@@ -31,6 +31,7 @@ const EXECUTOR_TLS_INDEX: u64 = 0x6753454;
 const ANCHOR_VTBL_SVC: u64 = 0x3F6DED8;
 const ANCHOR_VTBL_CORE: u64 = 0x3F70C18;
 const ANCHOR_VTBL_EXEC: u64 = 0x3FAD868;
+const GLOBAL_DISPATCHER_OBJ: u64 = 0x67510A8; // b816e8 静态存储 +8(发送链提交目标)
 
 const SLOT_COUNT: usize = 16; // 覆盖 vtable+0x38(slot7,发送路径调用点)
 
@@ -153,6 +154,18 @@ fn print_summary(r: &ObserveReport) {
         }
     }
     let installed: Vec<&ThreadReport> = r.threads.iter().filter(|t| t.dispatcher_obj.is_some()).collect();
+    if let Some(g) = &r.global_dispatcher {
+        println!(
+            "[observe-msf] 全局 dispatcher @+{:#x}: obj={:#x} vptr_rva={:?}({}) owner_tid={:?} pair={:?} slot0={}",
+            GLOBAL_DISPATCHER_OBJ,
+            g.obj,
+            g.vptr_rva,
+            g.vptr_module.as_deref().unwrap_or("?"),
+            g.field_58_tid,
+            g.field_8_pair,
+            g.slots.first().cloned().unwrap_or_default()
+        );
+    }
     println!(
         "[observe-msf] 执行器单例 @+{:#x}: vptr={:?}(锚点{});TLS index={:?}({});线程 {} 个,dispatcher 已安装 {} 个{}",
         r.executor_static.storage_rva,
@@ -190,6 +203,7 @@ struct ObserveReport {
     wrapper_sha256_expected: &'static str,
     singletons: Vec<SingletonReport>,
     executor_static: ExecutorStaticReport,
+    global_dispatcher: Option<GlobalDispatcherReport>,
     tls: TlsReport,
     threads: Vec<ThreadReport>,
     notes: Vec<String>,
@@ -243,6 +257,19 @@ struct ExecutorStaticReport {
     vptr: Option<u64>,
     vptr_rva: Option<u64>,
     vptr_matches_anchor: bool,
+}
+
+#[derive(serde::Serialize)]
+struct GlobalDispatcherReport {
+    obj: u64,
+    vptr: u64,
+    vptr_rva: Option<u64>,
+    vptr_module: Option<String>,
+    slots: Vec<String>,
+    /// dispatcher+0x58 的 owner TID(31F88EA 跨线程判定字段)。
+    field_58_tid: Option<i32>,
+    /// dispatcher+8 的内联 pair(队列对象)。
+    field_8_pair: Option<u64>,
 }
 
 #[derive(serde::Serialize)]
@@ -349,6 +376,27 @@ fn observe(pid: u32, planted_idx: Option<u64>, self_test: bool) -> Result<Observ
         notes.push("wrapper.node 不在目标模块表中(目标不是加载了 wrapper 的 QQ 进程?)".into());
     }
 
+    // 发送链全局 dispatcher(b7ce8a 经 D32138 提交的目标)。
+    let global_dispatcher = if base != 0 {
+        match obs.q(base + GLOBAL_DISPATCHER_OBJ).filter(|v| *v != 0) {
+            Some(obj) => {
+                let vptr = obs.q(obj).unwrap_or(0);
+                Some(GlobalDispatcherReport {
+                    obj,
+                    vptr,
+                    vptr_rva: vptr.checked_sub(base).filter(|r| *r < 0x800_0000),
+                    vptr_module: obs.module_of(vptr).map(|m| m.to_string()),
+                    slots: obs.vtable(vptr, 8),
+                    field_58_tid: obs.i32(obj + 0x58),
+                    field_8_pair: obs.q(obj + 8),
+                })
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+
     let executor_static = if base != 0 {
         match obs.q(base + CORE_EXECUTOR_OBJ) {
             Some(vptr) => {
@@ -420,6 +468,7 @@ fn observe(pid: u32, planted_idx: Option<u64>, self_test: bool) -> Result<Observ
         wrapper_sha256_expected: WRAPPER_SHA256,
         singletons,
         executor_static,
+        global_dispatcher,
         tls,
         threads,
         notes,

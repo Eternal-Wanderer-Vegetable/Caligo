@@ -1,6 +1,8 @@
 # QQ 原生线程合同（G-THREAD）——固定 9.9.33-52230 静态证据 R3
 
-日期：2026-10-08。对象：QQNT `9.9.33-52230/resources/app/wrapper.node`，115,118,632 字节，SHA-256 `63112ab9161e127f5f7e17998a7196e143808923fb54cbbf7b4e21426187a5f0`，x64 PE，image base `0x180000000`。**下文全部地址为 RVA**。方法：只读文件级扫描（导入表/异常表/字节形态）+ Ghidra 12.1.4 对既有 `QqWrapper52230` 项目的定向 `-noanalysis` 反编译（phaseA–G，共 165 个函数），证据树：`E:/stella/_reference/qq-native-r3-p1-20261008/`。未执行目标、未注入、未触碰 QQ 进程。Ghidra 伪代码不是符号事实；ABI 结论以汇编为凭。
+> **R3.1 增补（2026-10-08 现场观测）**：§10 记录了在真实 QQ 实例（PID 47524，创建 2026-10-08T11:58:14Z UTC）上的外部只读观测结果——本文 §6 的 `this+0x60` 未知已被**现场+静态交叉闭合**，§3 的 TLS dispatcher 身份已定性。§1–§9 为静态首轮内容，其中与 §10 冲突的表述以 §10 为准。
+
+日期：2026-10-08。对象：QQNT `9.9.33-52230/resources/app/wrapper.node`，115,118,632 字节，SHA-256 `63112ab9161e127f5f7e17998a7196e143808923fb54cbbf7b4e21426187a5f0`，x64 PE，image base `0x180000000`。**下文全部地址为 RVA**。方法：只读文件级扫描（导入表/异常表/字节形态）+ Ghidra 12.1.4 对既有 `QqWrapper52230` 项目的定向 `-noanalysis` 反编译（phaseA–J，共 ~180 个函数），证据树：`E:/stella/_reference/qq-native-r3-p1-20261008/`。未执行目标、未注入、未触碰 QQ 进程。Ghidra 伪代码不是符号事实；ABI 结论以汇编为凭。
 
 本文是 R2（`qq-send-thread-contract.md` / `qq-receive-thread-contract.md`）的增量，不重复其已证结论。状态标记：`[verified]` = 本轮汇编/反编译/文件证据；`[corrected]` = 更正 R2 结论；`[unknown]` = 未闭合。
 
@@ -116,3 +118,65 @@ RTTI（文件级 COL 解码，`dump-p1-vtables.py` 输出 `p1-vtable-dump.json`�
 - 脚本：`scan-p1-caller-xrefs.py`（E8/E9 调用方扫描）、`dump-p1-vtables.py`（vtable/RTTI COL 文件级解码）、`scan-p1-ripxref.py`（RIP-relative 引用 + PE 导入表 TLS IAT 定位）、`scan-*.json` 输出。
 - Ghidra 导出：`phaseA/`(90) `phaseB/`(77) `phaseC/`(33) `phaseD/`(20) `phaseE/`(12) `phaseF/`(5) `phaseG/`(5)，每 phase 含 `functions/*.c`、`assembly/*.txt`、`functions.jsonl`、`summary.json`；种子 `seeds-phase{A..G}.json`。
 - 关键单文件：`phaseD/functions/d32e5a.c`（TLS 安装器）、`phaseF/functions/217d8cc.c`（安装链源）、`phaseA/functions/9c2c6c.c` 与 `phaseD/functions/9c15d6.c`（单例删除链）、`phaseD/functions/6e5b80.c`（LoginRequestImpl ctor）、`phaseB/functions/7318e2.c`（+0x60 消费者）。
+
+## 10. R3.1 现场闭合：发送目标、dispatcher 身份与两链拓扑（2026-10-08）
+
+观测工具 `caligo-cli observe-msf`（外部只读 RPM：`QUERY|VM_READ`，零注入/零写入/零 QQ 函数调用，不消耗实例 bootstrap）。目标实例：**PID 47524**（创建 2026-10-08T11:58:14Z UTC，QQNT 9.9.33-52230），登录完成后 t1/t2/t3 三次采样（间隔 ≥2 分钟），证据：`docs/execution/2026-10-08-native-contract-recovery/evidence/p1-observe-field-47524-t{1,2,3}.json`。
+
+### 10.1 `this+0x60` transport：身份与实际目标 [live+static 交叉闭合]
+
+- MSFService 单例（`+0x674D2C0` 槽）**已构造**：obj vptr RVA `+0x3F6DED8` **锚点命中**（确认加载二进制 = 固定样本）；strong 149→244→501（活跃使用），weak=14 恒定。
+- **`this+0x60` 已安装**（三次采样同址）：transport obj vtable RVA **`0x41403B8`**（wrapper.node 内），恰 10 个虚槽后接非指针数据：
+
+| slot | RVA | 备注 |
+|---|---|---|
+| 0 | `0x1B4E8B8` | 函数起点（.pdata） |
+| 1 | `0x1B4E118` | 叶函数（无 unwind） |
+| 2 | `0x1B4E134` | |
+| 3 | `0x784A80` | 公共基类方法（他区） |
+| 4 | `0x1B4E180` | |
+| 5 | `0x1B4E384` | |
+| 6 | `0x1B4E19E` | |
+| **7 (+0x38)** | **`0x1B4E4EC`** | **发送路径实际目标（732EB9 调用点）** |
+| 8 | `0x1B4E6A6` | |
+| 9 | `0x1B4E846` | |
+
+- vtable `0x41403B8` 的全部 rip 引用仅两处：**ctor `0x1B4DFF8`** 与 dtor `0x1B4E0DA`（§6 的"无写入者"就此终结——写入者此前不在任何已反编译集合里）。
+- **`0x1B4E4EC` 定性**（phaseH 反编译，真函数起点 `0x1B4E4EC..0x1B4E619`）：锁 transport `+0x30` 的 pair 取**内联连接对象**（空 → `*out_token=0` 且返回 0 —— **未连接即同步失败，不排队**）；否则取 token（`0xB78D06`）、复制 command（经自身 slot3）、包装 callback（`0xB7F6F6`），转交 **`0xB7CE8A`**。
+- **`0xB7CE8A` 定性**：校验内联对象 vtable `+0x30` 状态（`(state & 0xFFFFFFFE) != 4` → 失败分支）；组装闭包 {command 副本, request 接管, callback 包装, token}，经 **`D32138` 提交到 `0xB816E8` 全局对象的 `+8` 成员**（静态存储 RVA **`0x67510A8`**，guard `0x67510B8`；getter 的 init 桩 `0xB81748` 仅清零，真实构造经 `0x4E91A6` store 路径）。
+- transport 对象出处：`0xB7C6C0`（0x70 字节分配 → ctor → `0xB7C89C` 挂释放钩子 `0xB7827E` → 存入 owner `+0x110`）；`0xB7C6C0` 本身经 manager 类 vtable（.rdata `0x3FD3E70` 槽）间接派发。**最后把该指针写入 MSFService `+0x60` 的那条 store 仍未单独定位**——但对合同不再是必要项：对象身份、slot 语义、状态检查、失败路径均已闭合。
+
+### 10.2 dispatcher 类：两类提交目标同源 [live+static 交叉闭合]
+
+- **TLS 提交目标**（index=44，D32DAD 持有）：145–150 线程中 **41 个已安装**，全部指向**同一 vtable RVA `0x43B6088`**；slot0 = **`0x31F8CEE`**（真函数起点）。
+- **发送链全局 dispatcher**（`0x67510A8`）：**同一 vtable `0x43B6088`**，slot0 同为 `0x31F8CEE`。**发送与接收提交的是同一个类的两个实例**：发送用全局单例，接收结果处理用调用线程自己的 TLS 实例（§3/§4 的推断就此定版）。
+- 类合同（phaseH/I 反编译）：ctor `0x31F878C`（写 vtable，`+8` 存 {内部队列对象, 弱 pair}，弱计数获取）；slot0 `0x31F8CEE`（锁 `+8` pair → 转交 `0x31F88EA`）；`0x31F88EA` = 入队 + **owner TID 自检**（当前 TID vs 对象 `+0x58`，跨线程走显式唤醒路径 `0x217DE40`）。
+- **执行器单例 `0x750088` 现场未构造**（三次采样 vptr=None）——R2 §5 的 Core executor 单例不在本实例运行路径上；41 个 TLS dispatcher 与它无关（§5 的"关系 unknown"就此关闭：无关系）。
+- **MSFCoreService getter `0x74203C` 未被调用**（`+0x674D3E8` 槽为空）——运行时 switch 实际选择了 MSFService。首个运行时分支证据。
+
+### 10.3 发送/接收完整拓扑（闭合版）
+
+```
+发送: 732A80 ─ this+0x60 (transport vtbl 0x41403B8)
+        └ slot7 0x1B4E4EC ─ 锁 +0x30 pair(内联连接; 空即失败)
+            └ 0xB7CE8A ─ 状态检查(vtbl+0x30) ─ D32138 → 全局 dispatcher(0x67510A8, vtbl 0x43B6088)
+                └ slot0 0x31F8CEE ─ 0x31F88EA 入队(+8 pair) + 跨线程唤醒
+接收: 1B41AE6 ─ 1B3F740 ─ D32D98(本线程 TLS, index 44) ─ 同类 dispatcher(0x43B6088)
+                └ slot0 0x31F8CEE ─ 同上入队
+回调: 出队线程执行 → 73bd6c → 用户 invoker —— 即"QQ 自己的 worker 线程",
+      不是提交线程,不保证恰一次;与提交者并发。
+```
+
+### 10.4 对 Caligo 合同的修订约束（取代 §8 中相应条款）
+
+1. [原 §8.1] 提交目标不再是纯推断：**发送 → 全局 dispatcher 实例；接收 → 提交线程 TLS 实例**。自有 adapter 在 QQ 拥有的线程上执行时，两条路径的语义已可核对；"任意线程可调用"仍然不被证明——worker 上下文（安装 TLS 的那 41 线程）之外的提交行为仍未证。
+2. [新] transport slot7 在**未连接时同步返回 0 且 token=0**——这是可依赖的失败信号（原生层可探测"会话未就绪"而无需发送）。
+3. [新] 状态检查点：内联连接对象 vtable `+0x30` 的状态值（`4/5` 为可提交态）可作为原生 ready 证据的一部分（仍需与 session-ready 门联合判定）。
+4. [新] callback 线程 = dispatcher 消费线程（QQ worker 池），与提交者并发——R2 §3"复制后异步"的约束维持并升级为实证背景。
+5. 仍未闭合（记录在案，不阻塞 P2 的合同冻结）：dispatcher 消费侧（出队→执行的线程池关系）；MSFService+0x60 的最后一条 store；stop/cancel/drain 路径；b78d06 token 的语义（回执关联候选）。
+
+### 10.5 R3.1 证据索引
+
+- 观测报告：`docs/execution/2026-10-08-native-contract-recovery/evidence/p1-observe-field-47524-t{1,2,3}.json`（工具 `crates/caligo-cli/src/observe_msf.rs`，提交 6f85350+）。
+- 静态导出：phaseH（30 函数：1b4e4ec/b7ce8a/b7c6c0/31f8cee/31f878c 等）、phaseI（b816e8/31f88ea 等）、phaseJ（b81748）；`E:/stella/_reference/qq-native-r3-p1-20261008/`。
+- 字节级：transport/dispatcher vtable rip-scan（构造/析构唯一性）、`.pdata` 函数起点验证、`b7c6c0` 的 .rdata vtable 归属。
