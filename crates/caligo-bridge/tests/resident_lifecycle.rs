@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use caligo_bridge::host_adapter::{HostAdapter, HostError, HostOp, HostOpResult};
 use caligo_bridge::resident::{
+
     CloseReport, OwnedEvent, OwnedRequest, Resident, ResidentLimits, SubmitVerdict,
+    SendOutcome,
 };
 
 // ---- 计数分配器(L17:分配不随调度次数增长 / 关闭后回基线) ----
@@ -478,4 +480,183 @@ fn after_env_destroyed_business_dispatch_touches_nothing() {
     r.submit(OwnedRequest::Probe { id: 1 });
     assert!(matches!(r.drain(), Err(HostError::EnvInvalid)));
     assert_eq!(ctl.native_calls(), 1, "仅 bootstrap;业务零触碰");
+}
+
+// ---- P4 锁范围改造:内联回调重入不死锁 + SendPending 关闭分类(T14) ----
+
+use std::sync::OnceLock;
+
+/// 测试线程 tid(与宿主 owner 一致:单线程执行语义)。
+fn this_tid() -> u64 {
+    // SAFETY: 无副作用。
+    unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() as u64 }
+}
+
+/// 重入宿主:native_op 期间回调 resident 的 core 面板(deliver_callback/
+/// token)—— 改造前 drain/close 持 core 锁调 native_op,同线程重入即死锁。
+struct ReentrantHost {
+    resident: Arc<OnceLock<Arc<Resident<ReentrantHost>>>>,
+    remove_reenters: bool,
+}
+
+static REENTRANT_SENDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl HostAdapter for ReentrantHost {
+    fn owner_thread_id(&self) -> u64 {
+        this_tid()
+    }
+    fn current_thread_id(&self) -> u64 {
+        this_tid()
+    }
+    fn env_valid(&self) -> bool {
+        true
+    }
+    fn current_context_ok(&self) -> bool {
+        true
+    }
+    fn native_op(
+        &mut self,
+        op: HostOp,
+    ) -> Result<HostOpResult, caligo_bridge::host_adapter::HostError> {
+        use caligo_bridge::host_adapter::HostError;
+        let r = self.resident.get().expect("resident slot set");
+        match op {
+            HostOp::SendText { .. } => {
+                // 重入点 1:token()(core 锁);重入点 2:deliver_callback(core 锁)。
+                let tok = r.token();
+                let _ = r.deliver_callback(
+                    tok,
+                    caligo_bridge::resident::OwnedEvent {
+                        source: caligo_bridge::resident::EventSourceKind::Recv,
+                        chat_type: 1,
+                        peer_uid: "peer".into(),
+                        peer_uin: "peer".into(),
+                        sender_uin: "sender".into(),
+                        native_id: format!("NM-R-{}", REENTRANT_SENDS.fetch_add(1, Ordering::Relaxed)),
+                        text: "inline".into(),
+                        msg_time: None,
+                    },
+                );
+                Ok(HostOpResult::Sent { native_id: Some("NM-INLINE".into()) })
+            }
+            HostOp::ListenerRemove { .. } => {
+                if self.remove_reenters {
+                    let tok = r.token();
+                    let _ = r.deliver_callback(
+                        tok,
+                        caligo_bridge::resident::OwnedEvent {
+                            source: caligo_bridge::resident::EventSourceKind::Recv,
+                            chat_type: 1,
+                            peer_uid: "p".into(),
+                            peer_uin: "p".into(),
+                            sender_uin: "s".into(),
+                            native_id: "NM-LATE-CLOSE".into(),
+                            text: "late-during-remove".into(),
+                            msg_time: None,
+                        },
+                    );
+                }
+                Ok(HostOpResult::ListenerRemoved)
+            }
+            HostOp::ListenerAdd => Ok(HostOpResult::ListenerAdded { token: 1 }),
+            HostOp::Probe => Ok(HostOpResult::ProbeDone),
+        }
+    }
+}
+
+/// 改造前:drain 持 core 锁调 native_op → 内联 token()/deliver_callback()
+/// 同线程重入 core 锁 → 死锁。改造后:三段式(claim/invoke/complete)完成。
+#[test]
+fn inline_callback_reentrancy_no_deadlock() {
+    let slot: Arc<OnceLock<Arc<Resident<ReentrantHost>>>> = Arc::new(OnceLock::new());
+    let resident = Arc::new(Resident::new(
+        ReentrantHost { resident: Arc::clone(&slot), remove_reenters: false },
+        ResidentLimits::default(),
+    ));
+    slot.set(Arc::clone(&resident)).ok().unwrap();
+    resident.bootstrap().unwrap();
+    assert_eq!(
+        resident.submit(OwnedRequest::SendText {
+            request_id: "R-INLINE".into(),
+            chat_type: 1,
+            peer_uid: "peer".into(),
+            text: "x".into(),
+        }),
+        SubmitVerdict::Accepted
+    );
+    let n = resident.drain().unwrap();
+    assert_eq!(n, 1);
+    // 内联回调送达 core 面板(经重入),结果与事件都在。
+    let outcomes = resident.take_results();
+    assert!(matches!(
+        outcomes.as_slice(),
+        [SendOutcome::Success { request_id, .. }] if request_id == "R-INLINE"
+    ));
+    let events = resident.take_events();
+    assert_eq!(events.len(), 1, "内联回调经重入面板送达");
+}
+
+/// close 的 ListenerRemove 期间迟到回调重入 —— 不死锁,且事件入 Stopping
+/// 窗口(随后随 close 清空计数)。
+#[test]
+fn close_listener_remove_allows_reentrant_callback() {
+    let slot: Arc<OnceLock<Arc<Resident<ReentrantHost>>>> = Arc::new(OnceLock::new());
+    let resident = Arc::new(Resident::new(
+        ReentrantHost { resident: Arc::clone(&slot), remove_reenters: true },
+        ResidentLimits::default(),
+    ));
+    slot.set(Arc::clone(&resident)).ok().unwrap();
+    resident.bootstrap().unwrap();
+    let report = resident.close().unwrap();
+    assert_eq!(report.listener_removed, Some(true));
+    // 存活到断言 = 无死锁。
+}
+
+/// T14(resident 级,C7):SendPending 在 close 时分类 DeliveryUnknown,
+/// 不残留 send_pending。
+#[test]
+fn send_pending_classified_unknown_on_close() {
+    // SendFired 宿主:drain 后停留在 SendPending(Promise 未回)。
+    struct FiredHost;
+    impl HostAdapter for FiredHost {
+        fn owner_thread_id(&self) -> u64 {
+            this_tid()
+        }
+        fn current_thread_id(&self) -> u64 {
+            this_tid()
+        }
+        fn env_valid(&self) -> bool {
+            true
+        }
+        fn current_context_ok(&self) -> bool {
+            true
+        }
+        fn native_op(
+            &mut self,
+            op: HostOp,
+        ) -> Result<HostOpResult, caligo_bridge::host_adapter::HostError> {
+            Ok(match op {
+                HostOp::ListenerAdd => HostOpResult::ListenerAdded { token: 1 },
+                HostOp::ListenerRemove { .. } => HostOpResult::ListenerRemoved,
+                HostOp::Probe => HostOpResult::ProbeDone,
+                HostOp::SendText { .. } => HostOpResult::SendFired { mid: "MID-1".into() },
+            })
+        }
+    }
+    let resident = Arc::new(Resident::new(FiredHost, ResidentLimits::default()));
+    resident.bootstrap().unwrap();
+    assert!(matches!(
+        resident.submit(OwnedRequest::SendText {
+            request_id: "R-PENDING".into(),
+            chat_type: 1,
+            peer_uid: "peer".into(),
+            text: "x".into(),
+        }),
+        SubmitVerdict::Accepted
+    ));
+    let _ = resident.drain().unwrap();
+    assert_eq!(resident.request_state("R-PENDING"), Some("send_pending"));
+    let report = resident.close().unwrap();
+    assert!(report.marked_unknown >= 1, "SendPending 必须计入 marked_unknown");
+    assert_eq!(resident.request_state("R-PENDING"), Some("delivery_unknown"));
 }

@@ -29,7 +29,7 @@
 | P0 基线 | PASS | 本文件 P0 表 |
 | P1 原生合同（G-ABI/G-THREAD/G-LIFE） | **IN PROGRESS（首轮有界交付完成；关键间接目标未闭合 → 走计划失败分支的受控观测方案）** | `docs/research/qq-native-thread-contract.md`、`docs/research/qq-native-lifetime-contract.md`；外部证据 `E:/stella/_reference/qq-native-r3-p1-20261008/`（phaseA–G 共 165 函数 + 3 个字节级扫描脚本） |
 | P2 路线冻结 | **PASS（文档层；2026-10-08）** | `docs/research/k4-native-route-decision.md`、`docs/contracts/qq-9.9.33-52230.capability-profile.json`；loading-route-decision §4 / source-register S16–S18 增补 |
-| P4–P9 | P4 第一批 + P5 第一批已交付（见变更登记）;P4 残余:resident 锁范围接线/真实 shutdown 导出/kind2 原型;P5 残余:真实抓包 fixture 替换字段验证 | 本文件 P4/P5 表 |
+| P4–P9 | P4 **基本完成**(第二批=resident 锁范围改造已交付;真实 shutdown 导出的 lib.rs 接线归 P6 native 入口)、P5 第一批已交付;P5 残余:真实抓包 fixture 替换字段验证 | 本文件 P4/P5 表 |
 | P3 公共 IPC/身份/恢复（LAB） | **PASS（LAB 层）** | 本文件 P3 表；`evidence/p3-lab/` |
 | P4–P9 | NOT STARTED | — |
 
@@ -72,6 +72,13 @@ P1 首轮交付的实质进展（细节见两份合同文档）：
 | 2026-10-08 | P4 第一批 | 新增 `native_abi.rs`（恢复布局:ctrlblk 0x28/tagged24/byte24/callback move 协议/提交入口签名/panic 边界）、`native_handle.rs`（拥有 pair 句柄:代次绑定/释放对称/缺失释放家族→隔离计数）、`native_msf.rs`（adapter:claim 前置核对→无锁调用边界→独立有界完成通道/调度许可/去重幂等/失效审计/在途账本;真实链接 G1 前恒 None=拒绝占位）。假宿主按同一 C 形状受试。修正:文档 transport pair 偏移 +0x30→**+0x60**（1B4E4EC 的 param_1+0xC 按 longlong* 即 0x60 字节）。LAB 中发现并修正 move 协议语义（转移时销毁 capture→use-after-free;改为 guts 转移+源失效+dst 侧销毁恰一次;真实 op=0 transfer-in 细节留 P6 ABI 冻结定证）。附带修复 daemon_client_lab reconnect 预存在 flake（Stop 前等 worker 首连） | `crates/caligo-bridge/src/native_*.rs`;`tests/native_adapter_contract.rs`;`evidence/p4-lab/after.txt` |
 
 | 2026-10-08 | P5 第一批 | 新增 `crates/caligo-core/src/qq_protocol/`(自研有界 protobuf wire 编解码,零第三方依赖):wire(varint/len/fixed,group 拒绝,未知字段跳过留痕,截断/坏 tag 显式拒绝)、send(PbSendMsg 私聊/群文本最小编码)、recv(MsgPush 最小路由:多级未知归集/未支持类型显式拒绝/群号 hint)、receipt(result/errmsg 分层;**成功缺稳定身份→Unconfirmed,不伪造**)、identity(UIN/群号/方向/平台时间守卫;方向不靠 sender==account 猜,时间缺失如实 None)。字段号按公开协议参考,**全部标记 verified:false**——字段级真实性待 G1/G2 真实抓包替换 fixture 后复核;fixture 全部脱敏自生成 | `crates/caligo-core/src/qq_protocol/`;`tests/qq_text_codec.rs` |
+
+| 2026-10-08 | P4 第二批 | **resident 锁范围改造**(计划 §7-P4 核心):adapter 移出 Core 加独立 Mutex,全局锁序 adapter→core;`drain` 三段式(claim→invoke 无 core 锁→complete),`close` 的 ListenerRemove 同样无 core 锁 —— 内联回调重入 `token()/deliver_callback()` 不死锁(红验证:改造前该路径确定性挂起,timeout 击杀)。**C7 修复**:close 在途分类补上 SendPending→DeliveryUnknown(此前只分类 NativeStarted)。`precheck` 提为自由函数(计数经 core 锁,锁序不变)。bootstrap 保持双锁并注释理由(ListenerAdd 前无监听器=回调不可能到达)。新增 3 测试:inline 重入/close 期间重入/T14 SendPending 分类 | `crates/caligo-bridge/src/resident.rs`;`tests/resident_lifecycle.rs`(14/14) |
+
+### P4 第二批验证(2026-10-08)
+
+- workspace 119 + core research 70 + bridge research 45 = **234 passed / 0 failed**(分套计数;`evidence/p4-lab/after-b.txt` 为单次全量日志)。
+- 重入红验证:改造前 drain 内联 token() 必死锁(std Mutex 不可重入),测试 timeout 击杀;改造后绿。
 
 ### P5 反例与验证(2026-10-08,4/4 绿 + 模块单测 17 绿)
 

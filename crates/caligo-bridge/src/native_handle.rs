@@ -9,8 +9,6 @@
 //! - **危险释放拒绝**:释放钩子未接线(真实 QQ 释放家族未定证)时,
 //!   Drop 只登记泄漏并转入隔离计数 —— 不猜地址、不跨 allocator。
 
-use core::ffi::c_void;
-
 use super::native_abi::{self, CtrlBlockLayout, ServicePair};
 
 /// 释放家族抽象:真实=QQ 侧函数(P6 前定证);LAB=假宿主注入。

@@ -10,6 +10,11 @@
 //! - **确定性关闭**:未派发项可取消;在途项显式 unknown;listener 对称移除
 //!   并确认;关闭后计数回基线;double close 幂等;
 //! - 环境失效(env invalid)→ Quarantined:停动作、保留证据,不当正常关闭。
+//! - **锁序合同(P4)**:全局锁序 adapter → core;native 调用(drain 的
+//!   SendText/Probe、close 的 ListenerRemove)**不持有 core 锁** —— 内联
+//!   回调可安全重入 `deliver_callback`/`token`(计划 §7-P4:claim/快照 →
+//!   已验证调用 → 独立完成通道)。bootstrap 例外:ListenerAdd 完成前无
+//!   监听器存在,回调不可能到达,双锁持有序仍遵守 adapter→core。
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -165,7 +170,7 @@ enum ReqState {
 }
 
 struct Core<A: HostAdapter> {
-    adapter: A,
+    _marker: core::marker::PhantomData<A>,
     state: ResidentState,
     token: LifecycleToken,
     limits: ResidentLimits,
@@ -182,14 +187,18 @@ struct Core<A: HostAdapter> {
 /// adapter 的线程检查共同保证(**Mutex 只串行化数据结构;owner 检查在
 /// 每次 native 前独立进行**,不因持锁而豁免)。
 pub struct Resident<A: HostAdapter> {
+    /// 宿主 adapter(独立锁;锁序 adapter→core)。native 调用期间不持
+    /// core 锁,内联回调可重入 core 面板(§7-P4)。
+    adapter: Mutex<A>,
     core: Mutex<Core<A>>,
 }
 
 impl<A: HostAdapter> Resident<A> {
     pub fn new(adapter: A, limits: ResidentLimits) -> Self {
         Self {
+            adapter: Mutex::new(adapter),
             core: Mutex::new(Core {
-                adapter,
+                _marker: core::marker::PhantomData,
                 state: ResidentState::Idle,
                 token: LifecycleToken(0),
                 limits,
@@ -208,13 +217,16 @@ impl<A: HostAdapter> Resident<A> {
     ///
     /// 检查顺序:**先** owner/env/current,后任何宿主 API(ListenerAdd)。
     pub fn bootstrap(&self) -> Result<LifecycleToken, HostError> {
+        // 锁序 adapter→core(全局合同);ListenerAdd 完成前无监听器,回调
+        // 不可能到达 —— 双锁持有序在此安全(doc 注)。
+        let mut adapter = self.adapter.lock().unwrap();
         let mut c = self.core.lock().unwrap();
         if c.state != ResidentState::Idle {
             return Err(HostError::Native { code: 1 }); // 已初始化:每代次一次
         }
-        c.precheck()?;
+        precheck(&mut *adapter, &mut c.counters)?;
         let token = LifecycleToken(next_token());
-        match c.adapter.native_op(HostOp::ListenerAdd)? {
+        match adapter.native_op(HostOp::ListenerAdd)? {
             HostOpResult::ListenerAdded { token: ltoken } => {
                 c.listener_token = Some(ltoken);
             }
@@ -282,43 +294,79 @@ impl<A: HostAdapter> Resident<A> {
     /// owner 线程 drain:每项处理前独立完成 owner/env/current 检查。
     /// 返回本轮处理数(≤ drain_batch);有剩余时调用方应继续调度,
     /// **不能等下一条业务消息才唤醒**(计划 §6.4)。
+    ///
+    /// 锁范围(§7-P4):claim(core 锁)→ **invoke(adapter 锁,core 无锁)**
+    /// → complete(core 锁)。内联回调在 invoke 期间重入
+    /// `deliver_callback`/`token` 不死锁。
     pub fn drain(&self) -> Result<usize, HostError> {
-        let mut c = self.core.lock().unwrap();
-        if !matches!(c.state, ResidentState::Ready | ResidentState::Stopping) {
-            return Ok(0);
-        }
         let mut processed = 0usize;
-        while processed < c.limits.drain_batch {
-            // 每项前检查(§5.1:第一个宿主 API 之前)。
-            if let Err(e) = c.precheck() {
-                if processed == 0 {
-                    return Err(e);
-                }
-                return Ok(processed);
-            }
-            let Some((req, tok)) = c.ingress.pop_front() else {
+        loop {
+            let batch_limit = self.core.lock().unwrap().limits.drain_batch;
+            if processed >= batch_limit {
                 break;
-            };
-            if tok != c.token {
-                // 旧代次请求:拒绝且零 native。
-                c.counters.stale_submits_rejected += 1;
-                continue;
             }
-            let op = match &req {
-                OwnedRequest::Probe { .. } => HostOp::Probe,
-                OwnedRequest::SendText { request_id, chat_type, peer_uid, text } => {
-                    if let Some(rec) = c.requests.get_mut(request_id) {
-                        rec.state = ReqState::NativeStarted;
-                    }
-                    HostOp::SendText {
-                        chat_type: *chat_type,
-                        peer_uid: peer_uid.clone(),
-                        text: text.clone(),
-                    }
+            // ---- claim(core 锁):弹出 + 快照 + 登记 NativeStarted ----
+            let (req, op) = {
+                let mut c = self.core.lock().unwrap();
+                if !matches!(c.state, ResidentState::Ready | ResidentState::Stopping) {
+                    break;
                 }
+                let Some((req, tok)) = c.ingress.pop_front() else {
+                    break;
+                };
+                if tok != c.token {
+                    // 旧代次请求:拒绝且零 native。
+                    c.counters.stale_submits_rejected += 1;
+                    continue;
+                }
+                let op = match &req {
+                    OwnedRequest::Probe { .. } => HostOp::Probe,
+                    OwnedRequest::SendText { request_id, chat_type, peer_uid, text } => {
+                        if let Some(rec) = c.requests.get_mut(request_id) {
+                            rec.state = ReqState::NativeStarted;
+                        }
+                        HostOp::SendText {
+                            chat_type: *chat_type,
+                            peer_uid: peer_uid.clone(),
+                            text: text.clone(),
+                        }
+                    }
+                };
+                (req, op)
+            }; // core 锁释放:native 调用期间回调可重入。
+            // ---- invoke(adapter 锁;precheck 仍先于第一个宿主 API)----
+            let r = {
+                let mut adapter = self.adapter.lock().unwrap();
+                // 计数器更新需 core 锁:锁序 adapter→core(全局合同)。
+                let pre = {
+                    let mut c = self.core.lock().unwrap();
+                    precheck(&mut *adapter, &mut c.counters)
+                };
+                if let Err(e) = pre {
+                    // 与原语义一致:首项失败 → Err;非首项 → 已处理数返回,
+                    // 请求退回队首(未执行,状态回退)。
+                    let mut c = self.core.lock().unwrap();
+                    let tok = c.token;
+                    if let OwnedRequest::SendText { request_id, .. } = &req {
+                        if let Some(rec) = c.requests.get_mut(request_id) {
+                            if rec.state == ReqState::NativeStarted {
+                                rec.state = ReqState::Queued;
+                            }
+                        }
+                    }
+                    c.ingress.push_front((req, tok));
+                    drop(c);
+                    if processed == 0 {
+                        return Err(e);
+                    }
+                    break;
+                }
+                adapter.native_op(op)
             };
-            let r = c.adapter.native_op(op);
-            c.counters.native_ops_total += 1;
+            // ---- complete(core 锁):落账 + 独立完成通道 ----
+            {
+                let mut c = self.core.lock().unwrap();
+                c.counters.native_ops_total += 1;
             match &r {
                 Ok(HostOpResult::Sent { native_id }) => {
                     c.counters.dispatched_total += 1;
@@ -369,7 +417,8 @@ impl<A: HostAdapter> Resident<A> {
                     }
                 }
             }
-            processed += 1;
+                processed += 1;
+            }
         }
         Ok(processed)
     }
@@ -479,24 +528,37 @@ impl<A: HostAdapter> Resident<A> {
                 report.cancelled_unsent += 1;
             }
         }
-        // 2) 在途(native 已开始、结果未回)→ 显式 unknown;不宣称未发送。
+        // 2) 在途(native 已开始/fired 未回执)→ 显式 unknown;不宣称未发送。
+        // **含 SendPending**(C7:fired 未回执在关闭时同样不可证明已送达)。
         let mut unknown_now: u64 = 0;
         for rec in c.requests.values_mut() {
-            if rec.state == ReqState::NativeStarted {
+            if matches!(rec.state, ReqState::NativeStarted | ReqState::SendPending) {
                 rec.state = ReqState::DeliveryUnknown;
                 unknown_now += 1;
             }
         }
         report.marked_unknown = unknown_now as usize;
         c.counters.marked_unknown += unknown_now;
-        // 3) 对称移除监听器(owner 线程;必须确认结果)。
-        if let Some(tok) = c.listener_token.take() {
-            // 关闭中的 precheck:环境可能已坏;坏了则进 Quarantined。
-            if let Err(e) = c.precheck() {
-                c.quarantine();
-                return Err(e);
-            }
-            match c.adapter.native_op(HostOp::ListenerRemove { token: tok }) {
+        // 3) 对称移除监听器:在途分类(**含 SendPending**,C7)已完成;
+        // ListenerRemove 在 adapter 锁内执行(core 无锁,迟到回调可重入)。
+        let listener_tok = c.listener_token.take();
+        drop(c);
+        if let Some(tok) = listener_tok {
+            let r = {
+                let mut adapter = self.adapter.lock().unwrap();
+                let pre = {
+                    let mut c = self.core.lock().unwrap();
+                    precheck(&mut *adapter, &mut c.counters)
+                };
+                if let Err(e) = pre {
+                    let mut c = self.core.lock().unwrap();
+                    c.quarantine();
+                    return Err(e);
+                }
+                adapter.native_op(HostOp::ListenerRemove { token: tok })
+            };
+            let mut c = self.core.lock().unwrap();
+            match r {
                 Ok(HostOpResult::ListenerRemoved) => {
                     c.counters.listener_removes += 1;
                     c.counters.native_ops_total += 1;
@@ -506,13 +568,15 @@ impl<A: HostAdapter> Resident<A> {
                     report.listener_removed = Some(false);
                 }
                 Err(e) => {
-                    // 移除失败:无法证明清理完成 → Quarantined。
+                    // 移除失败:无法证明清理完成 → Quarantined(T15)。
                     c.quarantine();
                     return Err(e);
                 }
             }
+            drop(c);
         }
         // 4) 残余出站事件丢弃计数已在 late_rejections 体现;队列清空。
+        let mut c = self.core.lock().unwrap();
         c.late_rejections += c.events.len();
         c.events.clear();
         c.state = ResidentState::Closed;
@@ -543,25 +607,29 @@ impl<A: HostAdapter> Resident<A> {
     }
 }
 
-impl<A: HostAdapter> Core<A> {
-    /// 一切宿主 API 之前的三重检查:owner 线程 → env 有效 → current 上下文。
-    /// **检查顺序固定;零/空 current 不得放行**(计划 §5.1)。
-    fn precheck(&mut self) -> Result<(), HostError> {
-        if self.adapter.current_thread_id() != self.adapter.owner_thread_id() {
-            self.counters.native_ops_rejected_precheck += 1;
-            return Err(HostError::NotOwnerThread);
-        }
-        if !self.adapter.env_valid() {
-            self.counters.native_ops_rejected_precheck += 1;
-            return Err(HostError::EnvInvalid);
-        }
-        if !self.adapter.current_context_ok() {
-            self.counters.native_ops_rejected_precheck += 1;
-            return Err(HostError::NoCurrentContext);
-        }
-        Ok(())
+/// 一切宿主 API 之前的三重检查:owner 线程 → env 有效 → current 上下文。
+/// **检查顺序固定;零/空 current 不得放行**(计划 §5.1)。调用方须已持
+/// adapter 锁;core 锁仅用于计数(全局锁序 adapter→core)。
+fn precheck<A: HostAdapter>(
+    adapter: &mut A,
+    counters: &mut ResidentCounters,
+) -> Result<(), HostError> {
+    if adapter.current_thread_id() != adapter.owner_thread_id() {
+        counters.native_ops_rejected_precheck += 1;
+        return Err(HostError::NotOwnerThread);
     }
+    if !adapter.env_valid() {
+        counters.native_ops_rejected_precheck += 1;
+        return Err(HostError::EnvInvalid);
+    }
+    if !adapter.current_context_ok() {
+        counters.native_ops_rejected_precheck += 1;
+        return Err(HostError::NoCurrentContext);
+    }
+    Ok(())
+}
 
+impl<A: HostAdapter> Core<A> {
     fn quarantine(&mut self) {
         self.state = ResidentState::Quarantined;
         self.counters.quarantine_events += 1;

@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use super::native_abi::{self, CallbackMgrLayout, ServicePair, TaggedString24, TransportSubmitFn};
+use super::native_abi::{self, CallbackMgrLayout, TaggedString24, TransportSubmitFn};
 use super::native_handle::{HandleStats, ServiceHandle};
 
 /// 真实 QQ 链接(G1 前恒 None;字段名即证据锚点)。
@@ -91,8 +91,9 @@ struct Shared {
     submitted: Mutex<VecDeque<String>>,
     stale: Arc<AtomicBool>,
     counters: Arc<MsfCounters>,
-    host_generation: u64,
-    session_generation: u64,
+    /// 代次快照(P6 接线后用于回调代次核验;当前经 adapter.stale 总闸)。
+    _host_generation: u64,
+    _session_generation: u64,
 }
 
 impl Shared {
@@ -146,6 +147,8 @@ pub struct MsfAdapter {
     /// 宿主代次失效后置位:一切回调只审计(T13)。
     stale: Arc<AtomicBool>,
     pub counters: Arc<MsfCounters>,
+    /// 句柄统计指针(P6 接线;构造侧 Box 已入账)。
+    #[allow(dead_code)]
     stats_ptr: *mut HandleStats,
 }
 
@@ -173,8 +176,8 @@ impl MsfAdapter {
             submitted: Mutex::new(VecDeque::new()),
             stale: Arc::new(AtomicBool::new(false)),
             counters: Arc::clone(&counters),
-            host_generation: handle.generations().0,
-            session_generation: handle.generations().1,
+            _host_generation: handle.generations().0,
+            _session_generation: handle.generations().1,
         });
         let adapter = Self {
             handle,
