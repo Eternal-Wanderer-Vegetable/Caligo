@@ -338,7 +338,7 @@ fn strlen_bounded(p: *const u8, cap: usize) -> usize {
 
 /// 注册监听器(活会话扫描 + addKernelMsgListener;每会话代次一次)。
 /// 返回 "ARMED sid=<n> lidRet=<id>" / "ALREADY ..." / "ERR:..."。
-pub const D8_START_JS: &str = r"JS
+pub const D8_START_JS: &str = r"
 (function () {
   try {
     var G = globalThis;
@@ -402,10 +402,10 @@ pub const D8_START_JS: &str = r"JS
     return 'ARMED sid=' + sidName + ' lidRet=' + String(R.listenerId).slice(0, 40);
   } catch (e) { return 'ERR:' + String(e).slice(0, 300); }
 })()
-JS;";
+";
 
 /// 排空接收环:返回 JSON {sid,n,items:[...]} / "NOT_ARMED"。
-pub const D8_POLL_JS: &str = r"JS
+pub const D8_POLL_JS: &str = r"
 (function () {
   try {
     var G = globalThis;
@@ -416,10 +416,10 @@ pub const D8_POLL_JS: &str = r"JS
     return out.slice(0, 900000);
   } catch (e) { return 'ERR:' + String(e).slice(0, 300); }
 })()
-JS;";
+";
 
 /// 对称移除监听器 + 清理常驻对象:返回 "STOPPED sid=.. remove=.."。
-pub const D8_STOP_JS: &str = r"JS
+pub const D8_STOP_JS: &str = r"
 (function () {
   try {
     var G = globalThis;
@@ -432,7 +432,7 @@ pub const D8_STOP_JS: &str = r"JS
     return 'STOPPED sid=' + sid + ' remove=' + r;
   } catch (e) { return 'ERR:' + String(e).slice(0, 300); }
 })()
-JS;";
+";
 
 // —— 共享符号存取(daemon 导出解析一次;adapter/pump 共用) ——
 
@@ -498,78 +498,48 @@ pub fn stop_listener() -> Result<String, V8Error> {
 /// fired 后 Promise 结果写入 R.sendResults[mid](done 带结果 / rejected 带错误),
 /// 由轮询回收 —— §6.6:fired 非终态,mid 为 receipt 第一分类(候选 ID)。
 pub fn build_send_js(chat_type: u32, peer_uid: &str, text: &str) -> String {
-    let peer_json = serde_json::to_string(peer_uid).unwrap_or_else(|_| String::from("\"\"\""));
-    let text_json = serde_json::to_string(text).unwrap_or_else(|_| String::from("\"\"\""));
-    String::from("JS")
-        + "
-(function () {{"
-        + "
-  try {"
-        + "
-    var G = globalThis;"
-        + "
-    if (!G.__caligo_res) return JSON.stringify({ err: 'NOT_ARMED' });"
-        + "
-    var R = G.__caligo_res;"
-        + "
-    R.sendResults = R.sendResults || {};"
-        + "
-    var chat = "
-        + &chat_type.to_string()
-        + ";
-    var peerUid = "
-        + &peer_json
-        + ";
-    var sv = 0;"
-        + "
-    try { sv = R.session.getMSFService().getServerTime(); } catch (e) {}"
-        + "
-    var mid = String(R.ms.generateMsgUniqueId(chat, sv));"
-        + "
-    var peer = { chatType: chat, guildId: mid, peerUid: peerUid };"
-        + "
-    var elems = [{ elementType: 1, textElement: { content: "
-        + &text_json
-        + " } }];"
-        + "
-    var pr = R.ms.sendMsg('0', peer, elems, new Map());"
-        + "
-    R.sendResults[mid] = { status: 'pending', ts: Date.now() };"
-        + "
-    if (pr && typeof pr.then === 'function') {"
-        + "
-      pr.then(function (res) {"
-        + "
-        try {"
-        + "
-          var rec = JSON.parse(JSON.stringify(res));"
-        + "
-          var nid = '';"
-        + "
-          try { nid = String(rec.msgId || (rec.msgList && rec.msgList[0] && rec.msgList[0].msgId) || ''); } catch (e) {}"
-        + "
-          R.sendResults[mid] = { status: 'done', msgId: nid, result: JSON.stringify(rec).slice(0, 2000) };"
-        + "
-        } catch (e) { R.sendResults[mid] = { status: 'done-raw' }; }"
-        + "
-      }, function (err) {"
-        + "
-        R.sendResults[mid] = { status: 'rejected', error: String(err).slice(0, 300) };"
-        + "
-      });"
-        + "
-    } else {"
-        + "
-      R.sendResults[mid] = { status: 'done-raw' };"
-        + "
-    }"
-        + "
-    return JSON.stringify({ fired: true, mid: mid });"
-        + "
-  } catch (e) { return JSON.stringify({ err: String(e).slice(0, 300) }); }"
-        + "
-})()
-JS;"
+    let peer_json = serde_json::to_string(peer_uid).unwrap_or_default();
+    let text_json = serde_json::to_string(text).unwrap_or_default();
+    let mut js = String::with_capacity(2048);
+    js.push_str("(function () {\n");
+    js.push_str("  try {\n");
+    js.push_str("    var G = globalThis;\n");
+    js.push_str("    if (!G.__caligo_res) return JSON.stringify({ err: 'NOT_ARMED' });\n");
+    js.push_str("    var R = G.__caligo_res;\n");
+    js.push_str("    R.sendResults = R.sendResults || {};\n");
+    js.push_str("    var chat = ");
+    js.push_str(&chat_type.to_string());
+    js.push_str(";\n");
+    js.push_str("    var peerUid = ");
+    js.push_str(&peer_json);
+    js.push_str(";\n");
+    js.push_str("    var sv = 0;\n");
+    js.push_str("    try { sv = R.session.getMSFService().getServerTime(); } catch (e) {}\n");
+    js.push_str("    var mid = String(R.ms.generateMsgUniqueId(chat, sv));\n");
+    js.push_str("    var peer = { chatType: chat, guildId: mid, peerUid: peerUid };\n");
+    js.push_str("    var elems = [{ elementType: 1, textElement: { content: ");
+    js.push_str(&text_json);
+    js.push_str(" } }];\n");
+    js.push_str("    var pr = R.ms.sendMsg('0', peer, elems, new Map());\n");
+    js.push_str("    R.sendResults[mid] = { status: 'pending', ts: Date.now() };\n");
+    js.push_str("    if (pr && typeof pr.then === 'function') {\n");
+    js.push_str("      pr.then(function (res) {\n");
+    js.push_str("        try {\n");
+    js.push_str("          var rec = JSON.parse(JSON.stringify(res));\n");
+    js.push_str("          var nid = '';\n");
+    js.push_str("          try { nid = String(rec.msgId || (rec.msgList && rec.msgList[0] && rec.msgList[0].msgId) || ''); } catch (e) {}\n");
+    js.push_str("          R.sendResults[mid] = { status: 'done', msgId: nid, result: JSON.stringify(rec).slice(0, 2000) };\n");
+    js.push_str("        } catch (e) { R.sendResults[mid] = { status: 'done-raw' }; }\n");
+    js.push_str("      }, function (err) {\n");
+    js.push_str("        R.sendResults[mid] = { status: 'rejected', error: String(err).slice(0, 300) };\n");
+    js.push_str("      });\n");
+    js.push_str("    } else {\n");
+    js.push_str("      R.sendResults[mid] = { status: 'done-raw' };\n");
+    js.push_str("    }\n");
+    js.push_str("    return JSON.stringify({ fired: true, mid: mid });\n");
+    js.push_str("  } catch (e) { return JSON.stringify({ err: String(e).slice(0, 300) }); }\n");
+    js.push_str("})()\n");
+    js
 }
 
 /// D9 发送:返回原始输出(fired JSON / NOT_ARMED JSON / ERR JSON)。
