@@ -563,7 +563,7 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
     let mut last_heartbeat = Instant::now();
     let mut heartbeat_misses: u32 = 0;
     // resident 未就绪期的待提交队列(owner 初始化完成后补交)。
-    let mut pending: VecDeque<(String, usize)> = VecDeque::new();
+    let mut pending: VecDeque<(String, u32, String, String)> = VecDeque::new(); // (id, chat, peer, text)
 
     // HelloAck(阻塞;被拒 → 不可重试)。
     loop {
@@ -598,10 +598,12 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
         // 0) 待提交补交(resident 就绪后)。
         let plen = pending.len();
         for _ in 0..plen {
-            let (id, len) = pending.front().cloned().expect("nonempty");
+            let (id, chat, peer, text) = pending.front().cloned().expect("nonempty");
             match resident.submit(crate::resident::OwnedRequest::SendText {
                 request_id: id.clone(),
-                text_len: len,
+                chat_type: chat,
+                peer_uid: peer,
+                text: text.clone(),
             }) {
                 crate::resident::SubmitVerdict::Accepted => {
                     pending.pop_front();
@@ -733,18 +735,25 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
         }
         // 4) 阻塞收(tick 周期返回)。
         match recv_json(conn, dec, tick) {
-            Ok(CoreToBridgeMsg::Dispatch { request_id, target: _, text }) => {
+            Ok(CoreToBridgeMsg::Dispatch { request_id, target, text }) => {
                 c.dispatches += 1;
                 if send_json(conn, &BridgeMsg::NativeStarted { request_id: request_id.clone() }).is_err() {
                     return SessionEnd::Broken;
                 }
                 match resident.submit(crate::resident::OwnedRequest::SendText {
                     request_id: request_id.clone(),
-                    text_len: text.len(),
+                    chat_type: chat_type_from_target(&target),
+                    peer_uid: peer_uid_from_target(&target),
+                    text: text.clone(),
                 }) {
                     crate::resident::SubmitVerdict::Accepted => {}
                     // resident 未就绪(owner 初始化重试中):挂回待提交队列。
-                    _ => pending.push_back((request_id, text.len())),
+                    _ => pending.push_back((
+                        request_id,
+                        chat_type_from_target(&target),
+                        peer_uid_from_target(&target),
+                        text.clone(),
+                    )),
                 }
                 wake();
             }
@@ -775,4 +784,21 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
             Err(_) => return SessionEnd::Broken,
         }
     }
+}
+
+/// target JSON → chat_type(1=private 2=group;opaque 透传)。
+fn chat_type_from_target(v: &serde_json::Value) -> u32 {
+    if v.get("kind").and_then(|x| x.as_str()) == Some("group") {
+        2
+    } else {
+        1
+    }
+}
+
+/// target JSON → peer_uid(会话 peer;opaque)。
+fn peer_uid_from_target(v: &serde_json::Value) -> String {
+    v.get("peer")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string()
 }

@@ -248,13 +248,101 @@ fn strlen_bounded(p: *const u8, cap: usize) -> usize {
 
 /// 注册监听器(活会话扫描 + addKernelMsgListener;每会话代次一次)。
 /// 返回 "ARMED sid=<n> lidRet=<id>" / "ALREADY ..." / "ERR:..."。
-pub const D8_START_JS: &str = include_str!("../../../js/resident-start.js");
+pub const D8_START_JS: &str = r"JS
+(function () {
+  try {
+    var G = globalThis;
+    if (G.__caligo_res) return 'ALREADY sid=' + G.__caligo_res.sid;
+    var q = process._linkedBinding('QQNT');
+    var S = q.NodeIQQNTWrapperSession;
+    var live = null, sidName = null;
+    for (var i = 0; i < 10; i++) {
+      try {
+        var ls = S.getNTWrapperSession('nt_' + i);
+        if (ls && typeof ls === 'object') {
+          var sid = ls.getSessionId();
+          if (sid && String(sid) !== '0') {
+            var ms = ls.getMsgService();
+            if (ms && ms.sendMsg) { live = ls; sidName = 'nt_' + i; break; }
+          }
+        }
+      } catch (e) {}
+    }
+    if (!live) return 'ERR:no live session';
+    var ms = live.getMsgService();
+    var R = { sid: sidName, session: live, ms: ms, recv: [], seq: 0, listenerId: null, sendResults: {} };
+    var push = function (src, m) {
+      try {
+        var txt = '';
+        var els = m.elements || [];
+        for (var j = 0; j < els.length; j++) {
+          if (els[j] && els[j].textElement) txt += els[j].textElement.content || '';
+        }
+        R.recv.push({
+          seq: R.seq++, ts: Date.now(), src: src,
+          msgId: String(m.msgId || '').slice(0, 40),
+          chatType: m.chatType,
+          peerUid: String(m.peerUid || '').slice(0, 48),
+          peerUin: String(m.peerUin || '').slice(0, 20),
+          senderUid: String(m.senderUid || '').slice(0, 48),
+          senderUin: String(m.senderUin || '').slice(0, 20),
+          msgTime: (typeof m.msgTime === 'number') ? m.msgTime : null,
+          sendStatus: m.sendStatus, msgType: m.msgType, subMsgType: m.subMsgType,
+          text: txt.slice(0, 8000)
+        });
+        if (R.recv.length > 200) R.recv.splice(0, R.recv.length - 200);
+      } catch (err) {}
+    };
+    R.listener = {
+      onRecvMsg: function (a) {
+        try {
+          var arr = Array.isArray(a) ? a : (a && a.msgList ? a.msgList : [a]);
+          for (var i = 0; i < arr.length; i++) push('recv', arr[i]);
+        } catch (err) {}
+      },
+      onMsgInfoListUpdate: function (a) {
+        try {
+          var arr = Array.isArray(a) ? a : (a && a.msgList ? a.msgList : [a]);
+          for (var i = 0; i < arr.length; i++) push('update', arr[i]);
+        } catch (err) {}
+      }
+    };
+    R.listenerId = ms.addKernelMsgListener(R.listener);
+    G.__caligo_res = R;
+    return 'ARMED sid=' + sidName + ' lidRet=' + String(R.listenerId).slice(0, 40);
+  } catch (e) { return 'ERR:' + String(e).slice(0, 300); }
+})()
+JS;";
 
 /// 排空接收环:返回 JSON {sid,n,items:[...]} / "NOT_ARMED"。
-pub const D8_POLL_JS: &str = include_str!("../../../js/resident-poll.js");
+pub const D8_POLL_JS: &str = r"JS
+(function () {
+  try {
+    var G = globalThis;
+    if (!G.__caligo_res) return 'NOT_ARMED';
+    var R = G.__caligo_res;
+    var out = JSON.stringify({ sid: R.sid, n: R.recv.length, items: R.recv, sendResults: R.sendResults || {} });
+    R.recv = [];
+    return out.slice(0, 900000);
+  } catch (e) { return 'ERR:' + String(e).slice(0, 300); }
+})()
+JS;";
 
 /// 对称移除监听器 + 清理常驻对象:返回 "STOPPED sid=.. remove=.."。
-pub const D8_STOP_JS: &str = include_str!("../../../js/resident-stop.js");
+pub const D8_STOP_JS: &str = r"JS
+(function () {
+  try {
+    var G = globalThis;
+    if (!G.__caligo_res) return 'NOT_ARMED';
+    var R = G.__caligo_res;
+    var r = 'no-listener';
+    try { r = String(R.ms.removeKernelMsgListener(R.listenerId)); } catch (e) { r = 'ERR:' + String(e).slice(0, 100); }
+    var sid = R.sid;
+    delete G.__caligo_res;
+    return 'STOPPED sid=' + sid + ' remove=' + r;
+  } catch (e) { return 'ERR:' + String(e).slice(0, 300); }
+})()
+JS;";
 
 // —— 共享符号存取(daemon 导出解析一次;adapter/pump 共用) ——
 
@@ -314,4 +402,92 @@ pub fn stop_listener() -> Result<String, V8Error> {
     };
     // SAFETY: 同上。
     unsafe { exec_script(&syms, isolate_addr(), D8_STOP_JS) }
+}
+
+/// D9 发送模板:占位 {chat}(数字)、{peer}/{text}(JSON 字符串)。
+/// fired 后 Promise 结果写入 R.sendResults[mid](done 带结果 / rejected 带错误),
+/// 由轮询回收 —— §6.6:fired 非终态,mid 为 receipt 第一分类(候选 ID)。
+pub fn build_send_js(chat_type: u32, peer_uid: &str, text: &str) -> String {
+    let peer_json = serde_json::to_string(peer_uid).unwrap_or_else(|_| String::from("\"\"\""));
+    let text_json = serde_json::to_string(text).unwrap_or_else(|_| String::from("\"\"\""));
+    String::from("JS")
+        + "
+(function () {{"
+        + "
+  try {"
+        + "
+    var G = globalThis;"
+        + "
+    if (!G.__caligo_res) return JSON.stringify({ err: 'NOT_ARMED' });"
+        + "
+    var R = G.__caligo_res;"
+        + "
+    R.sendResults = R.sendResults || {};"
+        + "
+    var chat = "
+        + &chat_type.to_string()
+        + ";
+    var peerUid = "
+        + &peer_json
+        + ";
+    var sv = 0;"
+        + "
+    try { sv = R.session.getMSFService().getServerTime(); } catch (e) {}"
+        + "
+    var mid = String(R.ms.generateMsgUniqueId(chat, sv));"
+        + "
+    var peer = { chatType: chat, guildId: mid, peerUid: peerUid };"
+        + "
+    var elems = [{ elementType: 1, textElement: { content: "
+        + &text_json
+        + " } }];"
+        + "
+    var pr = R.ms.sendMsg('0', peer, elems, new Map());"
+        + "
+    R.sendResults[mid] = { status: 'pending', ts: Date.now() };"
+        + "
+    if (pr && typeof pr.then === 'function') {"
+        + "
+      pr.then(function (res) {"
+        + "
+        try {"
+        + "
+          var rec = JSON.parse(JSON.stringify(res));"
+        + "
+          var nid = '';"
+        + "
+          try { nid = String(rec.msgId || (rec.msgList && rec.msgList[0] && rec.msgList[0].msgId) || ''); } catch (e) {}"
+        + "
+          R.sendResults[mid] = { status: 'done', msgId: nid, result: JSON.stringify(rec).slice(0, 2000) };"
+        + "
+        } catch (e) { R.sendResults[mid] = { status: 'done-raw' }; }"
+        + "
+      }, function (err) {"
+        + "
+        R.sendResults[mid] = { status: 'rejected', error: String(err).slice(0, 300) };"
+        + "
+      });"
+        + "
+    } else {"
+        + "
+      R.sendResults[mid] = { status: 'done-raw' };"
+        + "
+    }"
+        + "
+    return JSON.stringify({ fired: true, mid: mid });"
+        + "
+  } catch (e) { return JSON.stringify({ err: String(e).slice(0, 300) }); }"
+        + "
+})()
+JS;"
+}
+
+/// D9 发送:返回原始输出(fired JSON / NOT_ARMED JSON / ERR JSON)。
+pub fn send_text(chat_type: u32, peer_uid: &str, text: &str) -> Result<String, V8Error> {
+    let Some(syms) = symbols() else {
+        return Err(V8Error::NoCurrentContext);
+    };
+    let js = build_send_js(chat_type, peer_uid, text);
+    // SAFETY: 阶梯自管全部检查;调用方保证 owner 线程。
+    unsafe { exec_script(&syms, isolate_addr(), &js) }
 }

@@ -668,6 +668,32 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
                 match crate::qq_v8::poll_listener_json() {
                     Ok(json) if !json.starts_with("NOT_ARMED") => {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&json) {
+                            // D9:sendResults 回收(fired 的 Promise 结果)。
+                            if let Some(sr) = v.get("sendResults").and_then(|x| x.as_object()) {
+                                let mut done: Vec<(String, String)> = Vec::new();
+                                let mut rejected: Vec<(String, String)> = Vec::new();
+                                for (mid, st) in sr {
+                                    let status = st.get("status").and_then(|x| x.as_str()).unwrap_or("");
+                                    if status == "done" {
+                                        let nid = st
+                                            .get("msgId")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        done.push((mid.clone(), nid));
+                                    } else if status == "rejected" {
+                                        let why = st
+                                            .get("error")
+                                            .and_then(|x| x.as_str())
+                                            .unwrap_or("promise rejected")
+                                            .to_string();
+                                        rejected.push((mid.clone(), why));
+                                    }
+                                }
+                                if !done.is_empty() || !rejected.is_empty() {
+                                    r.complete_sends(&done, &rejected);
+                                }
+                            }
                             if let Some(items) = v.get("items").and_then(|x| x.as_array()) {
                                 for it in items {
                                     let g = |k: &str| {

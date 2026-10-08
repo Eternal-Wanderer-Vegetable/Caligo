@@ -22,7 +22,11 @@ pub enum HostOp {
     /// 非发送调度(生命周期/资源验收用;不代表业务发送)。
     Probe,
     /// 参数化发送(QQ 业务调用;LAB 由假会话服务应答)。
-    SendText { text_len: usize },
+    SendText {
+        chat_type: u32,
+        peer_uid: String,
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +40,9 @@ pub enum HostOpResult {
     /// 发送完成。`native_id` 为实际原生消息身份 —— **拿不到关联时为 None**,
     /// 上层(§6.6 receipt 契约)不得把 None 冒充成已关联成功。
     Sent { native_id: Option<String> },
+    /// 原生调用已发出(fired),结果由 Promise 异步完成 —— 非终态;
+    /// `mid` 为本地生成的候选消息 ID(receipt 三分类的第一项)。
+    SendFired { mid: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

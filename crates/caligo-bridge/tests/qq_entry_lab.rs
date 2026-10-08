@@ -319,9 +319,11 @@ fn adapter_listener_ops_via_v8_ladder_and_resident_full_mode() {
         HostOpResult::ListenerRemoved
     );
     // D9 发送:显式拒绝(未接线,不冒充)。
+    // D9 发送已接线:装了假 V8 符号 → 阶梯执行 send 脚本 → 假机无应答队列
+    // 返回 NOT_ARMED(err 字段)→ 宿主明确失败 Native{3}(NOT_ARMED = 未接线)。
     assert!(matches!(
-        adapter.native_op(HostOp::SendText { text_len: 1 }),
-        Err(HostError::NoProvenRoute)
+        adapter.native_op(HostOp::SendText { chat_type: 1, peer_uid: "p".into(), text: "x".into() }),
+        Err(HostError::Native { code: 3 })
     ));
 
     // resident 全模式 bootstrap/close(注册 → 对称移除,资源回基线)。

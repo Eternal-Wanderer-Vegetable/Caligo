@@ -136,7 +136,9 @@ fn spawn_bridge_agent(daemon: Arc<Daemon>, stop: Arc<AtomicBool>) -> std::thread
                     assert_eq!(
                         resident.submit(OwnedRequest::SendText {
                             request_id: request_id.clone(),
-                            text_len: text.len(),
+                            chat_type: 2,
+                            peer_uid: "grp".into(),
+                            text: text.clone(),
                         }),
                         caligo_bridge::resident::SubmitVerdict::Accepted
                     );

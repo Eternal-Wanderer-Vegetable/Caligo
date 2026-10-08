@@ -801,8 +801,28 @@ impl crate::host_adapter::HostAdapter for QqOwnerAdapter {
                 Err(crate::qq_v8::V8Error::NoCurrentContext) => Err(HostError::NoCurrentContext),
                 Err(_) => Err(HostError::EnvInvalid),
             },
-            // D9 未接线:显式拒绝。
-            HostOp::SendText { .. } => Err(HostError::NoProvenRoute),
+            // D9:参数化发送(K3 验证脚本经 V8 阶梯;fired 非终态,
+            // Promise 结果经轮询 sendResults 回收 —— 见 daemon pump 钩子)。
+            HostOp::SendText { chat_type, peer_uid, text } => {
+                match crate::qq_v8::send_text(chat_type, &peer_uid, &text) {
+                    Ok(out) => {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                            if v.get("fired").and_then(|x| x.as_bool()) == Some(true) {
+                                let mid = v
+                                    .get("mid")
+                                    .map(|x| x.to_string().trim_matches('"').to_string())
+                                    .unwrap_or_default();
+                                return Ok(HostOpResult::SendFired { mid });
+                            }
+                            // "ERR:..." / NOT_ARMED:宿主侧明确失败。
+                            return Err(HostError::Native { code: 3 });
+                        }
+                        Err(HostError::Native { code: 3 })
+                    }
+                    Err(crate::qq_v8::V8Error::NoCurrentContext) => Err(HostError::NoCurrentContext),
+                    Err(_) => Err(HostError::EnvInvalid),
+                }
+            }
         }
     }
 }

@@ -234,8 +234,8 @@ fn l07_foreign_thread_and_zero_context_rejected_before_any_host_api() {
 fn l16_close_protocol_and_late_callbacks() {
     let (r, ctl) = fixture();
     let tok = r.bootstrap().unwrap();
-    r.submit(OwnedRequest::SendText { request_id: "a".into(), text_len: 2 });
-    r.submit(OwnedRequest::SendText { request_id: "b".into(), text_len: 3 });
+    r.submit(OwnedRequest::SendText { request_id: "a".into(), chat_type: 1, peer_uid: "p".into(), text: "x".repeat(2) });
+    r.submit(OwnedRequest::SendText { request_id: "b".into(), chat_type: 1, peer_uid: "p".into(), text: "x".repeat(3) });
     assert_eq!(r.drain().unwrap(), 2);
 
     let report = r.close().unwrap();
@@ -282,7 +282,7 @@ fn close_cancels_queued_and_reports_failure_vs_unknown() {
     r.bootstrap().unwrap();
     // native 服务明确报错(调用完成但失败)→ Failure 结果,不是 unknown。
     ctl.fail_next_native();
-    r.submit(OwnedRequest::SendText { request_id: "inflight".into(), text_len: 1 });
+    r.submit(OwnedRequest::SendText { request_id: "inflight".into(), chat_type: 1, peer_uid: "p".into(), text: "x".repeat(1) });
     assert_eq!(r.drain().unwrap(), 1);
     assert_eq!(r.request_state("inflight"), Some("done"));
     let outcomes = r.take_results();
@@ -295,14 +295,14 @@ fn close_cancels_queued_and_reports_failure_vs_unknown() {
     );
     // 操作级环境失效(precheck 过、执行中死)→ DeliveryUnknown,不冒充失败。
     ctl.fail_next_op_unknown();
-    r.submit(OwnedRequest::SendText { request_id: "ghost".into(), text_len: 1 });
+    r.submit(OwnedRequest::SendText { request_id: "ghost".into(), chat_type: 1, peer_uid: "p".into(), text: "x".repeat(1) });
     assert_eq!(r.drain().unwrap(), 1);
     assert_eq!(r.request_state("ghost"), Some("delivery_unknown"));
     let outcomes = r.take_results();
     assert_eq!(outcomes.len(), 1);
     assert!(matches!(outcomes[0], caligo_bridge::resident::SendOutcome::Unknown { .. }));
     // 排队未执行项随 close 取消。
-    r.submit(OwnedRequest::SendText { request_id: "queued".into(), text_len: 1 });
+    r.submit(OwnedRequest::SendText { request_id: "queued".into(), chat_type: 1, peer_uid: "p".into(), text: "x".repeat(1) });
     let report = r.close().unwrap();
     assert_eq!(report.cancelled_unsent, 1);
     assert_eq!(r.request_state("queued"), Some("cancelled_unsent"));
@@ -453,7 +453,7 @@ fn bounded_queues_reject_explicitly_and_drain_batches() {
 fn duplicate_send_request_id_is_not_redispatched() {
     let (r, ctl) = fixture();
     r.bootstrap().unwrap();
-    let req = OwnedRequest::SendText { request_id: "dup".into(), text_len: 5 };
+    let req = OwnedRequest::SendText { request_id: "dup".into(), chat_type: 1, peer_uid: "p".into(), text: "x".repeat(5) };
     assert_eq!(r.submit(req.clone()), SubmitVerdict::Accepted);
     assert_eq!(
         r.submit(req),

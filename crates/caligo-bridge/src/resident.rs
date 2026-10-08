@@ -45,7 +45,12 @@ pub enum OwnedRequest {
     Probe { id: u64 },
     /// 参数化发送。native 语义与状态由 core(计划 §6.6)持有;bridge 只
     /// 登记"已见请求"防重复派发。
-    SendText { request_id: String, text_len: usize },
+    SendText {
+        request_id: String,
+        chat_type: u32,
+        peer_uid: String,
+        text: String,
+    },
 }
 
 /// 事件来源回调(D8 去重语义依赖:onRecvMsg=接收,onMsgInfoListUpdate=更新)。
@@ -144,12 +149,16 @@ pub struct ResidentCounters {
 
 struct ReqRecord {
     state: ReqState,
+    /// SendPending 阶段的候选消息 ID(fired mid;receipt 关联键)。
+    pending_mid: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReqState {
     Queued,
     NativeStarted,
+    /// 原生调用已发出、Promise 未回(mid 已生成;§6.6 非终态)。
+    SendPending,
     Done,
     CancelledUnsent,
     DeliveryUnknown,
@@ -242,7 +251,7 @@ impl<A: HostAdapter> Resident<A> {
             }
             c.requests.insert(
                 request_id.clone(),
-                ReqRecord { state: ReqState::Queued },
+                ReqRecord { state: ReqState::Queued, pending_mid: None },
             );
         }
         if c.ingress.len() >= c.limits.ingress_max {
@@ -297,11 +306,15 @@ impl<A: HostAdapter> Resident<A> {
             }
             let op = match &req {
                 OwnedRequest::Probe { .. } => HostOp::Probe,
-                OwnedRequest::SendText { request_id, text_len } => {
+                OwnedRequest::SendText { request_id, chat_type, peer_uid, text } => {
                     if let Some(rec) = c.requests.get_mut(request_id) {
                         rec.state = ReqState::NativeStarted;
                     }
-                    HostOp::SendText { text_len: *text_len }
+                    HostOp::SendText {
+                        chat_type: *chat_type,
+                        peer_uid: peer_uid.clone(),
+                        text: text.clone(),
+                    }
                 }
             };
             let r = c.adapter.native_op(op);
@@ -317,6 +330,16 @@ impl<A: HostAdapter> Resident<A> {
                             request_id: request_id.clone(),
                             native_id: native_id.clone(),
                         });
+                    }
+                }
+                // fired 非终态:mid 挂账,Promise 结果经 poll sendResults 回收。
+                Ok(HostOpResult::SendFired { mid }) => {
+                    c.counters.dispatched_total += 1;
+                    if let OwnedRequest::SendText { request_id, .. } = &req {
+                        if let Some(rec) = c.requests.get_mut(request_id) {
+                            rec.state = ReqState::SendPending;
+                            rec.pending_mid = Some(mid.clone());
+                        }
                     }
                 }
                 Ok(_) => {
@@ -355,6 +378,46 @@ impl<A: HostAdapter> Resident<A> {
     pub fn take_events(&self) -> Vec<OwnedEvent> {
         let mut c = self.core.lock().unwrap();
         c.events.drain(..).map(|(ev, _)| ev).collect()
+    }
+
+    /// D9:Promise 结果回收 —— 按 fired mid 关联 request_id 并产出终态。
+    /// `done`: (mid, native_id);`rejected`: (mid, reason)。
+    pub fn complete_sends(
+        &self,
+        done: &[(String, String)],
+        rejected: &[(String, String)],
+    ) {
+        let mut c = self.core.lock().unwrap();
+        // 先按 mid 匹配 request(不可变),再统一落账(可变)—— 避免双借。
+        let mut outcomes: Vec<SendOutcome> = Vec::new();
+        let mut state_updates: Vec<(String, ReqState)> = Vec::new();
+        for (rid, rec) in c.requests.iter() {
+            if rec.state != ReqState::SendPending {
+                continue;
+            }
+            let Some(mid) = &rec.pending_mid else { continue };
+            if let Some((_, nid)) = done.iter().find(|(m, _)| m == mid) {
+                outcomes.push(SendOutcome::Success {
+                    request_id: rid.clone(),
+                    native_id: Some(nid.clone()),
+                });
+                state_updates.push((rid.clone(), ReqState::Done));
+            } else if let Some((_, why)) = rejected.iter().find(|(m, _)| m == mid) {
+                outcomes.push(SendOutcome::Failure {
+                    request_id: rid.clone(),
+                    reason: why.clone(),
+                });
+                state_updates.push((rid.clone(), ReqState::Done));
+            }
+            // 仍在 pending:等下一个 poll(deadline 由 core 侧把守)。
+        }
+        for (rid, st) in state_updates {
+            if let Some(rec) = c.requests.get_mut(&rid) {
+                rec.state = st;
+                rec.pending_mid = None;
+            }
+        }
+        c.results_out.extend(outcomes);
     }
 
     /// 消费派发结果(worker 回传 core;先落账后 ACK 由 core 负责)。
@@ -472,6 +535,7 @@ impl<A: HostAdapter> Resident<A> {
         c.requests.get(request_id).map(|r| match r.state {
             ReqState::Queued => "queued",
             ReqState::NativeStarted => "native_started",
+            ReqState::SendPending => "send_pending",
             ReqState::Done => "done",
             ReqState::CancelledUnsent => "cancelled_unsent",
             ReqState::DeliveryUnknown => "delivery_unknown",
