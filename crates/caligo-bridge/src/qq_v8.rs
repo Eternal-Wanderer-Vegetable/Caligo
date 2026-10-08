@@ -189,6 +189,20 @@ pub unsafe fn exec_script(
 
         let r = exec_in_scope(syms, isolate, ctx, js, &mut scope);
 
+        // RunEmpty 诊断(D9 现场):区分"上下文不可执行"与"脚本自身问题"。
+        if matches!(r, Err(V8Error::RunEmpty)) {
+            let probe = exec_in_scope(syms, isolate, ctx, "1+1", &mut scope);
+            crate::qq_entry::append_stage_simple(
+                "v8_probe",
+                probe.is_ok(),
+                &format!(
+                    "probe={:?} script_len={}",
+                    probe.as_ref().map(|s| s.as_str()).unwrap_or("<empty>"),
+                    js.len()
+                ),
+            );
+        }
+
         (ctx_exit)(ctx as *mut c_void);
         scope_dtor(scope.as_mut_ptr().cast());
         r
