@@ -154,6 +154,12 @@ fn print_summary(r: &ObserveReport) {
         }
     }
     let installed: Vec<&ThreadReport> = r.threads.iter().filter(|t| t.dispatcher_obj.is_some()).collect();
+    if let Some(m) = &r.manager {
+        println!(
+            "[observe-msf] Manager: sc={:#x}(vptr_rva={:?}) manager={:#x}(vptr_rva={:?}) o0={:#x} list_head={:#x}",
+            m.sc, m.sc_vptr_rva, m.manager, m.manager_vptr_rva, m.o0, m.list_head
+        );
+    }
     if let Some(g) = &r.global_dispatcher {
         println!(
             "[observe-msf] 全局 dispatcher @+{:#x}: obj={:#x} vptr_rva={:?}({}) owner_tid={:?} pair={:?} slot0={}",
@@ -204,6 +210,7 @@ struct ObserveReport {
     singletons: Vec<SingletonReport>,
     executor_static: ExecutorStaticReport,
     global_dispatcher: Option<GlobalDispatcherReport>,
+    manager: Option<ManagerReport>,
     tls: TlsReport,
     threads: Vec<ThreadReport>,
     notes: Vec<String>,
@@ -273,6 +280,16 @@ struct GlobalDispatcherReport {
     field_58_tid: Option<i32>,
     /// dispatcher+8 的内联 pair(队列对象)。
     field_8_pair: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+struct ManagerReport {
+    sc: u64,
+    sc_vptr_rva: Option<u64>,
+    manager: u64,
+    manager_vptr_rva: Option<u64>,
+    o0: u64,
+    list_head: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -400,6 +417,14 @@ fn observe(pid: u32, planted_idx: Option<u64>, self_test: bool) -> Result<Observ
         None
     };
 
+    // Manager 定位:transport 指针(单例 +0x60)反查 SC(堆扫 needle)→
+    // SC+0x158 = Manager。SC vtable RVA 0x3FD3E28,Manager vtable RVA
+    // 0x413F7A8(RTTI msf::internal::Manager)。
+    let mut manager = None;
+    if base != 0 {
+        manager = find_manager(&obs, base);
+    }
+
     let executor_static = if base != 0 {
         match obs.q(base + CORE_EXECUTOR_OBJ) {
             Some(vptr) => {
@@ -472,6 +497,7 @@ fn observe(pid: u32, planted_idx: Option<u64>, self_test: bool) -> Result<Observ
         singletons,
         executor_static,
         global_dispatcher,
+        manager,
         tls,
         threads,
         notes,
@@ -819,4 +845,79 @@ fn now_unix_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+
+// —— Manager 定位(堆扫 transport 指针反查 SC;P6 G2)——
+
+const SC_VTBL_RVA: u64 = 0x3FD3E28;
+const MANAGER_VTBL_RVA: u64 = 0x413F7A8;
+
+/// 遍历已提交私有内存,找 qword == Manager vptr(base+0x413F7A8)的对象;
+/// 每个命中即 Manager 实例,读 +0x140/+0x170。返回首个。
+fn find_manager(obs: &Observer, base: u64) -> Option<ManagerReport> {
+    use core::ffi::c_void;
+    let mut found: Option<ManagerReport> = None;
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, VirtualQueryEx,
+    };
+    // SAFETY: 只读遍历目标地址空间;RPM 失败即跳过区域。
+    unsafe {
+        let needle = (base + MANAGER_VTBL_RVA).to_le_bytes();
+        let mut addr = 0x10000u64;
+        let max = 0x7FFFFFFEFFFFu64;
+        while addr < max {
+            let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+            if VirtualQueryEx(obs.handle, addr as *const c_void, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) == 0 {
+                break;
+            }
+            let region = mbi.RegionSize;
+            let state = mbi.State;
+            let typ = mbi.Type;
+            let base_addr = mbi.BaseAddress as u64;
+            if state == MEM_COMMIT && typ == MEM_PRIVATE && region >= 0x1000 && region < 0x4000_0000 {
+                let mut buf = vec![0u8; region as usize];
+                let mut got = 0usize;
+                if ReadProcessMemory(
+                    obs.handle,
+                    base_addr as *const c_void,
+                    buf.as_mut_ptr().cast(),
+                    region as usize,
+                    &mut got,
+                ) != 0
+                {
+                    buf.truncate(got);
+                    let mut i = 0;
+                    while i + 8 <= buf.len() {
+                        if &buf[i..i + 8] == &needle {
+                            let candidate = base_addr + i as u64;
+                            if candidate > 0x10000 {
+                                let o0 = obs.q(candidate + 0x140).unwrap_or(0);
+                                let head = obs.q(candidate + 0x170).unwrap_or(0);
+                                // 全部命中都报(通常 1 个);首个带 O0/链状态的优先。
+                                let m = ManagerReport {
+                                    sc: 0,
+                                    sc_vptr_rva: None,
+                                    manager: candidate,
+                                    manager_vptr_rva: Some(MANAGER_VTBL_RVA),
+                                    o0,
+                                    list_head: head,
+                                };
+                                if o0 != 0 || head != 0 {
+                                    return Some(m);
+                                }
+                                if found.is_none() {
+                                    found = Some(m);
+                                }
+                            }
+                        }
+                        i += 8;
+                    }
+                }
+            }
+            addr = base_addr + region as u64;
+        }
+    }
+    None
 }
