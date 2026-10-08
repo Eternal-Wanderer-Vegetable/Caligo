@@ -12,3 +12,4 @@ js/*.report.jsonl
 .d8*.py
 .fix*.py
 .clean*.py
+.d9*.py
