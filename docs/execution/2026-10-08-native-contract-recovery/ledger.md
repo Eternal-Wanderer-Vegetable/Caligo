@@ -50,6 +50,8 @@ P1 首轮交付的实质进展（细节见两份合同文档）：
 | 2026-10-08 | P3 | C1:daemon 每条新 bridge 连接 `fetch_add` 分配 epoch;reconnect 错误传播,失败即拒绝（accepted 只在完整绑定/恢复成功后返回） | 同上 |
 | 2026-10-08 | P3 | C9:新增 `caligo-model::ipc_v3`（Hello + host_nonce + host_process_created_utc;v2 原样保留且被显式拒绝）;宿主身份由 bridge 提供（进程 nonce + GetProcessTimes + OS PID）,daemon 同代次+同宿主才允许幂等重连 | 同上 |
 | 2026-10-08 | P3 | 测试基础设施:daemon LAB 故障注入 `test_fault_break_bridge_after_hello`（一次性;不读在途字节直接断开,T07 确定性构造点） | 同上 |
+| 2026-10-08 | P1 | 两份 R3 静态合同（thread/lifetime）+ 外部证据树 phaseA–G(165 函数)+3 个字节级扫描脚本;D32138 语义更正;TLS 提交目标拓扑定位;+0x60 候选淘汰表;LoginRequestImpl 观察者形状 | `qq-native-thread-contract.md`、`qq-native-lifetime-contract.md`、`E:/stella/_reference/qq-native-r3-p1-20261008/` |
+| 2026-10-08 | P1 伴生 | **发现并修复 D9 遗留缺陷**:`qq_entry::bootstrap` 把局部 UTF-8 String 指针登记为全局报告路径,悬空后被按 UTF-16 读取,LAB 运行在 CWD 产生乱码名诊断转储（10 个文件入库混入 P3 提交,已清理）;修复为进程生存期宽字符副本 | 提交 910dc5b |
 
 ### P3 反例与验证（LAB,2026-10-08）
 
