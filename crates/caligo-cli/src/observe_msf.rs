@@ -290,6 +290,8 @@ struct ManagerReport {
     manager_vptr_rva: Option<u64>,
     o0: u64,
     list_head: u64,
+    /// 哨兵节点头 4 qword——定链方向。
+    sentinel_head: [u64; 4],
 }
 
 #[derive(serde::Serialize)]
@@ -895,6 +897,13 @@ fn find_manager(obs: &Observer, base: u64) -> Option<ManagerReport> {
                             if candidate > 0x10000 {
                                 let o0 = obs.q(candidate + 0x140).unwrap_or(0);
                                 let head = obs.q(candidate + 0x170).unwrap_or(0);
+                                // 哨兵节点(=head 值)头 4 qword(next/prev/...)。
+                                let mut sentinel_head = [0u64; 4];
+                                if head != 0 {
+                                    for (k, h) in sentinel_head.iter_mut().enumerate() {
+                                        *h = obs.q(head + (k * 8) as u64).unwrap_or(0);
+                                    }
+                                }
                                 // 全部命中都报(通常 1 个);首个带 O0/链状态的优先。
                                 let m = ManagerReport {
                                     sc: 0,
@@ -903,6 +912,7 @@ fn find_manager(obs: &Observer, base: u64) -> Option<ManagerReport> {
                                     manager_vptr_rva: Some(MANAGER_VTBL_RVA),
                                     o0,
                                     list_head: head,
+                                    sentinel_head,
                                 };
                                 if o0 != 0 || head != 0 {
                                     return Some(m);
