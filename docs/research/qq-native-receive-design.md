@@ -59,6 +59,16 @@ if (plVar5 != 0) {
 
 链表插入方案（§2）降级为备选（若 +0x140 被证为非 push 路径专用）。
 
+## 5. 运行时对象定性修正（2026-10-08 深夜,G2 机械验证的负结果）
+
+G2 探针在 31208 上实测：**Service 单例的 +0x140/+0x170/+0x178 全为 0** —— 通知结构不在 Service 上。
+
+根因 `[verified]`：OnRecv（`1B41AE6`）是 `.rdata 0x413F7A8` vtable 的 **slot4**,RTTI COL 解码类名为 **`msf::internal::Manager`**——接收通知结构（+0x110 transport 注册、+0x140 单观察者、+0x170 监听链）属于 **Manager 实例**,不是 MSFService 单例。证据自洽：G1 的 transport 安装者 `b7c6c0` 正是把 transport 写入 owner+0x110（Manager+0x110）。
+
+**修订**：§2b 的指针交换与 §2 的链表注册,目标对象从"Service 单例"改为 **Manager 实例**（字段偏移不变:OnRecv 的 this 即 Manager）。下一会话第一步:定位 Manager 的运行时实例(构造器 rip-scan 0x413F7A8 → 存储位/getter;或经 transport 指针反查 owner),observe-msf 增加 Manager 字段读数,然后交换/注册落地。
+
+机械验证留存(31208,g2 listen 首跑):adopt/anchor 全过——getter/租约/锚点链路复用成立;仅目标对象错了,修正后即接续。
+
 ## 4. 实施顺序
 
 1. recon 负结果记录（2026-10-08 晚）：+0x170 存储扫描 405 函数、MSF 区域 LEA/LOAD 扫描 24+6 函数——均为其他子系统的同名偏移字段（0x717F34/731B9A 等已逐一排除），链插入方未定位。

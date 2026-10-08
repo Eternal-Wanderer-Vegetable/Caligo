@@ -60,6 +60,7 @@ pub mod qq_entry;
 #[cfg(feature = "research")]
 pub mod qq_v8;
 pub mod g1;
+pub mod g2;
 pub mod register;
 pub mod resident;
 
@@ -359,6 +360,25 @@ pub unsafe extern "system" fn caligo_g1_native_run(ctx: *const g1::G1NativeCtx) 
     }
     // SAFETY: ctx 由 loader 写入且位于本进程。
     unsafe { g1::g1_native_run(ctx) }
+}
+
+/// G2 接收监听(P6;`g2.rs`):+0x140 指针交换 + slot1 转发,有界窗口。
+///
+/// K4-D0 门控:普通构建返回 [`gate::ERR_RESEARCH_DISABLED`]。
+///
+/// # Safety
+///
+/// `ctx` 必须指向本进程内有效的 [`g2::G2Ctx`]。
+#[no_mangle]
+pub unsafe extern "system" fn caligo_g2_listen_run(ctx: *const g2::G2Ctx) -> u32 {
+    if let Some(code) = gate::reject_legacy() {
+        return code;
+    }
+    if ctx.is_null() {
+        return probe_code::ERR_NULL_PATH;
+    }
+    // SAFETY: ctx 由 loader 写入且位于本进程。
+    unsafe { g2::g2_listen_run(ctx) }
 }
 
 pub unsafe extern "system" fn caligo_obs_run2(ctx: *const obs::ObsCtx) -> u32 {

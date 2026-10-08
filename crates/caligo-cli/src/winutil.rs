@@ -261,6 +261,8 @@ pub struct InjectOutcome {
     pub g1_exit_code: Option<u32>,
     /// `caligo_g1_native_run` 的返回码(仅在 native_run_report 提供时)。
     pub native_exit_code: Option<u32>,
+    /// `caligo_g2_listen_run` 的返回码(仅在 g2_run_report 提供时)。
+    pub g2_exit_code: Option<u32>,
     /// `caligo_env_start` 的返回码(仅在 env_report 提供时;链路线程异步执行)。
     pub env_exit_code: Option<u32>,
     /// `caligo_interrupt_run` 的返回码(仅在 intr 提供时;同步执行)。
@@ -346,6 +348,8 @@ pub unsafe fn inject_and_probe(
     g1_report: Option<&Path>,
     native_run_report: Option<&Path>,
     native_run_ms: u32,
+    g2_run_report: Option<&Path>,
+    g2_run_ms: u32,
 ) -> Result<InjectOutcome, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
@@ -721,6 +725,58 @@ pub unsafe fn inject_and_probe(
                     ));
                 }
                 native_exit = Some(code);
+            }
+
+            // 可选:G2 接收监听(caligo_g2_listen_run;P6):+0x140 交换 + 转发,
+            // 有界窗口同步返回。零发送。
+            let mut g2_exit: Option<u32> = None;
+            if let Some(g2_path) = g2_run_report {
+                let g2_addr = match read_remote_export(proc_h, remote_base, "caligo_g2_listen_run") {
+                    Ok(Some(a)) => a,
+                    Ok(None) => return Err("caligo_g2_listen_run not found in remote".into()),
+                    Err(e) => return Err(format!("remote export lookup (g2): {e}")),
+                };
+                let wrapper_base = *module_bases_in(pid)?.get("wrapper.node").unwrap_or(&0);
+                if wrapper_base == 0 {
+                    return Err("wrapper.node base unresolved in target (g2)".into());
+                }
+                let g2_wide = to_wide(&g2_path.to_string_lossy());
+                let remote_g2_path = alloc_and_write(&g2_wide, "alloc g2 report path")?;
+                buf_obs = Some(remote_g2_path);
+                let mut ctx_bytes = Vec::with_capacity(24);
+                ctx_bytes.extend_from_slice(&wrapper_base.to_le_bytes());
+                ctx_bytes.extend_from_slice(&(remote_g2_path as usize).to_le_bytes());
+                ctx_bytes.extend_from_slice(&g2_run_ms.to_le_bytes());
+                ctx_bytes.extend_from_slice(&[0u8; 4]);
+                let remote_g2_ctx = alloc_and_write_bytes(&ctx_bytes, "alloc g2 ctx")?;
+                buf_report = Some(remote_g2_ctx);
+                let g2_fn: unsafe extern "system" fn(*const core::ffi::c_void) -> u32 =
+                    std::mem::transmute::<usize, unsafe extern "system" fn(*const core::ffi::c_void) -> u32>(g2_addr);
+                let start_g2: RemoteThreadFn =
+                    std::mem::transmute::<usize, RemoteThreadFn>(g2_fn as usize);
+                let g2_thread = CreateRemoteThread(
+                    proc_h,
+                    std::ptr::null(),
+                    0,
+                    Some(start_g2),
+                    remote_g2_ctx,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if g2_thread.is_null() {
+                    return Err(format!("CreateRemoteThread(g2): Win32 error {}", GetLastError()));
+                }
+                let wait_g2 = WaitForSingleObject(
+                    g2_thread,
+                    if g2_run_ms > 0 { g2_run_ms.saturating_add(15_000) } else { 20_000 },
+                );
+                let mut code: u32 = u32::MAX;
+                GetExitCodeThread(g2_thread, &mut code);
+                CloseHandle(g2_thread);
+                if wait_g2 != 0 {
+                    return Err(format!("g2 remote thread wait failed: code {wait_g2:#x}"));
+                }
+                g2_exit = Some(code);
             }
 
             // 可选:只读运行时观测 v2(caligo_obs_run2;基址由本加载器进程解析,
@@ -1199,6 +1255,7 @@ pub unsafe fn inject_and_probe(
                 register_exit_code: register_exit,
                 g1_exit_code: g1_exit,
                 native_exit_code: native_exit,
+                g2_exit_code: g2_exit,
                 env_exit_code: env_exit,
                 intr_exit_code: intr_exit,
                 async_exit_code: async_exit,
