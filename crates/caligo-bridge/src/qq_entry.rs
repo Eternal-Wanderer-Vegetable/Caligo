@@ -795,14 +795,26 @@ impl crate::host_adapter::HostAdapter for QqOwnerAdapter {
                         .nth(1)
                         .and_then(|t| t.trim().parse::<u64>().ok())
                         .unwrap_or(0);
+                    append_stage_simple("listener_armed", true, &s);
                     Ok(HostOpResult::ListenerAdded { token })
                 }
                 Ok(s) if s.starts_with("ALREADY") => {
+                    append_stage_simple("listener_already", true, &s);
                     Ok(HostOpResult::ListenerAdded { token: 0 })
                 }
-                Ok(_s) => Err(HostError::Native { code: 1 }), // "ERR:.." / NOT_ARMED
-                Err(crate::qq_v8::V8Error::NoCurrentContext) => Err(HostError::NoCurrentContext),
-                Err(_) => Err(HostError::EnvInvalid),
+                Ok(s) => {
+                    append_stage_simple("listener_err", false, &s);
+                    Err(HostError::Native { code: 1 })
+                }
+                Err(e) => {
+                    append_stage_simple("listener_v8_err", false, &format!("{e:?}"));
+                    match e {
+                        crate::qq_v8::V8Error::NoCurrentContext => {
+                            Err(HostError::NoCurrentContext)
+                        }
+                        _ => Err(HostError::EnvInvalid),
+                    }
+                }
             },
             HostOp::ListenerRemove { .. } => match crate::qq_v8::stop_listener() {
                 Ok(s) if s.starts_with("STOPPED") || s.starts_with("NOT_ARMED") => {

@@ -733,7 +733,13 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        let _ = e; // 轮转点条件不满足:下泵重试(计数经 qq-status 观察)
+                        // 首次/每 20 次记录轮询失败变体(不吞)。
+                        static POLL_ERR_N: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        let n = POLL_ERR_N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if n % 20 == 0 {
+                            qq_entry::append_stage_simple("poll_err", false, &format!("{e:?}"));
+                        }
                     }
                 }
             }
