@@ -50,7 +50,8 @@ caligo-cli <K1 probe>
                     [--g2-run-report <g2.jsonl> --g2-run-ms <ms>]
                     [--g3-run-report <g3.jsonl> --g3-run-ms <ms>]
                     [--g3-send-report <g3s.jsonl> --g3-send-peer <uin>
-                     --g3-send-text <text> [--g3-send-seq <n>] [--g3-send-rand <n>]]
+                     --g3-send-text <text> [--g3-send-uid <u_xxx>]
+                     [--g3-send-seq <n>] [--g3-send-rand <n>]]
                     [--register-entry] [--wait-ms <ms>]
                     [--intr-report <intr.jsonl> --intr-env <ptr-hex>]
                     [--intr-vftable <va-hex>] [--intr-wait-ms <ms>]
@@ -925,6 +926,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut g3_send_report: Option<PathBuf> = None;
     let mut g3_send_peer: u64 = 0;
     let mut g3_send_text: Option<String> = None;
+    let mut g3_send_uid: Option<String> = None;
     let mut g3_send_seq: u32 = 1;
     let mut g3_send_rand: u32 = 42;
     let mut env_report: Option<PathBuf> = None;
@@ -1050,6 +1052,13 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => g3_send_text = Some(v.to_string()),
                 None => {
                     eprintln!("--g3-send-text 需要文本参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-send-uid" => match next(&mut i) {
+                Some(v) => g3_send_uid = Some(v.to_string()),
+                None => {
+                    eprintln!("--g3-send-uid 需要参数");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1281,7 +1290,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 eprintln!("--g3-send-text 需要配对 --g3-send-peer");
                 return ExitCode::FAILURE;
             }
-            Some((p.as_path(), g3_send_peer, text.as_str(), g3_send_seq, g3_send_rand))
+            Some((p.as_path(), g3_send_peer, text.as_str(), g3_send_uid.as_deref(), g3_send_seq, g3_send_rand))
         }
         (None, None) => None,
         _ => {

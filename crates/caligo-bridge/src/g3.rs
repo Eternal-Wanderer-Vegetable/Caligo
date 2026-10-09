@@ -732,6 +732,7 @@ const PB_F_BODY: u32 = 3;
 const PB_F_CLIENT_SEQ: u32 = 4;
 const PB_F_RANDOM: u32 = 5;
 const PB_F_FRIEND_UIN: u32 = 1;
+const PB_F_FRIEND_UID: u32 = 2;
 const PB_F_CONTENT_TYPE: u32 = 1;
 const PB_F_BODY_RICH: u32 = 1;
 const PB_F_RICH_ELEMS: u32 = 2;
@@ -748,8 +749,25 @@ pub struct G3SendCtx {
     pub report_path: *const u16,
     pub peer_uin: u64,
     pub text_ptr: *const u16, // NUL 结尾 UTF-16(远程缓冲,loader 写入)
+    pub uid_ptr: *const u16,  // 对端 uid("u_xxx";可空 = 无 uid 字段)
     pub client_seq: u32,
     pub random: u32,
+}
+
+/// 读远程 NUL 结尾 UTF-16(空/不可读 → None)。
+unsafe fn read_utf16_opt(ptr: *const u16) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    while len < 512 && *ptr.add(len) != 0 {
+        len += 1;
+    }
+    if len == 0 || len >= 512 {
+        return None;
+    }
+    // SAFETY: loader 写入的 NUL 结尾缓冲。
+    Some(String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(ptr, len) }))
 }
 
 fn pb_varint(out: &mut Vec<u8>, mut v: u64) {
@@ -780,10 +798,14 @@ fn pb_len_field(out: &mut Vec<u8>, field: u32, body: &[u8]) {
 }
 
 /// 最小 SendMsgReq(好友私聊文本;字段号与 core 同源,verified=false)。
-fn encode_send_msg(peer_uin: u64, text: &str, client_seq: u32, random: u32) -> Vec<u8> {
-    let mut w = Vec::with_capacity(text.len() + 48);
+/// NTQQ 路由:C2C{1: uin, 2: uid("u_xxx")}——uid 为 NT 路由主键。
+fn encode_send_msg(peer_uin: u64, peer_uid: Option<&str>, text: &str, client_seq: u32, random: u32) -> Vec<u8> {
+    let mut w = Vec::with_capacity(text.len() + 64);
     let mut routing = Vec::new();
     pb_varint_field(&mut routing, PB_F_FRIEND_UIN, peer_uin);
+    if let Some(uid) = peer_uid {
+        pb_len_field(&mut routing, PB_F_FRIEND_UID, uid.as_bytes());
+    }
     pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
     let mut content = Vec::new();
     pb_varint_field(&mut content, PB_F_CONTENT_TYPE, PB_CONTENT_TYPE_FRIEND_TEXT);
@@ -821,8 +843,8 @@ type SendSsoFn = unsafe extern "system" fn(usize, usize, usize, u8, usize);
 /// SAFETY: ctx 必须指向本进程内有效的 [`G3SendCtx`]。
 pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     // SAFETY: ctx 由 loader 写入。
-    let (wrapper_base, report_path, peer_uin, text_ptr, client_seq, random) = unsafe {
-        ((*ctx).wrapper_base, (*ctx).report_path, (*ctx).peer_uin, (*ctx).text_ptr, (*ctx).client_seq, (*ctx).random)
+    let (wrapper_base, report_path, peer_uin, text_ptr, uid_ptr, client_seq, random) = unsafe {
+        ((*ctx).wrapper_base, (*ctx).report_path, (*ctx).peer_uin, (*ctx).text_ptr, (*ctx).uid_ptr, (*ctx).client_seq, (*ctx).random)
     };
 
     // adopt(getter 租约;g1/g2/g3 探测同机械)。
@@ -875,8 +897,13 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     };
     stage(report_path, "g3s_text", true, &format!("bytes={}", text.len()));
 
+    // 对端 uid(可空)。
+    let peer_uid = read_utf16_opt(uid_ptr);
+    if let Some(u) = &peer_uid {
+        stage(report_path, "g3s_uid", true, &format!("len={}", u.len()));
+    }
     // 编码请求体(最小 SendMsgReq;verified=false)。
-    let body = encode_send_msg(peer_uin, &text, client_seq, random);
+    let body = encode_send_msg(peer_uin, peer_uid.as_deref(), &text, client_seq, random);
     stage(
         report_path,
         "g3s_encode",
@@ -1187,7 +1214,7 @@ mod tests {
     /// P2 编码:好友私聊最小 SendMsgReq 结构(与 core 同字段号;手工解析校验)。
     #[test]
     fn send_msg_encoding_friend() {
-        let body = encode_send_msg(3089665724, "G3P2", 7, 9);
+        let body = encode_send_msg(3089665724, Some("u_TESTPEER"), "G3P2", 7, 9);
         // 顶层字段序:1(routing)2(content)3(body)4(seq)5(rand)。
         let mut pos = 0usize;
         let mut fields = Vec::new();
@@ -1243,6 +1270,14 @@ mod tests {
             shift += 7;
         }
         assert_eq!(v, 3089665724);
+        // routing 里 C2C.uid = 字段2(wire2)= tag 0x12
+        assert!(r.windows(1).any(|w| w[0] == 0x12), "uid field missing: {}", bytes_hex(r));
+        let mut vp = &r[1..];
+        // 跳过 uin varint(走完含末字节)
+        while vp[0] & 0x80 != 0 { vp = &vp[1..]; }
+        vp = &vp[1..];
+        let uid_tag = vp[0];
+        assert_eq!(uid_tag as u32, (PB_F_FRIEND_UID << 3) | 2);
         assert_eq!(fields[1].0, PB_F_CONTENT_HEAD);
         assert_eq!(fields[2].0, PB_F_BODY);
         assert_eq!(fields[3].0, PB_F_CLIENT_SEQ);
