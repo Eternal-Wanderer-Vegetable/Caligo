@@ -815,15 +815,31 @@ fn encode_send_msg(
     client_seq: u32,
     random: u32,
 ) -> Vec<u8> {
-    let mut w = Vec::with_capacity(text.len() + 64);
+    let mut w = Vec::with_capacity(text.len() + 128);
     if group_code != 0 {
-        // ===== 群聊顶层结构(1360480 实证,与私聊完全不同)=====
-        // {1: int 1, 2: {1: 群号字符串}, 3: Body{1: rich{2: elems}}}
-        pb_varint_field(&mut w, 1, 1);
-        let mut key2 = Vec::new();
+        // ===== 群聊(形态 Y:私聊顶层 + 群版 ContentHead)=====
+        // 存储记录实证的群 ContentHead = {1: 82, 4: divSeq, 5: random,
+        // 6: {1: ts}, 7: 1, 12: divSeq}。divSeq 用抓到的群计数器值。
+        let mut routing = Vec::new();
+        let mut grp = Vec::new();
         let code_str = group_code.to_string();
-        pb_len_field(&mut key2, 1, code_str.as_bytes());
-        pb_len_field(&mut w, 2, &key2);
+        pb_len_field(&mut grp, 1, code_str.as_bytes());
+        pb_len_field(&mut routing, 2, &grp);
+        pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut content = Vec::new();
+        pb_varint_field(&mut content, PB_F_CONTENT_TYPE, 82);
+        pb_varint_field(&mut content, 4, 2121648353);
+        pb_varint_field(&mut content, 5, random as u64);
+        let mut c6 = Vec::new();
+        pb_varint_field(&mut c6, 1, ts);
+        pb_len_field(&mut content, 6, &c6);
+        pb_varint_field(&mut content, 7, 1);
+        pb_varint_field(&mut content, 12, 2121648353);
+        pb_len_field(&mut w, PB_F_CONTENT_HEAD, &content);
     } else {
         // 13665a0 实证:朋友路由 = RoutingHead{1: C2C{2: uid}},无 uin 字段
         // (C2C 字段1 若为 string 类型,varint 会造成 wire 不匹配 → 整包解析失败)。
