@@ -259,3 +259,50 @@ P1 首轮交付的实质进展（细节见两份合同文档）：
 G3(发送)封锁解除,可进入路线规划。生产路线按 K4 既定:宿主合法初始化 +
 常驻 bridge + 命名管道 + 常驻 core;注入式路线仅限 research 构建 + 指定
 测试实例。
+
+## 2026-10-09(续):G3-P1 首次现场尝试 —— 第三次实例损失(21732),镜像 vtable 路线弃用
+
+### 静态交付(先于现场,r4-g3 证据树,`E:/stella/_reference/qq-native-r4-g3-20261009/`)
+发送链全链静态解码(137 函数,Ghidra 定向;详见
+`docs/research/qq-native-send-probe-design.md` §1):
+- 入口 = `MSFService::SendSSORequestInternal(0x732A80)`;命令串 =
+  **`MessageSvc.PbSendMsg`**(chat_type==4 → `MsgProxy.SendMsg`);
+  超时策略 {180000,1,180000,1,2,1};业务提交方 = BaseMsgMgr::SendMsg(0x25757ea);
+- transport slot7(0x1B4E4EC)六参形状闭合:(transport, uin string,
+  task 0x88B 移转指针, policy48, i32* token_out, callback);
+  b7ce8a 状态门(conn vtbl+0x30 = 4/5 可提交)→ 闭包 0x88B → D32138 →
+  全局 dispatcher(跨线程提交有显式二次派发+唤醒);
+- MSF 层回调被置空(0x72d596 空桩)——真实结果路由在 BaseMsgMgr 的
+  token 注册消费(95d4e6);request blob 类型未定(任务内 shared_ptr,
+  由 BaseMsgMgr vtbl+0x100 产出)= P1 现场目标。
+
+### 现场事故(r1,实例 21732,2026-10-09 09:55)
+- 流程:observe 预检 PASS(09:54)→ research 构建(target-g3)→ 注入
+  双 gate PASS → g3_adopt/g3_site/g3_swap 三阶段 PASS(09:55:45,
+  transport raw vtable 核验、slot7 身份门、8B 原子交换成功);
+- **09:55:56(swap 后 11s)进程死亡**,无 restore/done。证据:
+  `evidence/p6-g3/`(r1 jsonl、probe json、crashpad dump、解析脚本);
+- dump 定性(crashpad `af77b408…`,**dump 本体在 `local-evidence/p6-g3/`
+  (不入库,含进程内存),解析脚本在 `evidence/p6-g3/`**):QQ worker 线程
+  0x4a5c 抛 **C++ `std::length_error`**(0xE06D7363,ThrowInfo RVA
+  0x4916F40);栈链 = 回调块销毁桩(72d5c8/72d5e8/72d600)→ 拷贝族
+  (703d94/703e1f)→ 分配族(b7500d/b75614)→ CRT → 池内层 0x3e6bbaf;
+  **栈上无蹦床页地址**(本次调用不经交换点);无 WER 事件(与 8184
+  fail-fast 有事件+dump 不同);crashpad 捕获后 QQ 自动重启;
+- 对照:该实例此前稳定运行 12h(昨 22:19 起),G2 时代 4 窗口零事故;
+  推送 ACK(SsoPushAck)为高频发送,11s 内必有 SSO 发送经过交换点。
+
+### 根因判定(诚实边界)
+确切机制**未定证**。领先假设:①wrapper .rdata 页被 COW 改写触发进程内
+完整性/反篡改机制,以伪装异常终止(镜像补丁 = 可检测篡改面);②交换对
+slot7 调用路径的时序扰动暴露闭包/回调池的潜在竞态;③蹦床执行语义缺陷
+(未能证 pseudo——LAB 真实执行 6 参全对,且栈上无蹦床、异常为干净 C++
+throw 而非 AV)。**无论何者为真,镜像 vtable 补丁路线(改模块映像页)
+与 G2 的堆指针交换属不同风险级 → 弃用。**
+
+### 路线修订(v3,同日)
+P1 改为 **transport 对象 vptr 交换**:伪造 10+ 槽 vtable 放自分配内存
+(QQ 自身有 Manager 垫片 vtable 先例),slot7 → 蹦床,其余槽 = 原函数;
+交换对象为 transport 对象头一个堆 qword(纯堆、原子、只影响该实例);
+捕获处理器改 **零分配/零锁/零 format 固定环形缓冲**(消灭②③类干扰面);
+恢复对称 + 蹦床页不释放(同 r1 纪律)。LAB 先行,现场另起实例窗口。

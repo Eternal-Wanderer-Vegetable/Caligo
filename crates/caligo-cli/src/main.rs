@@ -48,6 +48,7 @@ caligo-cli <K1 probe>
                     [--g1-report <g1.jsonl>]
                     [--native-run-report <nr.jsonl> --native-run-ms <ms>]
                     [--g2-run-report <g2.jsonl> --g2-run-ms <ms>]
+                    [--g3-run-report <g3.jsonl> --g3-run-ms <ms>]
                     [--register-entry] [--wait-ms <ms>]
                     [--intr-report <intr.jsonl> --intr-env <ptr-hex>]
                     [--intr-vftable <va-hex>] [--intr-wait-ms <ms>]
@@ -917,6 +918,8 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut native_run_ms: u32 = 10_000;
     let mut g2_run_report: Option<PathBuf> = None;
     let mut g2_run_ms: u32 = 10_000;
+    let mut g3_run_report: Option<PathBuf> = None;
+    let mut g3_run_ms: u32 = 120_000;
     let mut env_report: Option<PathBuf> = None;
     let mut register_entry = false;
     let mut confirmed = false;
@@ -1005,6 +1008,20 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => g2_run_ms = v,
                 None => {
                     eprintln!("--g2-run-ms 需要数字参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-run-report" => match next(&mut i) {
+                Some(v) => g3_run_report = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("--g3-run-report 需要路径参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-run-ms" => match next(&mut i).and_then(|v| v.parse().ok()) {
+                Some(v) => g3_run_ms = v,
+                None => {
+                    eprintln!("--g3-run-ms 需要数字参数");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1205,6 +1222,10 @@ fn cmd_inject(args: &[String]) -> ExitCode {
         p
     });
     let g2_run_report = g2_run_report.map(|p| {
+        std::fs::OpenOptions::new().create(true).append(true).open(&p).ok();
+        p
+    });
+    let g3_run_report = g3_run_report.map(|p| {
         std::fs::OpenOptions::new().create(true).append(true).open(&p).ok();
         p
     });
@@ -1441,6 +1462,8 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             native_run_ms,
             g2_run_report.as_deref(),
             g2_run_ms,
+            g3_run_report.as_deref(),
+            g3_run_ms,
         )
     };
     match outcome {
