@@ -1,0 +1,33 @@
+﻿drive(MB)         available free    total             total free        
+C:\               139786            512001            139786            
+D:\               1011700           1395409           1011700           
+E:\               1621882           1907728           1621882           
+
+History account Id list:
+1694717255
+3089665724
+
+C:\Users\Vegetable\Documents\Tencent Files : SSD
+D:\Program Files\Tencent\QQNT\QQ.exe : SSD
+
+topLevelHwnd: 000000000003072C: 200100, 4c70000, 0, 0, 0, 0, 663403be1200, Chrome_WidgetWin_1, QQ
+childLevelHwnd: 00000000000308FA: 20, 56300000, 0, 7fff25970000, 3072c, 663403b05a60, 0, Chrome_RenderWidgetHostHWND, Chrome Legacy Window
+childLevelHwnd: 00000000000408C8: 280024, 58000000, 0, 0, 3072c, 0, 0, Intermediate D3D Window, 
+topLevelHwnd: 00000000000408C4: 200100, 34c70000, 0, 0, 0, 0, 6634004d5700, Chrome_WidgetWin_1, QQ
+childLevelHwnd: 00000000001F06AA: 280024, 58000000, 0, 0, 408c4, 0, 0, Intermediate D3D Window, 
+topLevelHwnd: 00000000000406F0: 200100, 4c70000, 0, 0, 0, 0, 6634004dae00, Chrome_WidgetWin_1, QQ
+childLevelHwnd: 0000000000030720: 20, 56300000, 0, 7fff25970000, 406f0, 6634037aee80, 0, Chrome_RenderWidgetHostHWND, Chrome Legacy Window
+childLevelHwnd: 00000000000208FC: 280024, 58000000, 0, 0, 406f0, 0, 0, Intermediate D3D Window, 
+topLevelHwnd: 00000000000D06E8: 200100, 4c70000, 0, 0, 0, 0, 6634004d9300, Chrome_WidgetWin_1, QQ
+childLevelHwnd: 00000000000506E0: 20, 56300000, 0, 7fff25970000, d06e8, 663403515ad0, 0, Chrome_RenderWidgetHostHWND, Chrome Legacy Window
+childLevelHwnd: 00000000000A08C6: 280024, 58000000, 0, 0, d06e8, 0, 0, Intermediate D3D Window, 
+topLevelHwnd: 00000000000F00FE: 200000, 4020000, 0, 0, 0, 0, 6634004d6900, Chrome_WidgetWin_1, QQ
+childLevelHwnd: 00000000000E0170: 20, 46300000, 0, 7fff25970000, f00fe, 66340351a0b0, 0, Chrome_RenderWidgetHostHWND, Chrome Legacy Window
+childLevelHwnd: 00000000000B08CA: 280024, 58000000, 0, 0, f00fe, 0, 0, Intermediate D3D Window, 
+topLevelHwnd: 00000000002308A8: 80, 8c000000, 0, 0, 0, 0, 6634024dcfd0, Chrome_WidgetWin_0, 
+childLevelHwnd: 00000000000308B4: 20, 46300000, 0, 7fff25970000, 2308a8, 66340265fe50, 0, Chrome_RenderWidgetHostHWND, Chrome Legacy Window
+topLevelHwnd: 0000000000430C10: 0, 84000000, 0, 7fff25970000, 0, 0, 7fff3200f8c0, Electron_NotifyIconHostWindow, 
+topLevelHwnd: 0000000000030868: 100, 6cf0000, 0, 0, 0, 0, 7fff3208d5f0, Chrome_WidgetWin_0, 
+topLevelHwnd: 000000000003083A: 8000000, 84000000, 0, 7fff25970000, 0, 0, 0, Base_PowerMessageWindow, 
+topLevelHwnd: 000000000003086A: 0, 8c000000, 0, 0, 40856, 0, 0, MSCTFIME UI, MSCTFIME UI
+topLevelHwnd: 0000000000040856: 0, 8c000000, 0, 7fff25970000, 408c4, 0, 0, IME, Default IME

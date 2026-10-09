@@ -1,6 +1,7 @@
 # 原生发送链路探测设计(qq-native-send-probe-design)
 
-> 日期:2026-10-09。状态:P1 设计定稿,P2 待 P1 现场证据。
+> 日期:2026-10-09。状态:**§2 现场捕获路线整体否决(r1/r2 两次实测 fatal);
+> §1 静态合同成立;blob 类型转纯静态;P2 是否尝试另行决策。**
 > 上游:thread-contract §10(发送拓扑闭合)、k4-native-route-decision(G3 解封)、
 > receive-design(G2 已 PASS,提交 5dd6f38)。
 > 标签:`[verified]` 本机已核对/现场实证;`[inferred]` 证据形成的工程判断;
@@ -132,7 +133,27 @@ MSF 层  MSFService::SendSSORequestInternal(0x732A80, msf_service.cc)
 ## 4. 边界
 
 - 本文不解封任何现场发送;P1 窗口内零提交。
-- 注入式仅限 research 构建 + 指定测试实例(21732,主账号 3089665724,
-  2026-10-08T22:19:27 创建);生产路线仍按 K4(宿主合法初始化+常驻 bridge)。
+- 注入式仅限 research 构建 + 指定测试实例;生产路线仍按 K4(宿主合法初始化+常驻 bridge)。
 - 所有进程内读取 RPM-self;报告路径绝对化;注入前最后一步 research 构建
   (独立 target-dir,DLL 锁则换名)。
+
+## 5. 现场判定(r1/r2,2026-10-09)——§2 路线否决
+
+| 轮 | 实例 | 插桩机制 | 结果 |
+|---|---|---|---|
+| r1 | 21732(主账号,12h 稳定) | wrapper .rdata slot7 8B 改写(镜像补丁) | swap PASS → **11s 后进程死亡** |
+| r2 | 16080(机器人,登录 4min) | transport 对象 vptr 交换(纯堆,零分配捕获) | swap PASS → **窗口内进程死亡** |
+
+r2 完整栈回溯(crashpad json,入库 evidence/p6-g3/):dispatcher 消费线程 →
+7333fe(第二发送入口)→ SC vtbl+0x38 转发器(0xB7C5A6)→ 1b4e4ec(slot7)→
+b7ce8a → **b7d248 配置拷贝 → 703cxx 容器拷贝链 → length_error** ——与 r1
+同一抛出助手/异常类型。现场实测 `*(svc+0x50)`=SC(0x3FD3E28)≠`*(svc+0x60)`=
+transport(0x41403B8),transport+0x60 指回 SC(互链)。
+
+**判定:两种不同插桩机制、两次独立实测均 fatal,同路径无探测时运行数小时
+无恙 → slot7 调用路径上的代码插桩在本版本 QQNT 上整体否决**(机制未定证:
+疑似插桩引入的执行/时序扰动触发发送路径容器操作的潜在缺陷,无法以现有
+工具闭合)。
+
+**后续**:blob 类型/配置布局纯静态解码(7333fe 配置 {u16 0x20,…,容器@0x18}
+已明);P2(无插桩单次受控发送)风险面不同,是否尝试由用户另行决策。

@@ -306,3 +306,43 @@ P1 改为 **transport 对象 vptr 交换**:伪造 10+ 槽 vtable 放自分配内
 交换对象为 transport 对象头一个堆 qword(纯堆、原子、只影响该实例);
 捕获处理器改 **零分配/零锁/零 format 固定环形缓冲**(消灭②③类干扰面);
 恢复对称 + 蹦床页不释放(同 r1 纪律)。LAB 先行,现场另起实例窗口。
+
+## 2026-10-09(再续):G3-P1 v3 现场实测 —— 机器人实例 16080 同型死亡,**slot7 插桩探测类路线整体否决**
+
+### r2(16080,机器人账号,10:40 登录,10:44 注入)
+- 预检 PASS(observe-16080-pre:锚点命中 strong=8、transport raw、
+  slot7 指纹匹配);v3 全链 adopt/site/swap PASS(10:44:49);
+- **窗口内进程死亡**,报告止于 swap;QQ 自动重启(新 PID 组)。
+- crashpad 本次产出**文本栈回溯**(fe6682e9…json/txt,已入库
+  evidence/p6-g3/;dump 本体未生成):完整调用链 =
+  `dispatcher 消费线程(d31xxx/217exxx)→ 31f818e → 73c6ba → 737474 →
+  7333fe(第二个发送入口,assert this+0x50)→ SC vtbl+0x38 转发器
+  (0xB7C5A6)→ 1b4e4ec(slot7 原函数,frame14)→ b7cf7b(b7ce8a)→
+  **b7d269(b7d248 策略/配置拷贝)→ 703c4f→703cc1→703d12→703d94→703e1f
+  拷贝链 → CRT → __CxxThrowException(0x3e6bb18)→ length_error**`
+  ——**与 r1 同一抛出助手、同一异常类型**;
+- 关键现场事实(外部只读实测,`read_svc_0x50_0x60.py`):
+  `*(svc+0x50)` = SC 对象(vptr RVA **0x3FD3E28**,G2 已证 SC vtable)
+  ≠ `*(svc+0x60)` = transport(0x41403B8);transport+0x60 指回 SC
+  (g3_site conn=SC 与 observe SC 地址一致)——SC 与 transport 互链,
+  转发器经 transport 的 vptr(=伪表)调用,故本次调用**经过**插桩;
+- 7333fe 参数4 = 特性开关逐位组装的配置(72feac 初始化 {0x20,0,0,
+  空容器@0x18}),b7d248 拷贝其 +0x18 容器成员时抛出。
+
+### 判定(v3 后,最终)
+r1(镜像 vtable 补丁)与 r2(对象 vptr 交换)为**两种不同插桩机制**,
+均在交换成功后 ~11 秒/窗口内遭遇同一 fatal 异常(容器拷贝 length_error),
+而同样路径无探测时运行数小时无恙(21732 十二小时、16080 登录后 4 分钟
+同步风暴)。机制无法以现有工具定证(疑似与插桩引入的时序/执行路径扰动
+相关),但**工程结论不再依赖机制定证:slot7 调用路径上的任何代码插桩
+(镜像补丁 / 对象 vptr / 蹦床)在本版本 QQNT 上 empirically fatal(2/2),
+路线整体否决,不再以实例迭代验证。**
+
+### G3 后续路线(修订)
+- **捕获路线(原 P1)终止**;request blob 类型与配置布局转纯静态解码
+  (7333fe 配置 {u16 0x20,…,容器@0x18} 已明;blob 由 BaseMsgMgr
+  vtbl+0x100 产出,其类未解码);
+- P2(受控发送,无插桩、单次调用)与本结论的风险面不同,但**是否尝试
+  由执行者与用户另行决策**;本台账不解封任何现场发送;
+- 发送侧静态合同(命令串/六参 slot7/b7ce8a 状态门/dispatcher 提交/
+  SC+transport 拓扑/第二入口 7333fe)仍然成立,已入库供实现期使用。

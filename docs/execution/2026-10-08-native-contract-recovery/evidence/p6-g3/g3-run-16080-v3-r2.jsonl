@@ -1,0 +1,3 @@
+{"ts":1791513890066,"tid":39672,"stage":"g3_adopt","ok":true,"detail":"svc=2478241726464"}
+{"ts":1791513890066,"tid":39672,"stage":"g3_site","ok":true,"detail":"transport=0x2410260ddb0 vptr=0x7fff1c0203b8 (raw) conn=0x2410264ea40 conn_vptr=0x7fff1beb3e28"}
+{"ts":1791513890066,"tid":39672,"stage":"g3_swap","ok":true,"detail":"fake_vtbl=0x2416ba30000 trampoline=0x2416ba20000 prev=0x7fff1c0203b8"}
