@@ -824,11 +824,30 @@ fn encode_send_msg(peer_uin: u64, peer_uid: Option<&str>, text: &str, client_seq
         pb_len_field(&mut txt, PB_F_TEXT_STR, text.as_bytes());
         pb_len_field(&mut elem, PB_F_ELEM_TEXT, &txt);
     }
+    // 元素37(通用标志)+ 元素9:自真实 UI 发送报文字节级照抄
+    // (capture-main-send-body.jsonl,2026-10-09 主账号实例内存取证)。
+    // 缺元素37 → 对端"该消息类型暂不支持查看"。
+    const ELEM_GENERAL_FLAGS: &[u8] = &[
+        0xaa, 0x02, 0x17, 0x88, 0x01, 0x00, 0x9a, 0x01, 0x11, 0x78, 0x00, 0xc8,
+        0x01, 0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00, 0x90, 0x02, 0x00, 0x80,
+        0x06, 0x00,
+    ];
+    const ELEM_ID9: &[u8] = &[0x12, 0x07, 0x4a, 0x05, 0x08, 0xdb, 0xbd, 0x83, 0x01];
     let mut rich = Vec::new();
-    pb_len_field(&mut rich, PB_F_RICH_ELEMS, &elem);
+    pb_len_field(&mut rich, 2, ELEM_GENERAL_FLAGS);
+    pb_len_field(&mut rich, 2, ELEM_ID9);
+    pb_len_field(&mut rich, 2, &elem);
     pb_len_field(&mut w, PB_F_BODY, &rich.as_slice());
     pb_varint_field(&mut w, PB_F_CLIENT_SEQ, client_seq as u64);
     pb_varint_field(&mut w, PB_F_RANDOM, random as u64);
+    // 键6 = {1: 发送时刻(秒)}(真实报文实证)。
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut f6 = Vec::new();
+    pb_varint_field(&mut f6, 1, ts);
+    pb_len_field(&mut w, 6, &f6);
     w
 }
 
@@ -1263,7 +1282,7 @@ mod tests {
             }
         }
         assert_eq!(pos, body.len());
-        assert_eq!(fields.len(), 5);
+        assert_eq!(fields.len(), 6);
         assert_eq!(fields[0].0, PB_F_ROUTING_HEAD);
         // routing = {1: C2C{2: uid}} — 解码回读。
         let r = &fields[0].2;
@@ -1274,6 +1293,12 @@ mod tests {
         assert_eq!(fields[2].0, PB_F_BODY);
         assert_eq!(fields[3].0, PB_F_CLIENT_SEQ);
         assert_eq!(fields[4].0, PB_F_RANDOM);
+        assert_eq!(fields[5].0, 6);
+        // body 富文本里含元素37(attr 标记字节 aa0217…)
+        assert!(
+            fields[2].2.windows(4).any(|w| w == [0xaa, 0x02, 0x17, 0x88]),
+            "general-flags elem missing"
+        );
         // body.rich_text.elems.text.str == "G3P2"
         let body_bytes = &fields[2].2;
         let hex = bytes_hex(body_bytes);
