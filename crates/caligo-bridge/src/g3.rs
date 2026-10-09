@@ -902,8 +902,9 @@ fn encode_send_msg(
     // Body = {1: richText}(真实报文 0a39 包装;缺失 → 对端找不到富文本)。
     let body_nested = pb_len_field_vec(PB_F_BODY_RICH, &rich);
     pb_len_field(&mut w, PB_F_BODY, &body_nested);
-    if group_code == 0 {
-        // 私聊附加键(真实报文实证);群路径(1360480)不推这些键。
+    {
+        // 键4/5/6:私聊真实报文实证;群聊(形态 Y)同样补发(1360480 未推
+        // 可能因其取自 record 内部状态,值本身服务器仍消费)。
         pb_varint_field(&mut w, PB_F_CLIENT_SEQ, client_seq as u64);
         pb_varint_field(&mut w, PB_F_RANDOM, random as u64);
         // 键6 = {1: 发送时刻(秒)}(真实报文实证)。
