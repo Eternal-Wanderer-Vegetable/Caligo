@@ -838,10 +838,9 @@ fn encode_send_msg(peer_uin: u64, peer_uid: Option<&str>, text: &str, client_seq
         0x01, 0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00, 0x90, 0x02, 0x00, 0x80,
         0x06, 0x00,
     ];
-    const ELEM_ID9: &[u8] = &[0x12, 0x07, 0x4a, 0x05, 0x08, 0xdb, 0xbd, 0x83, 0x01];
     let mut rich = Vec::new();
     pb_len_field(&mut rich, 2, ELEM_GENERAL_FLAGS);
-    pb_len_field(&mut rich, 2, ELEM_ID9);
+    // 元素9(r8 照抄真实报文)会渲染为占位表情,纯文本发送省略。
     pb_len_field(&mut rich, 2, &elem);
     // Body = {1: richText}(真实报文 0a39 包装;缺失 → 对端找不到富文本)。
     let body_nested = pb_len_field_vec(PB_F_BODY_RICH, &rich);

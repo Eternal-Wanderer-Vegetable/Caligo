@@ -378,3 +378,33 @@ r1(镜像 vtable 补丁)与 r2(对象 vptr 交换)为**两种不同插桩机制*
 - 待现场确认:对端(主账号 3089665724)收到 "G3P2 native-send probe"。
   注:响应无消费者(空回调 = QQ 原生 inert 表示;BaseMsgMgr token 注册
   未建立),发送失败亦无错误回读——失败模式为静默丢弃,不崩溃。
+
+## 2026-10-09(终章续):G3-P2 迭代收敛 r3→r9 —— **发送链路判定 PASS**
+
+迭代证据链(`evidence/p6-g3/g3-send-24316-r3..r9.jsonl`,全程 QQ 存活):
+
+| 轮 | 变更 | 对端表现 |
+|---|---|---|
+| r3 | 最小编码,uin 路由 | 静默拒(未达) |
+| r4 | +C2C.uid(运行时扫 bot 内存取得,与 P5 互证) | 静默拒 |
+| r5 | +ContentHead{1,2,3} 三键 | 静默拒 |
+| r6 | 路由忠实化:RoutingHead{1: C2C{2: uid}},**无 uin** | **送达**,渲染"不支持查看" |
+| r7 | +元素37/元素9/键6时间戳(内存取证真实报文) | 送达,仍不渲染 |
+| r8 | 修 body 嵌套:Body={1: rich}(字节 diff 定位) | **送达且正文正常渲染**(前置占位表情来自照抄的元素9) |
+| r9 | 去元素9,纯文本 | 已发出,待确认(预期干净文本) |
+
+根因阶梯:路由主键(uid 非 uin)→ ContentHead 三键 → **body 缺字段1 包装
+(rich 直接放 Body 下,对端找不到富文本)** → 渲染需元素37(通用标志)。
+定位手段:Ghidra 定向反编译(1360ebc 编码器/13665a0 路由/25a4500 body
+composer)+ 运行时 event-bus 注册表遍历('APICaller-nt_1 '/'EBus-nt_1 ')
++ 主账号内存只读取证真实发送报文(用户 UI 发送带标记消息,
+capture-main-send-body.jsonl,77 命中,字节级解构)。
+
+**判定:G3-P2 发送链路 PASS(研究构建、指定实例)。** 自有线程单次调用
+`SendSSORequestInternal`,自有 protobuf 请求体,送达且可渲染。
+capability profile `gates.send` → `field-proven-research`(附 residual:
+响应无消费者、seq/random 未取自会话状态、插桩捕获否决、生产按 K4)。
+
+新增机制知识(供后续):消息存储记录格式(0xC513 族 TLV,uid/peerUid/
+元素树)可在双方实例内存中扫描取证;event-bus 两注册表
+(0x674C360/0x674C340)均可运行时遍历定位 handler。
