@@ -801,14 +801,22 @@ fn pb_len_field(out: &mut Vec<u8>, field: u32, body: &[u8]) {
 /// NTQQ 路由:C2C{1: uin, 2: uid("u_xxx")}——uid 为 NT 路由主键。
 fn encode_send_msg(peer_uin: u64, peer_uid: Option<&str>, text: &str, client_seq: u32, random: u32) -> Vec<u8> {
     let mut w = Vec::with_capacity(text.len() + 64);
+    // 13665a0 实证:朋友路由 = RoutingHead{1: C2C{2: uid}},**无 uin 字段**
+    // (C2C 字段1 若为 string 类型,varint 会造成 wire 不匹配 → 整包解析失败)。
     let mut routing = Vec::new();
-    pb_varint_field(&mut routing, PB_F_FRIEND_UIN, peer_uin);
     if let Some(uid) = peer_uid {
-        pb_len_field(&mut routing, PB_F_FRIEND_UID, uid.as_bytes());
+        let mut c2c = Vec::new();
+        pb_len_field(&mut c2c, PB_F_FRIEND_UID, uid.as_bytes());
+        pb_len_field(&mut routing, PB_F_FRIEND_UIN, &c2c);
+    } else {
+        pb_varint_field(&mut routing, PB_F_FRIEND_UIN, peer_uin);
     }
     pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
+    // ContentHead = {1: type, 2: 0, 3: 0}(1360ebc 实证:嵌套推三键)。
     let mut content = Vec::new();
     pb_varint_field(&mut content, PB_F_CONTENT_TYPE, PB_CONTENT_TYPE_FRIEND_TEXT);
+    pb_varint_field(&mut content, 2, 0);
+    pb_varint_field(&mut content, 3, 0);
     pb_len_field(&mut w, PB_F_CONTENT_HEAD, &content);
     let mut elem = Vec::new();
     {
@@ -1257,27 +1265,11 @@ mod tests {
         assert_eq!(pos, body.len());
         assert_eq!(fields.len(), 5);
         assert_eq!(fields[0].0, PB_F_ROUTING_HEAD);
-        // routing = {1: varint peer} — 解码回读。
+        // routing = {1: C2C{2: uid}} — 解码回读。
         let r = &fields[0].2;
-        assert_eq!(r[0], (PB_F_FRIEND_UIN << 3) as u8);
-        let mut v = 0u64;
-        let mut shift = 0;
-        for b in &r[1..] {
-            v |= ((b & 0x7F) as u64) << shift;
-            if b & 0x80 == 0 {
-                break;
-            }
-            shift += 7;
-        }
-        assert_eq!(v, 3089665724);
-        // routing 里 C2C.uid = 字段2(wire2)= tag 0x12
-        assert!(r.windows(1).any(|w| w[0] == 0x12), "uid field missing: {}", bytes_hex(r));
-        let mut vp = &r[1..];
-        // 跳过 uin varint(走完含末字节)
-        while vp[0] & 0x80 != 0 { vp = &vp[1..]; }
-        vp = &vp[1..];
-        let uid_tag = vp[0];
-        assert_eq!(uid_tag as u32, (PB_F_FRIEND_UID << 3) | 2);
+        // r6 形状:routing = {1: C2C{2: uid}} → r = {0x0a, len, 0x12, len, uid...}
+        assert_eq!(r[0], 0x0A, "C2C nested under key1");
+        assert_eq!(r[2], 0x12, "uid under key2");
         assert_eq!(fields[1].0, PB_F_CONTENT_HEAD);
         assert_eq!(fields[2].0, PB_F_BODY);
         assert_eq!(fields[3].0, PB_F_CLIENT_SEQ);
