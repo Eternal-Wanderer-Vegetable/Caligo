@@ -78,3 +78,22 @@
   `E:/stella/_reference/caligo-n3-resident-20261009/resp-consumer-strings.json`
   —— 0x3faa680 = "{} {}'{}\"";0x605d22 = thunk 字节(非串);
   "got empty response"/"[MSF] Unknow Error!" 文案实证。
+
+## 2026-10-10 增补:调用方扫描 + 池观测替代路径
+
+- **95d4e6 共 9 个直接调用方**(PE E8 字节扫描,wrapper.node):
+  RVA 0x255e962/0x2564c56/0x2573e85/0x2575c0f/0x261cca0/0x261e20f/0x262b500/
+  0x264a532/0x26537ec —— 全部落在 BaseMsgMgr/SendMsg 族(与 25757ea 同区),
+  对应各消息类型发送路径。
+- **73bd6c 调用链**:仅两个薄包装(≈0x73bd08/0x73c34c,内含直接调用 + 尾跳转),
+  包装本身无直接调用方、无 .rdata 引用 → 真实分发经 vtable 间接;继续追需
+  对包装函数区间做完整反编译(下一轮 Ghidra 定向任务)。
+- **9bef60 语义更正**:不是"产 cbCfg",而是消费 (record, config) 给 record 设
+  特性键(vtbl+0x38 set-int / +0x98 unset / +0xb0 set-obj;键 0x17d5–0x17db、
+  0x1a2d/0x1a2e/0x1a30)——cbCfg 配置结构体的构造点仍在 25757ea 族上游。
+- **池观测替代路径(诊断用,低风险)**:响应层日志串(got empty response/
+  [MSF] Unknow Error! 等)经共享池可扫 —— 发送后扫池即可观测发送结局日志,
+  不必先完成消费者安装;生产 OneBot 回执仍需正规消费者。
+- 同期接收侧对照实验记录见 ledger 2026-10-10 节(N3R10 自产流量:API 发送
+  → get_msg 真值 → 存储记录命中;seq 以 ASCII 出现在 QQ 日志行
+  `[roam_*]OnQueryMessageList, chat_type=2 … begin_seq:…`)。

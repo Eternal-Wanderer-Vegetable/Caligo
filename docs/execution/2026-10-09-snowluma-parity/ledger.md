@@ -210,3 +210,33 @@ ode.exe index.mjs`(PID 35896),
 证据:`E:/stella/_reference/caligo-n3-resident-20261009/`(observe t1–t4、
 g2x-r1..r5 capture/report、snowluma-events.jsonl、gt-*.json、
 read_resp_consumer_strings.py、record_snowluma_events.py)。
+## 2026-10-10(续):r6 窗口 + 自产流量真值实验 + 属性表静态推进
+
+### r6 窗口(300s)
+62 头 + 9 池,restore 对称,QQ 存活;期间环境群消息 0 条(安静时段)。
+
+### N3R10 自产流量实验(零人工;SnowLuma API = 发送器 + 真值源)
+- `send_group_msg` ×3(N3R10-A/B/C,bot 自发)→ 每条响应含 message_id;
+  `get_msg` 补全真值(time/seq/real_id)。
+- 存储命中:A@0x1d76e9322de、B@0x1d76eb4d64a(C 未中,区复用竞态);
+  **time/seq/msgId 无二进制形态于字符串区 ±16KB** —— 数字字段在二进制
+  记录结构(CPBMessageOpti),串区只存串。
+- seq 以 ASCII 出现于 QQ 日志行 `[roam_872_263402786]OnQueryMessageList,
+  chat_type=2 peer_uid:263402786, begin_seq:397856…`(r5 事件 seq=397856
+  三方一致再证);sender = 自 uid u_89Q8…(text-0x44 处,自发消息 sender=自己)。
+
+### CPBMessageOpti 实例定位(布局未解)
+- 全堆扫 vptr(base+0x42615c8):**56 实例**;MsgRecord vptr(base+0x3f51a78)
+  4 实例(this+0x18 = 属性键包装对象,非 CPB 本体,其中两个共享同一 props)。
+- +8 entries / +0x10 u32 count / +0x14 cap 读数在部分实例成立,但 12B 条目
+  跨距解析出现串内容混入(key 位见 "u_KX" ASCII)→ **条目精确布局需解
+  CPBMessageOpti 构造器**(下一轮 Ghidra 定向任务;证据树中 218bba0 是 wire
+  反序列化器,非本构造器)。
+
+### 静态:95d4e6/73bd6c 调用方(PE E8 扫描,详见 scope doc 增补)
+- 95d4e6:9 个发送路径调用方(RVA 0x255e962–0x26537ec,BaseMsgMgr 族)。
+- 73bd6c:两个薄包装,再向上为 vtable 间接 → 需对包装区间完整反编译。
+- 9bef60 语义更正:给 record 设特性键(vtbl+0x38/+0x98/+0xb0),非 cbCfg 生产者。
+- **池观测替代路径**:发送后扫池可读响应层日志(诊断用),不阻塞于消费者安装。
+
+本轮零新增注入(仅 r6 一次捕获窗口,按双门纪律);证据均在本轮 reference 目录。
