@@ -103,3 +103,55 @@
 与既有部件分工:`native_msf::MsfAdapter` 的 request_id 键控在途账本(假宿主合同)保留;cookie 键控预登记层在其上组合(request_id↔cookie 双向),真实 ABI 接线属 N3。
 
 **未闭合(现场依赖,不在本轮)**:response-consumer-scope.md 四项 —— 940588 门控语义、97b0f/58e72 key 组合格式、请求 PB msgUid 字段号、消费者 A 实参 ABI。完成前 @ 维持归档,发送失败模式仍为静默(响应无消费者)。
+
+## N3 — 常驻会话层 + 实例登记(2026-10-09 深夜,第二轮)
+
+### 现场:测试实例登记(只读,零注入)
+
+用户指定"最后启动的 QQ 实例"为测试实例。枚举:22:55:09–22:55:15 启动进程组
+(27108/36396/17360/39512/45488/44324/18940),另 22:57:19 有 17004;
+旧 26104(主账号,10:40 起)仍在,27624(bot)已不在。
+
+**observe-msf t1(PID 27108,外部只读,证据 `E:/stella/_reference/caligo-n3-resident-20261009/observe/observe-27108-t1.json`)**:
+
+| 项 | 结果 |
+|---|---|
+| wrapper 基址/内存大小 | 0x7fff17ee0000 / 121,737,216(文件大小 115,118,632 与冻结一致;内存视图含映射填充) |
+| MSFService 锚点 | **命中**:obj=0x1d76eb68000,vptr RVA 0x3f6ded8 ✓,strong=84 |
+| transport | +0x60 在位(0x1d76e84da30),vptr RVA 0x41403B8 ✓;**slot7 RVA 0x1B4E4EC ✓** 全部与冻结锚点一致 |
+| Manager | 垫片形态(SC=0x1d76e88ea40,+0x150→0x1d76e89e9c0,vptr 堆垫片),树 size=2,2 监听器 |
+| dispatcher | 全局在位;TLS index 44;41 个线程已安装 |
+
+锚点级兼容成立。**实例账号身份未读取**(svc+0x1f0 属注入路径;外部脚本读
+该偏移可补);本轮零注入,任何后续注入按双门纪律(manifest + 指定确认)。
+
+### 离线:响应消费者静态合同收敛(范围文档已更正)
+
+以 phaseAE2 反编译 + 活实例外部 RPM 字符串读取(`resp-consumer-strings.json`,
+只读)收敛范围文档四项(详情见 `docs/research/response-consumer-scope.md` 增补):
+
+| 项 | 结果 |
+|---|---|
+| 消费者调用 ABI | **闭合**:`(inner, 0x10, errCode:int, errStr:string, msgUid:string)`;errCode 优先级 resp+0x40 → +0x60 → +0x64;resp 空 = **-1** 超时;msgUid = string@resp+0x38 |
+| "注册"语义 | **更正**:c707b6 = 序列化+日志(源路径串证实),非注册;真正安装点在 cbCfg(9bef60)构造路径,待重定位 |
+| 0x605d22 | **更正**:非字符串,是 vcall thunk(`mov eax,[rcx]; jmp [rax+0xa8]`);门控 = slot 0xa8 背后实现 |
+| key 格式 | 部分闭合:key = fmt 模板 `{} {}'{}\"`(0x3faa680 活内存实证,长形态合法串)+ 后缀字面量(58e72 = 纯拼接);97b0f 的 3 个 fmt 实参未定 |
+| cookie→msgUid | 收窄:响应回带 msgUid 串已实证;请求侧关联一次受控正例可定 |
+
+### 离线:N3 native_session.rs 会话层交付(fake-ABI 合同)
+
+新增 `crates/caligo-bridge/src/native_session.rs`(纯调度,零 FFI;+模块注册):
+
+- `AttachProof.validate()`:锚点多候选/空服务/缺基线拒绝;`attach` = 门核对 → ops 零副作用探针 → Ready。门未过 = 零原生调用(T12)。
+- `enqueue_send` 顺序合同:seq 先持久化(T09)→ cookie 预登记(§5-2)→ ops 提交;`SendAcceptance` 四分类(Dispatched/RefusedPreCall/NotReady/AllocationFailed)+ NotAttached —— 受理≠派发≠原生开始≠业务成功(§5-3)。
+- `NativeOps` trait(probe_ready/submit):真实地址仅在实现内触接,N3 接线点;fake 合同测试 7 用例(门拒绝零调用、派发顺序、inline 回调、PreCall/NotReady/分配失败三分类、失效排空、关闭如实 Clean/Quarantined + 关闭后零受理)。
+
+### 第二轮验收命令结果(2026-10-09)
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test --workspace --features caligo-core/research --locked --offline` | **180 passed / 0 failed** |
+| `cargo test --workspace --locked --offline` | **159 passed / 0 failed** |
+
+声明:本轮现场部分仅 observe-msf(外部只读)+ 静态字符串 RPM 读取,零注入;
+native_session 为离线合同,未接真实地址,不构成常驻准入。
