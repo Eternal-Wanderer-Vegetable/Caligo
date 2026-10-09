@@ -5,6 +5,8 @@
 
 > 当前状态(2026-10-07,K4 阶段):**项目拥有真实收发的研究原型能力**(K3 群/私聊收发有执行者验收记录),但**注入式现场路线已冻结**——六次测试实例损失后(`local-evidence/k3-g/final-boundary.md`),对存活 QQ 的注入类探针暂停;K3 文档中"生产层定型"的表述由 `docs/research/k4-execution-scope.md` 修正为"能力证明,非生产定型"。K4 按 `docs/plans/2026-10-07-gitnexus-plan-caligo-k4-runtime-recovery.md` 重建:宿主合法初始化 → 常驻 bridge → 命名管道 → 常驻 core;现场部分保持暂停直至 D6 准入。普通构建下 `inject`/旧 onebotd/相关 DLL 导出默认拒绝(`--features research` 仅供自建宿主离线研究)。
 
+> 当前状态(2026-10-09,N 阶段开始):上一轮 P0–P9 合同的历史验收见 `docs/execution/2026-10-08-native-contract-recovery/ledger.md`。其中**已完成**:G1 准入、G2 接收注册机制(现场闭环,记录级字段映射仍 blocked)、G3 私聊/群聊文本发送(field-proven-research,r9/r18 送达+渲染)、IPC v3 身份/epoch/恢复、seq/random 研究工具(r19 单调计数)、slot7 插桩路线整体否决(2/2 实例损失)。**未完成(转入 N 计划)**:生产常驻 native bridge、业务响应消费者(retCode 可观测)、完整接收事件、OneBot 网络层。当前执行计划:`docs/plans/2026-10-09-gitnexus-plan-caligo-snowluma-capability-parity.md`,台账 `docs/execution/2026-10-09-snowluma-parity/ledger.md`。发送 wire 权威源 = `caligo-model::qq_wire::send`(field-proven golden fixtures);普通文本支持域仍限 QQ `9.9.33-52230` 单版本,元素37 静态常量未证明跨版本有效。
+
 ## 仓库结构
 
 | 路径 | 说明 |

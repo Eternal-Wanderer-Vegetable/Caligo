@@ -182,14 +182,16 @@
    "unblock": "P4/P6 闭合观察者注册或等价 ready 信号"
   },
   "receive": {
-   "state": "lab-only",
-   "basis": "包布局经 QQ 本体+Snow 双向交叉(R2);hook 安装点 Core+0x40 slot5 已知;自有接收 adapter 属 P4;无现场准入"
+   "state": "field-proven-research-mechanism",
+   "basis": "2026-10-09 G2 判定 PASS(实例 21732,4 次连续窗口):begin_node 单指针交换注册/restore 对称、私聊+群聊通知全部到达监听器、零崩溃、回调零转发(证据 evidence/p6-g2/,台账'G2 机制判定')。头 0x40 字节:Type S = [SSO 自账号 2qword, {0, 逐消息32位}, {0x31,0x25}, 池指针×2](p5-correlation-21732-r4.md);Type P = 指针头。",
+   "residual": "记录级 sender/chat_type/平台时间/稳定 native ID 的记录内位置未定证 → 业务事件映射 blocked(p5-correlation 待办清单);从共享字符串池'发现文本'组装事件被计划 N1 禁止;无常驻接收 adapter(接 native_receive.rs 规范化,未接入 resident);shim 实例路径(slot3)仅 LAB 验证"
   },
   "send": {
    "state": "field-proven-research",
-   "basis": "2026-10-09 实例 24316(私聊 r8/r9)+ 实例 27624(群聊 r18,机器人号 1694717255):自有线程单次调用 MSFService::SendSSORequestInternal(0x732A80)送达且群内正常渲染(证据 evidence/p6-g3/g3-send-24316-r8|r9.jsonl、g3-send-27624-r18.jsonl)。私聊 SendMsgReq = {1: RoutingHead{1: C2C{2: peerUid 串}}, 2: ContentHead{1: type, 2: 0, 3: 0}(服务器忽略,可不发), 3: Body{1: RichText{2: [elem37, text]}}, 4: clientSeq, 5: random, 6: {1: 秒}}; 群聊 SendMsgReq = {1: RoutingHead{2: Grp{1: varint groupCode}}, 3: Body{1: RichText{2: [elem37(118B 静态可用), 2: text{1:{1:str}}]}}, 4: seq, 5: random, 6: {1: 秒}} —— 群聊不得带 ContentHead(带即静默拒, r10–r17);群号是 varint u64 非字符串(r18)。blob = libc++ vector<uint8>,data 须 QQ operator new(0xB75000)",
-   "residual": "响应侧无消费者(MSF 回调被 QQ 置空,失败=静默);clientSeq/random 未取自会话状态;插桩式捕获(slot7 路径)已否决(2/2 fatal,ledger 2026-10-09);生产路线按 K4 常驻 bridge",
-   "unblock_history": "P4 LAB -> P5 编解码 -> P6 G1 -> 私聊门 2026-10-09(r9) -> 群聊门 2026-10-09(r18),r10–r17 八轮静默拒归因:ContentHead 赘余 + 群号 string/varint 之辨(根因阶梯见 ledger)"
+   "basis": "2026-10-09 实例 24316(私聊 r8/r9)+ 实例 27624(群聊 r18,机器人号 1694717255):自有线程单次调用 MSFService::SendSSORequestInternal(0x732A80)送达且群内正常渲染(证据 evidence/p6-g3/g3-send-24316-r8|r9.jsonl、g3-send-27624-r18.jsonl)。私聊 SendMsgReq = {1: RoutingHead{1: C2C{2: peerUid 串}}, 2: ContentHead{1: 1, 2: 0, 3: 0}(r5 送达形状组成部分;省略未测试,不得按'可省'实施), 3: Body{1: RichText{2: [elem37, text]}}, 4: clientSeq, 5: random, 6: {1: 秒}}; 群聊 SendMsgReq = {1: RoutingHead{2: Grp{1: varint groupCode}}, 3: Body{1: RichText{2: [elem37(118B 静态可用), 2: text{1:{1:str}}]}}, 4: seq, 5: random, 6: {1: 秒}} —— 群聊不得带 ContentHead(带即静默拒, r10–r17);群号是 varint u64 非字符串(r18)。blob = libc++ vector<uint8>,data 须 QQ operator new(0xB75000)",
+   "residual": "响应侧无消费者(MSF 回调被 QQ 置空,失败=静默);clientSeq/random 未取自会话状态;插桩式捕获(slot7 路径)已否决(2/2 fatal,ledger 2026-10-09);生产路线按 K4 常驻 bridge;元素37 静态常量(私聊 26B/群 118B)在 r9/r18 中有效不证明长期或跨会话有效——支持域限当前版本,版本漂移按 N5 重验;@ 元素 r20–r28b 全部静默拒(阻塞于响应 retCode,非支持能力)",
+   "unblock_history": "P4 LAB -> P5 编解码 -> P6 G1 -> 私聊门 2026-10-09(r9) -> 群聊门 2026-10-09(r18),r10–r17 八轮静默拒归因:ContentHead 赘余 + 群号 string/varint 之辨(根因阶梯见 ledger)",
+   "wire_source": "caligo-model::qq_wire::send(N1 起;golden fixtures = caligo-model tests/qq_wire_golden.rs,合成身份;r9/r18 归档 head 前缀交叉验证)"
   },
   "lifecycle_stop": {
    "state": "rejected",
@@ -200,5 +202,12 @@
   "on_new_hash": "unsupported-build;走离线调查 -> 补证 -> 新 profile -> LAB -> 指定实例现场 -> 发布,一次结构扫描不自动准入",
   "on_anchor_ambiguity": "拒绝;不支持多候选运行时猜测",
   "hot_swap": "禁止运行中换 profile/RVA"
- }
+ },
+ "updates": [
+  {
+   "date": "2026-10-09",
+   "scope": "N0 事实同步(计划 §7-N0 动作4):receive gate 校准至 G2 现场判定;send gate 修正 ContentHead 表述并登记 wire 权威源。无 gate 状态升级(receive 机制研究级,业务映射仍 blocked;send 维持 field-proven-research)",
+   "ledger": "docs/execution/2026-10-09-snowluma-parity/ledger.md"
+  }
+ ]
 }
