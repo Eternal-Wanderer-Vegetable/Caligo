@@ -91,7 +91,14 @@ fn t18_bounded_decode_rejects_garbage() {
 #[test]
 fn t19_receipt_never_fabricates_success() {
     // 编码 → (作为"回执"侧我们只验证解析合同;真实回执字段验证在 G3)。
-    let req = encode_pb_send_msg(&SendTarget::Group { group_code: 777 }, "m", 1, 2).unwrap();
+    let req = encode_pb_send_msg(
+        &SendTarget::Group { group_code: 70_000_001 },
+        "m",
+        1,
+        2,
+        1_760_000_000,
+    )
+    .unwrap();
     assert!(!req.is_empty());
     let mut w = Writer::new();
     w.u32_field(1, 0); // result=0

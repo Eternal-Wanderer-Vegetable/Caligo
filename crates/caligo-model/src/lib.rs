@@ -402,3 +402,4 @@ mod tests {
 pub mod framing;
 pub mod ipc_v2;
 pub mod ipc_v3;
+pub mod qq_wire;

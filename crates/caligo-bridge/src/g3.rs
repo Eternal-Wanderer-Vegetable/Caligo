@@ -153,7 +153,7 @@ fn read_qwords_into(addr: usize, out: &mut [u64]) -> usize {
     out.len()
 }
 
-fn addr_plausible(v: u64) -> bool {
+pub(crate) fn addr_plausible(v: u64) -> bool {
     (0x1_0000..0x7FFF_FFFE_FFFF).contains(&v) && v & 7 == 0
 }
 
@@ -725,20 +725,15 @@ const EMPTY_FN_DTOR_RVA: usize = 0x72D5C8;
 /// MSFService+0x1f0 = 本机账号串(732a80 param_2 的源)。
 const SVC_FIELD_SELF_STRING: usize = 0x1F0;
 
-// 与 caligo-core qq_protocol::send 常量保持同步。
+// 字段号权威源 = caligo_model::qq_wire::send(N1 起);此处仅保留 @ 研究
+// 分支仍在使用的子集(值与 model 同源)。
 const PB_F_ROUTING_HEAD: u32 = 1;
-const PB_F_CONTENT_HEAD: u32 = 2;
 const PB_F_BODY: u32 = 3;
 const PB_F_CLIENT_SEQ: u32 = 4;
 const PB_F_RANDOM: u32 = 5;
-const PB_F_FRIEND_UIN: u32 = 1;
-const PB_F_FRIEND_UID: u32 = 2;
-const PB_F_CONTENT_TYPE: u32 = 1;
 const PB_F_BODY_RICH: u32 = 1;
-const PB_F_RICH_ELEMS: u32 = 2;
 const PB_F_ELEM_TEXT: u32 = 1;
 const PB_F_TEXT_STR: u32 = 1;
-const PB_CONTENT_TYPE_FRIEND_TEXT: u64 = 1;
 
 pub const ERR_SEND_BODY: u32 = 41;
 pub const ERR_SEND_ALLOC: u32 = 42;
@@ -821,9 +816,11 @@ fn pb_len_field(out: &mut Vec<u8>, field: u32, body: &[u8]) {
     out.extend_from_slice(body);
 }
 
-/// 最小 SendMsgReq(私聊/群聊文本;字段号与 core 同源,verified=false;
-/// 私聊路由/ContentHead 三键/元素37 均经真实报文实证)。
-/// 群聊路由 = Grp{1: group_code},ContentHead type=82。
+/// 最小 SendMsgReq(私聊/群聊文本)。普通文本路径自 N1 起委托共享 codec
+/// `caligo_model::qq_wire::send`(field-proven:r9 私聊/r18 群聊,形状与
+/// 字节 golden 见 caligo-model tests/qq_wire_golden.rs);本函数保留为
+/// 研究入口薄包装 + @ 研究分支宿主(r20–r28b 归档,静默拒,阻塞于响应
+/// retCode —— @ 不是生产支持面,勿据此扩能力)。
 fn encode_send_msg(
     peer_uin: u64,
     peer_uid: Option<&str>,
@@ -834,188 +831,135 @@ fn encode_send_msg(
     at_uid: Option<&str>,
     at_uin: u32,
 ) -> Vec<u8> {
-    let mut w = Vec::with_capacity(text.len() + 128);
-    // 群消息真实三值(2026-10-09 主账号存储记录 capture-main-group-body.jsonl
-    // addr=0x24b715d5f30 字节级实证):divSeq=2122933745、random=395811、
-    // CH.29=395247。ts 每发实时取。
-    const GROUP_DIVSEQ: u64 = 2_122_933_745;
-    const GROUP_CH_RANDOM: u64 = 395_811;
-    const GROUP_CH_F29: u64 = 395_247;
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    if group_code != 0 {
-        // ===== 群聊(r18:r17 形状 + varint 群号)=====
-        // 13665a0 chat_type==2 分支字节级语义:peer 串经 1e9f8b 转 u64,
-        // Grp.field1 = varint 数字(非字符串!)。r10–r17 全用字符串群号;
-        // r10 试过 varint 但带 CH。经典协议 Grp.1 本就是 u64。
-        let mut routing = Vec::new();
-        let mut grp = Vec::new();
-        pb_varint_field(&mut grp, 1, group_code);
-        pb_len_field(&mut routing, 2, &grp);
-        pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
-    } else {
-        // 13665a0 实证:朋友路由 = RoutingHead{1: C2C{2: uid}},无 uin 字段
-        // (C2C 字段1 若为 string 类型,varint 会造成 wire 不匹配 → 整包解析失败)。
-        let mut routing = Vec::new();
-        if let Some(uid) = peer_uid {
-            let mut c2c = Vec::new();
-            pb_len_field(&mut c2c, PB_F_FRIEND_UID, uid.as_bytes());
-            pb_len_field(&mut routing, PB_F_FRIEND_UIN, &c2c);
-        } else {
-            pb_varint_field(&mut routing, PB_F_FRIEND_UIN, peer_uin);
-        }
-        pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
-        // ContentHead = {1: type, 2: 0, 3: 0}(1360ebc 实证:嵌套推三键)。
-        let mut content = Vec::new();
-        pb_varint_field(&mut content, PB_F_CONTENT_TYPE, PB_CONTENT_TYPE_FRIEND_TEXT);
-        pb_varint_field(&mut content, 2, 0);
-        pb_varint_field(&mut content, 3, 0);
-        pb_len_field(&mut w, PB_F_CONTENT_HEAD, &content);
+    if group_code == 0 {
+        // ===== 私聊(r9 形状;共享 codec)=====
+        return caligo_model::qq_wire::send::encode_friend_text(
+            peer_uin,
+            peer_uid,
+            text,
+            client_seq,
+            random,
+            ts,
+        )
+        .unwrap_or_default();
     }
+    if at_uid.is_none() {
+        // ===== 群聊(r18 形状:varint 群号 + 无 ContentHead;共享 codec)=====
+        return caligo_model::qq_wire::send::encode_group_text(
+            group_code,
+            text,
+            client_seq,
+            random,
+            ts,
+        )
+        .unwrap_or_default();
+    }
+    // ===== 群聊 @ 研究分支(r20–r28b 归档;全部静默拒,留作逆向证据)=====
+    // 入口保证 at_uid.is_some()。路由与 r18 相同(Grp varint,无 CH)。
+    let mut w = Vec::with_capacity(text.len() + 128);
+    let mut routing = Vec::new();
+    let mut grp = Vec::new();
+    pb_varint_field(&mut grp, 1, group_code);
+    pb_len_field(&mut routing, 2, &grp);
+    pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
+    let mut rich = Vec::new();
+    // @ 消息要求 Rich.Attr(field1)——真实 @ 样本含 {1:0,2:ts,3:rand,4:0,5:10,6:0,7:134,8:2,9:"媒体"}
+    // (普通文本无 Attr 可过,@ 被拒两轮后回补;r22)。
+    {
+        let mut attr = Vec::new();
+        pb_varint_field(&mut attr, 1, 0);
+        pb_varint_field(&mut attr, 2, ts);
+        pb_varint_field(&mut attr, 3, random as u64);
+        pb_varint_field(&mut attr, 4, 0);
+        pb_varint_field(&mut attr, 5, 10);
+        pb_varint_field(&mut attr, 6, 0);
+        pb_varint_field(&mut attr, 7, 134);
+        pb_varint_field(&mut attr, 8, 2);
+        pb_len_field(&mut attr, 9, &[0xe5, 0xaa, 0x92, 0xe4, 0xbd, 0x93]);
+        pb_len_field(&mut rich, 1, &attr);
+    }
+    // @ 场景专用 elem37(125B 照抄):field81 形状不同({f2:17} vs 普通版
+    // {f1:2,f2:45}),疑似服务器按此分流消息类型(r28)。
+    const AT_ELEM37: &[u8] = &[
+        0xaa, 0x02, 0x7a, 0x08, 0x00, 0x50, 0x00, 0x60, 0x00, 0x68, 0x00, 0x80,
+        0x01, 0x00, 0x88, 0x01, 0x00, 0x9a, 0x01, 0x69, 0x08, 0x06, 0x20, 0xcb,
+        0x50, 0x78, 0x00, 0xc8, 0x01, 0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00,
+        0x90, 0x02, 0x00, 0xc8, 0x02, 0x00, 0x98, 0x03, 0x00, 0xa0, 0x03, 0x00,
+        0xb0, 0x03, 0x00, 0xb8, 0x03, 0x00, 0xc0, 0x03, 0x00, 0xd0, 0x03, 0x00,
+        0xe8, 0x03, 0x00, 0x8a, 0x04, 0x02, 0x10, 0x11, 0x90, 0x04, 0x80, 0x01,
+        0xb8, 0x04, 0x00, 0xc0, 0x04, 0x00, 0xca, 0x04, 0x00, 0xf8, 0x04, 0xcc,
+        0x84, 0x08, 0x80, 0x05, 0x4d, 0x88, 0x05, 0x00, 0x80, 0x06, 0x00, 0xb2,
+        0x06, 0x0a, 0x0a, 0x08, 0x08, 0x00, 0x10, 0x00, 0x18, 0x00, 0x20, 0x00,
+        0xd8, 0x06, 0x8b, 0x95, 0x18, 0xa0, 0x07, 0xcf, 0xfe, 0xe3, 0xc3, 0xee,
+        0xdd, 0xc9, 0xa1, 0xef, 0x01,
+    ];
+    pb_len_field(&mut rich, 2, AT_ELEM37);
+    // 元素 9(6B 固定):真实 @ 消息在 elem37 后、@text 前携带
+    // (r25 试探;普通文本可省,疑似 @ 场景服务器要求)。
+    pb_len_field(&mut rich, 2, &[0x4a, 0x04, 0x08, 0x00, 0x40, 0x01]);
+    // @ 元素(2026-10-09 真实 @Stella 消息字节级实证,wirecap/at-capture):
+    // Rich{2: text{1: "@段", 3: attr13B(00 01 <len_be32> 00 <uin_be32> 00 00),
+    // 12: {3: <被@人 peerUid>}}},其余文本是独立 text 元素。
+    if let Some(atuid) = at_uid {
+        if let Some(sp) = text.find(' ') {
+            let (at_name, rest) = text.split_at(sp);
+            let mut at_txt = Vec::new();
+            pb_len_field(&mut at_txt, 1, at_name.as_bytes());
+            let mut attr = vec![0u8, 1u8];
+            attr.extend_from_slice(&(at_name.len() as u32).to_be_bytes());
+            attr.push(0u8);
+            attr.extend_from_slice(&at_uin.to_be_bytes());
+            attr.extend_from_slice(&[0u8, 0u8]);
+            pb_len_field(&mut at_txt, 3, &attr);
+            // f12(38B 实证):{3: 2(atType), 4: uin(varint), 5: 0,
+            // 9: peerUid, 11: 0}——r20 误为 {3: uid串} 被拒,此为修正。
+            let mut f12 = Vec::new();
+            pb_varint_field(&mut f12, 3, 2);
+            pb_varint_field(&mut f12, 4, at_uin as u64);
+            pb_varint_field(&mut f12, 5, 0);
+            pb_len_field(&mut f12, 9, atuid.as_bytes());
+            pb_varint_field(&mut f12, 11, 0);
+            pb_len_field(&mut at_txt, 12, &f12);
+            pb_len_field(&mut rich, 2, &at_txt);
+            let mut rest_txt = Vec::new();
+            pb_len_field(&mut rest_txt, 1, rest.as_bytes());
+            pb_len_field(&mut rich, 2, &rest_txt);
+            // 元素16(20B 照抄,真实 @ 样本链尾;{16:{2:"武舞",3:1,5:3,7:""}}):
+            pb_len_field(&mut rich, 2, &[
+                0x82, 0x01, 0x11, 0x12, 0x09, 0xe6, 0xad, 0xa6, 0xe8, 0x88,
+                0x9e, 0x18, 0x01, 0x28, 0x03, 0x3a, 0x00,
+            ]);
+            let body_nested = pb_len_field_vec(PB_F_BODY_RICH, &rich);
+            pb_len_field(&mut w, PB_F_BODY, &body_nested);
+            pb_varint_field(&mut w, PB_F_CLIENT_SEQ, client_seq as u64);
+            pb_varint_field(&mut w, PB_F_RANDOM, random as u64);
+            let mut f6 = Vec::new();
+            pb_varint_field(&mut f6, 1, ts);
+            pb_len_field(&mut w, 6, &f6);
+            return w;
+        }
+    }
+    // 非 "@名 正文" 形态(研究调用方错误):退回普通群文本元素。
     let mut elem = Vec::new();
     {
         let mut txt = Vec::new();
         pb_len_field(&mut txt, PB_F_TEXT_STR, text.as_bytes());
         pb_len_field(&mut elem, PB_F_ELEM_TEXT, &txt);
     }
-    // 元素37(通用标志)+ 元素9:自真实 UI 发送报文字节级照抄
-    // (capture-main-send-body.jsonl,2026-10-09 主账号实例内存取证)。
-    // 缺元素37 → 对端"该消息类型暂不支持查看"。
-    const ELEM_GENERAL_FLAGS: &[u8] = &[
-        0xaa, 0x02, 0x17, 0x88, 0x01, 0x00, 0x9a, 0x01, 0x11, 0x78, 0x00, 0xc8,
-        0x01, 0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00, 0x90, 0x02, 0x00, 0x80,
-        0x06, 0x00,
-    ];
-    let mut rich = Vec::new();
-    if group_code != 0 {
-        // r17:群版 RichText 无 Attr(真 wire 无此字段;存储记录里的 Attr
-        // 是存储层附加,不进请求)。
-        // 元素37(群版)118B 全量照抄——真实为动态生成(长度 104–118B 浮动,
-        // 尾部嵌每消息随机值),静态常量赌服务器只查结构。
-        // 元素37(群版):真实记录 118B 全量字节照抄(2026-10-09 捕获
-        // addr=0x24b715d5f30)。r13 旧常量仅 88B 且第 5 字节误 0x06——
-        // 声明长 0x73=115B 实只 85B,服务器解析整条错位,系 r13–r15
-        // 静默拒的最强解释。本常量自捕获直接提取,结构校验 118B OK。
-        const GROUP_ELEM37: &[u8] = &[
-            0xaa, 0x02, 0x73, 0x50, 0x00, 0x60, 0x00, 0x68, 0x00, 0x88, 0x01, 0x00,
-            0x9a, 0x01, 0x67, 0x08, 0x06, 0x20, 0xcb, 0x50, 0x78, 0x00, 0xc8, 0x01,
-            0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00, 0x90, 0x02, 0x00, 0x98, 0x03,
-            0x00, 0xa0, 0x03, 0x00, 0xb0, 0x03, 0x00, 0xc0, 0x03, 0x00, 0xd0, 0x03,
-            0x00, 0xe8, 0x03, 0x00, 0x8a, 0x04, 0x04, 0x08, 0x02, 0x10, 0x2d, 0x90,
-            0x04, 0x80, 0x01, 0xb8, 0x04, 0x00, 0xc0, 0x04, 0x01, 0xca, 0x04, 0x02,
-            0x10, 0x00, 0xf8, 0x04, 0xcc, 0x84, 0x08, 0x80, 0x05, 0x3a, 0x88, 0x05,
-            0x00, 0x80, 0x06, 0x00, 0xb2, 0x06, 0x0a, 0x0a, 0x08, 0x08, 0x00, 0x10,
-            0x00, 0x18, 0x00, 0x20, 0x00, 0xd8, 0x06, 0xef, 0x8f, 0x18, 0xa0, 0x07,
-            0xc3, 0x8c, 0xa2, 0x8c, 0xae, 0xee, 0xe2, 0xfd, 0x89, 0x01,
-        ];
-        // @ 消息要求 Rich.Attr(field1)——真实 @ 样本含 {1:0,2:ts,3:rand,4:0,5:10,6:0,7:134,8:2,9:"媒体"}
-        // (普通文本无 Attr 可过,@ 被拒两轮后回补;r22)。
-        {
-            let mut attr = Vec::new();
-            pb_varint_field(&mut attr, 1, 0);
-            pb_varint_field(&mut attr, 2, ts);
-            pb_varint_field(&mut attr, 3, random as u64);
-            pb_varint_field(&mut attr, 4, 0);
-            pb_varint_field(&mut attr, 5, 10);
-            pb_varint_field(&mut attr, 6, 0);
-            pb_varint_field(&mut attr, 7, 134);
-            pb_varint_field(&mut attr, 8, 2);
-            pb_len_field(&mut attr, 9, &[0xe5, 0xaa, 0x92, 0xe4, 0xbd, 0x93]);
-            pb_len_field(&mut rich, 1, &attr);
-        }
-        // @ 场景专用 elem37(125B 照抄):field81 形状不同({f2:17} vs 普通版
-        // {f1:2,f2:45}),疑似服务器按此分流消息类型(r28)。
-        const AT_ELEM37: &[u8] = &[
-            0xaa, 0x02, 0x7a, 0x08, 0x00, 0x50, 0x00, 0x60, 0x00, 0x68, 0x00, 0x80,
-            0x01, 0x00, 0x88, 0x01, 0x00, 0x9a, 0x01, 0x69, 0x08, 0x06, 0x20, 0xcb,
-            0x50, 0x78, 0x00, 0xc8, 0x01, 0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00,
-            0x90, 0x02, 0x00, 0xc8, 0x02, 0x00, 0x98, 0x03, 0x00, 0xa0, 0x03, 0x00,
-            0xb0, 0x03, 0x00, 0xb8, 0x03, 0x00, 0xc0, 0x03, 0x00, 0xd0, 0x03, 0x00,
-            0xe8, 0x03, 0x00, 0x8a, 0x04, 0x02, 0x10, 0x11, 0x90, 0x04, 0x80, 0x01,
-            0xb8, 0x04, 0x00, 0xc0, 0x04, 0x00, 0xca, 0x04, 0x00, 0xf8, 0x04, 0xcc,
-            0x84, 0x08, 0x80, 0x05, 0x4d, 0x88, 0x05, 0x00, 0x80, 0x06, 0x00, 0xb2,
-            0x06, 0x0a, 0x0a, 0x08, 0x08, 0x00, 0x10, 0x00, 0x18, 0x00, 0x20, 0x00,
-            0xd8, 0x06, 0x8b, 0x95, 0x18, 0xa0, 0x07, 0xcf, 0xfe, 0xe3, 0xc3, 0xee,
-            0xdd, 0xc9, 0xa1, 0xef, 0x01,
-        ];
-        if at_uid.is_some() {
-            pb_len_field(&mut rich, 2, AT_ELEM37);
-        } else {
-            pb_len_field(&mut rich, 2, GROUP_ELEM37);
-        }
-        // 元素 9(6B 固定):真实 @ 消息在 elem37 后、@text 前携带
-        // (r25 试探;普通文本可省,疑似 @ 场景服务器要求)。
-        if at_uid.is_some() {
-            pb_len_field(&mut rich, 2, &[0x4a, 0x04, 0x08, 0x00, 0x40, 0x01]);
-        }
-        // @ 元素(2026-10-09 真实 @Stella 消息字节级实证,wirecap/at-capture):
-        // Rich{2: text{1: "@段", 3: attr13B(00 01 <len_be32> 00 <uin_be32> 00 00),
-        // 12: {3: <被@人 peerUid>}}},其余文本是独立 text 元素。
-        if let Some(atuid) = at_uid {
-            if let Some(sp) = text.find(' ') {
-                let (at_name, rest) = text.split_at(sp);
-                let mut at_txt = Vec::new();
-                pb_len_field(&mut at_txt, 1, at_name.as_bytes());
-                let mut attr = vec![0u8, 1u8];
-                attr.extend_from_slice(&(at_name.len() as u32).to_be_bytes());
-                attr.push(0u8);
-                attr.extend_from_slice(&at_uin.to_be_bytes());
-                attr.extend_from_slice(&[0u8, 0u8]);
-                pb_len_field(&mut at_txt, 3, &attr);
-                // f12(38B 实证):{3: 2(atType), 4: uin(varint), 5: 0,
-                // 9: peerUid, 11: 0}——r20 误为 {3: uid串} 被拒,此为修正。
-                let mut f12 = Vec::new();
-                pb_varint_field(&mut f12, 3, 2);
-                pb_varint_field(&mut f12, 4, at_uin as u64);
-                pb_varint_field(&mut f12, 5, 0);
-                pb_len_field(&mut f12, 9, atuid.as_bytes());
-                pb_varint_field(&mut f12, 11, 0);
-                pb_len_field(&mut at_txt, 12, &f12);
-                pb_len_field(&mut rich, 2, &at_txt);
-                let mut rest_txt = Vec::new();
-                pb_len_field(&mut rest_txt, 1, rest.as_bytes());
-                pb_len_field(&mut rich, 2, &rest_txt);
-                // 元素16(20B 照抄,真实 @ 样本链尾;{16:{2:"武舞",3:1,5:3,7:""}}):
-                if at_uid.is_some() {
-                    pb_len_field(&mut rich, 2, &[
-                        0x82, 0x01, 0x11, 0x12, 0x09, 0xe6, 0xad, 0xa6, 0xe8, 0x88,
-                        0x9e, 0x18, 0x01, 0x28, 0x03, 0x3a, 0x00,
-                    ]);
-                }
-                let body_nested = pb_len_field_vec(PB_F_BODY_RICH, &rich);
-                pb_len_field(&mut w, PB_F_BODY, &body_nested);
-                pb_varint_field(&mut w, PB_F_CLIENT_SEQ, client_seq as u64);
-                pb_varint_field(&mut w, PB_F_RANDOM, random as u64);
-                let mut f6 = Vec::new();
-                pb_varint_field(&mut f6, 1, ts);
-                pb_len_field(&mut w, 6, &f6);
-                return w;
-            }
-        }
-        pb_len_field(&mut rich, 2, &elem);
-    } else {
-        pb_len_field(&mut rich, 2, ELEM_GENERAL_FLAGS);
-        pb_len_field(&mut rich, 2, &elem);
-    }
+    pb_len_field(&mut rich, 2, &elem);
     // Body = {1: richText}(真实报文 0a39 包装;缺失 → 对端找不到富文本)。
     let body_nested = pb_len_field_vec(PB_F_BODY_RICH, &rich);
     pb_len_field(&mut w, PB_F_BODY, &body_nested);
-    {
-        // 键4/5/6:私聊真实报文实证;群聊(形态 Y)同样补发(1360480 未推
-        // 可能因其取自 record 内部状态,值本身服务器仍消费)。
-        pb_varint_field(&mut w, PB_F_CLIENT_SEQ, client_seq as u64);
-        pb_varint_field(&mut w, PB_F_RANDOM, random as u64);
-        // 键6 = {1: 发送时刻(秒)}(真实报文实证)。
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let mut f6 = Vec::new();
-        pb_varint_field(&mut f6, 1, ts);
-        pb_len_field(&mut w, 6, &f6);
-    }
+    // 键4/5/6:与共享 codec 尾部同构(键6 = {1: 发送时刻秒})。
+    pb_varint_field(&mut w, PB_F_CLIENT_SEQ, client_seq as u64);
+    pb_varint_field(&mut w, PB_F_RANDOM, random as u64);
+    let mut f6 = Vec::new();
+    pb_varint_field(&mut f6, 1, ts);
+    pb_len_field(&mut w, 6, &f6);
     w
 }
 
@@ -1416,11 +1360,15 @@ mod tests {
         assert_eq!(n, CAND_CAP);
     }
 
-    /// P2 编码:好友私聊最小 SendMsgReq 结构(与 core 同字段号;手工解析校验)。
+    /// P2 编码:好友私聊 SendMsgReq 结构(与 core 同字段号;手工解析校验)。
+    /// 结构 = r9 现场送达形状:顶层 {1: 路由, 2: ContentHead 三键,
+    /// 3: Body{1: Rich{2: [元素37, 文本]}}, 4: seq, 5: rand, 6: {1: ts}}。
     #[test]
     fn send_msg_encoding_friend() {
-        let body = encode_send_msg(3089665724, Some("u_TESTPEER"), 0, "G3P2", 7, 9);
-        // 顶层字段序:1(routing)2(content)3(body)4(seq)5(rand)。
+        // 合成标识(不指向真实账号;uid 存在时 uin 不进 wire)。
+        const SYNTH_PEER_UIN: u64 = 2_987_654_321;
+        let body = encode_send_msg(SYNTH_PEER_UIN, Some("u_TESTPEER"), 0, "G3P2", 7, 9, None, 0);
+        // 顶层字段序:1(routing)2(content)3(body)4(seq)5(rand)6(ts)。
         let mut pos = 0usize;
         let mut fields = Vec::new();
         while pos < body.len() {
@@ -1462,12 +1410,19 @@ mod tests {
         assert_eq!(pos, body.len());
         assert_eq!(fields.len(), 6);
         assert_eq!(fields[0].0, PB_F_ROUTING_HEAD);
-        // routing = {1: C2C{2: uid}} — 解码回读。
+        // routing = {1: C2C{2: uid}} — 解码回读;uid 叶子逐字节核对。
         let r = &fields[0].2;
         // r6 形状:routing = {1: C2C{2: uid}} → r = {0x0a, len, 0x12, len, uid...}
         assert_eq!(r[0], 0x0A, "C2C nested under key1");
         assert_eq!(r[2], 0x12, "uid under key2");
-        assert_eq!(fields[1].0, PB_F_CONTENT_HEAD);
+        assert_eq!(&r[4..], b"u_TESTPEER", "uid leaf bytes");
+        assert_eq!(fields[1].0, caligo_model::qq_wire::send::PB_F_CONTENT_HEAD);
+        // ContentHead 三键 = {1: type(1), 2: 0, 3: 0}(1360ebc/r5 现场实证)。
+        assert_eq!(
+            fields[1].2,
+            &[0x08, 0x01, 0x10, 0x00, 0x18, 0x00],
+            "friend ContentHead = {{1:1, 2:0, 3:0}}"
+        );
         assert_eq!(fields[2].0, PB_F_BODY);
         // body = {1: rich} 一层包装
         assert_eq!(fields[2].2[0], 0x0A, "rich must nest under body field 1");

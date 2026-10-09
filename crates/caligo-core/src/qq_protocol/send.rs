@@ -1,74 +1,58 @@
 //! MessageSvc.PbSendMsg 编码(好友私聊 / 普通群文本,最小集)。
 //!
-//! 字段号来自公开协议参考的一致描述,**未对 9.9.33 真实抓包验证**
-//! (`FIELD_*_VERIFIED=false`);未知扩展一概不编——编码只产生已知字段。
+//! N1 起:发送侧形状与字段号 = **field-proven**(r9 私聊 / r18 群聊,
+//! 实例 24316/27624 送达+渲染);编码本体已迁至共享 codec
+//! `caligo_model::qq_wire::send`(bridge/core 共用,golden fixtures 见
+//! caligo-model tests/qq_wire_golden.rs)。本模块保留 core 侧类型与错误
+//! 映射,是共享 codec 的薄封装。
+//!
+//! 与旧公开参考形状的差异(以现场实证为准):
+//! - 私聊路由主键是 **uid**(C2C{2}),不是 varint uin;
+//! - 群请求**不带 ContentHead**(旧形状总带);
+//! - 富文本含元素37 + 键6 时间戳(旧形状无)。
 
-use super::wire::Writer;
 use super::{CodecError, MAX_MESSAGE_BYTES};
+use caligo_model::qq_wire::send as wire;
 
-/// 公开参考的字段号(待真实抓包核验)。
-pub const FIELD_ROUTING_HEAD: u32 = 1;
-pub const FIELD_CONTENT_HEAD: u32 = 2;
-pub const FIELD_BODY: u32 = 3;
-pub const FIELD_CLIENT_SEQ: u32 = 4;
-pub const FIELD_RANDOM: u32 = 5;
-
-pub const FIELD_ROUTING_GROUP: u32 = 1; // routing.group.group_code
-pub const FIELD_ROUTING_FRIEND: u32 = 1; // routing.friend.uin
-pub const FIELD_CONTENT_TYPE: u32 = 1; // content.type: 1=friend 文本, 82=群文本
-pub const FIELD_BODY_RICH: u32 = 1; // body.rich_text
-pub const FIELD_RICH_ELEMS: u32 = 2; // rich_text.elems
-pub const FIELD_ELEM_TEXT: u32 = 1; // elem.text
-pub const FIELD_TEXT_STR: u32 = 1; // text.str
-
-pub const CONTENT_TYPE_FRIEND_TEXT: u64 = 1;
-pub const CONTENT_TYPE_GROUP_TEXT: u64 = 82;
-
-pub const FIELD_NUMBERS_VERIFIED: bool = false;
+/// 字段号已由 r9/r18 现场实证(细节与常量见 caligo_model::qq_wire::send)。
+pub const FIELD_NUMBERS_VERIFIED: bool = true;
 
 /// 目标会话(编入 routing head)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendTarget {
-    /// 普通群:群号(u64 群码)。
+    /// 普通群:群号(u64 群码;wire 为 varint,非字符串)。
     Group { group_code: u64 },
-    /// 好友私聊:对端 UIN。
-    Friend { uin: u64 },
+    /// 好友私聊:对端 UIN + peerUid。
+    /// `uid` 为 None 时退回 varint uin 路由:可送达但对端渲染
+    /// "不支持查看"(r6 实证)——生产路径必须提供 uid。
+    Friend { uin: u64, uid: Option<String> },
 }
 
-/// 编码一条文本发送请求(纯函数;不触网络)。
+/// 编码一条文本发送请求(纯函数;不触网络;时间显式入参)。
+///
+/// 形状 = SendMsgReq{1: RH, [2: CH(仅私聊)], 3: Body{1: Rich{2: [元素37, 文本]}},
+/// 4: seq, 5: rand, 6: {1: ts}}。
 pub fn encode_pb_send_msg(
     target: &SendTarget,
     text: &str,
     client_seq: u32,
     random: u32,
+    platform_ts: u64,
 ) -> Result<Vec<u8>, CodecError> {
     if text.len() > MAX_MESSAGE_BYTES {
         return Err(CodecError::TooLarge { limit: MAX_MESSAGE_BYTES });
     }
-    let mut w = Writer::new();
-    w.nested(FIELD_ROUTING_HEAD, |r| match target {
-        SendTarget::Group { group_code } => r.varint_field(FIELD_ROUTING_GROUP, *group_code),
-        SendTarget::Friend { uin } => r.varint_field(FIELD_ROUTING_FRIEND, *uin),
-    });
-    let content_type = match target {
-        SendTarget::Group { .. } => CONTENT_TYPE_GROUP_TEXT,
-        SendTarget::Friend { .. } => CONTENT_TYPE_FRIEND_TEXT,
+    let out = match target {
+        SendTarget::Group { group_code } => {
+            wire::encode_group_text(*group_code, text, client_seq, random, platform_ts)
+        }
+        SendTarget::Friend { uin, uid } => {
+            wire::encode_friend_text(*uin, uid.as_deref(), text, client_seq, random, platform_ts)
+        }
     };
-    w.nested(FIELD_CONTENT_HEAD, |c| {
-        c.u32_field(FIELD_CONTENT_TYPE, content_type as u32);
-    });
-    w.nested(FIELD_BODY, |b| {
-        b.nested(FIELD_BODY_RICH, |rich| {
-            rich.nested(FIELD_RICH_ELEMS, |elem| {
-                elem.nested(FIELD_ELEM_TEXT, |t| {
-                    t.string_field(FIELD_TEXT_STR, text);
-                });
-            });
-        });
-    });
-    w.u32_field(FIELD_CLIENT_SEQ, client_seq);
-    w.u32_field(FIELD_RANDOM, random);
-    Ok(w.finish())
+    out.map_err(|e| match e {
+        wire::EncodeError::TooLarge { limit } => CodecError::TooLarge { limit },
+    })
 }
 
 #[cfg(test)]
@@ -76,63 +60,130 @@ mod tests {
     use super::super::wire::{Reader, WT_LEN, WT_VARINT};
     use super::*;
 
-    /// 自生成 fixture 的 roundtrip:字段位置/类型/文本完整(规格未验证前的
-    /// 最小回归;真实抓包到位后以 captured fixture 替换)。
+    /// 已证形状合同(r9/r18):私聊 = RH{1: C2C{2: uid}} + CH 三键 + 元素37;
+    /// 群 = RH{2: Grp{1: varint}},**无 CH**。golden 逐字节在
+    /// caligo-model tests/qq_wire_golden.rs;此处验证 core 映射层不变形。
     #[test]
-    fn roundtrip_group_and_friend() {
-        for (target, want_type) in [
-            (SendTarget::Group { group_code: 123456789 }, CONTENT_TYPE_GROUP_TEXT),
-            (SendTarget::Friend { uin: 10001 }, CONTENT_TYPE_FRIEND_TEXT),
-        ] {
-            let buf = encode_pb_send_msg(&target, "CALIGO-P5-文本🈯", 7, 9).unwrap();
-            let mut r = Reader::new(&buf).unwrap();
-            let mut saw = std::collections::HashSet::new();
-            let mut got_type = 0u64;
-            let mut got_text = String::new();
-            while !r.at_end() {
-                let t = r.tag().unwrap();
-                saw.insert((t.field, t.wire));
-                match (t.field, t.wire) {
-                    (FIELD_ROUTING_HEAD, WT_LEN) => {
-                        let mut sub = r.enter().unwrap();
-                        let st = sub.tag().unwrap();
-                        assert_eq!(st.field, FIELD_ROUTING_GROUP);
-                        let _v = sub.varint().unwrap();
-                    }
-                    (FIELD_CONTENT_HEAD, WT_LEN) => {
-                        let mut sub = r.enter().unwrap();
-                        let st = sub.tag().unwrap();
-                        assert_eq!(st.field, FIELD_CONTENT_TYPE);
-                        got_type = sub.varint().unwrap();
-                    }
-                    (FIELD_BODY, WT_LEN) => {
-                        let mut b = r.enter().unwrap();
-                        let bt = b.tag().unwrap();
-                        assert_eq!(bt.field, FIELD_BODY_RICH);
-                        let mut rich = b.enter().unwrap();
-                        let rt = rich.tag().unwrap();
-                        assert_eq!(rt.field, FIELD_RICH_ELEMS);
+    fn proven_shape_group_and_friend() {
+        // 群:顶层 {1,3,4,5,6},无字段 2;路由 RH{2: Grp{1: varint code}}。
+        let g = encode_pb_send_msg(
+            &SendTarget::Group { group_code: 70_000_001 },
+            "CALIGO-P5-文本🈯",
+            7,
+            9,
+            1_760_000_000,
+        )
+        .unwrap();
+        let mut r = Reader::new(&g).unwrap();
+        let mut top = std::collections::HashSet::new();
+        let mut grp_code = 0u64;
+        let mut got_text = String::new();
+        while !r.at_end() {
+            let t = r.tag().unwrap();
+            top.insert((t.field, t.wire));
+            match (t.field, t.wire) {
+                (1, WT_LEN) => {
+                    let mut rh = r.enter().unwrap();
+                    let rt = rh.tag().unwrap();
+                    assert_eq!(rt.field, 2, "群路由 = RH.2 Grp");
+                    let mut grp = rh.enter().unwrap();
+                    let gt = grp.tag().unwrap();
+                    assert_eq!(gt.field, 1);
+                    grp_code = grp.varint().unwrap();
+                }
+                (3, WT_LEN) => {
+                    let mut b = r.enter().unwrap();
+                    let bt = b.tag().unwrap();
+                    assert_eq!(bt.field, 1, "body = {{1: rich}}(r8 修正)");
+                    let mut rich = b.enter().unwrap();
+                    let mut saw_elem37 = false;
+                    let mut first = true;
+                    while !rich.at_end() {
+                        let et = rich.tag().unwrap();
+                        assert_eq!(et.field, 2, "rich.elems");
+                        if first {
+                            // 第一元素 = 元素37 群版(118B,aa 02 73…)。
+                            let raw = rich.bytes_value().unwrap();
+                            saw_elem37 = raw.starts_with(&[0xaa, 0x02, 0x73]);
+                            first = false;
+                            continue;
+                        }
                         let mut elem = rich.enter().unwrap();
-                        let et = elem.tag().unwrap();
-                        assert_eq!(et.field, FIELD_ELEM_TEXT);
+                        let et2 = elem.tag().unwrap();
+                        assert_eq!(et2.field, 1);
                         let mut txt = elem.enter().unwrap();
                         let tt = txt.tag().unwrap();
-                        assert_eq!(tt.field, FIELD_TEXT_STR);
+                        assert_eq!(tt.field, 1);
                         got_text = String::from_utf8(txt.bytes_value().unwrap().to_vec()).unwrap();
                     }
-                    (FIELD_CLIENT_SEQ, WT_VARINT) => {
-                        assert_eq!(r.varint().unwrap(), 7);
-                    }
-                    (FIELD_RANDOM, WT_VARINT) => {
-                        assert_eq!(r.varint().unwrap(), 9);
-                    }
-                    _ => r.skip(t).unwrap(),
+                    assert!(saw_elem37, "元素37 缺失 → 对端不渲染");
                 }
+                (4, WT_VARINT) => assert_eq!(r.varint().unwrap(), 7),
+                (5, WT_VARINT) => assert_eq!(r.varint().unwrap(), 9),
+                (6, WT_LEN) => {
+                    let mut f6 = r.enter().unwrap();
+                    let ft = f6.tag().unwrap();
+                    assert_eq!(ft.field, 1);
+                    assert_eq!(f6.varint().unwrap(), 1_760_000_000);
+                }
+                _ => r.skip(t).unwrap(),
             }
-            assert_eq!(got_type, want_type);
-            assert_eq!(got_text, "CALIGO-P5-文本🈯", "完整 UTF-8 正文");
-            assert!(saw.contains(&(FIELD_CLIENT_SEQ, WT_VARINT)));
         }
+        assert_eq!(grp_code, 70_000_001);
+        assert_eq!(got_text, "CALIGO-P5-文本🈯", "完整 UTF-8 正文");
+        assert!(!top.contains(&(2, WT_LEN)), "群请求不带 ContentHead(r17/r18 实证)");
+    }
+
+    #[test]
+    fn proven_shape_friend_routes_by_uid() {
+        let f = encode_pb_send_msg(
+            &SendTarget::Friend { uin: 10001, uid: Some("u_GOLDENFIXpeer00000000A".into()) },
+            "hi",
+            1,
+            2,
+            1_760_000_000,
+        )
+        .unwrap();
+        let mut r = Reader::new(&f).unwrap();
+        let t = r.tag().unwrap();
+        assert_eq!((t.field, t.wire), (1, WT_LEN));
+        let mut rh = r.enter().unwrap();
+        let rt = rh.tag().unwrap();
+        assert_eq!(rt.field, 1, "私聊路由 = RH.1 C2C");
+        let mut c2c = rh.enter().unwrap();
+        let ct = c2c.tag().unwrap();
+        assert_eq!(ct.field, 2, "C2C{{2: uid}}(r6:非 varint uin)");
+        assert_eq!(c2c.bytes_value().unwrap(), b"u_GOLDENFIXpeer00000000A");
+        // CH 存在且为三键 {1:1, 2:0, 3:0}。
+        let t2 = r.tag().unwrap();
+        assert_eq!((t2.field, t2.wire), (2, WT_LEN));
+        let mut ch = r.enter().unwrap();
+        let mut keys = Vec::new();
+        while !ch.at_end() {
+            let k = ch.tag().unwrap();
+            keys.push((k.field, ch.varint().unwrap()));
+        }
+        assert_eq!(keys, vec![(1, 1), (2, 0), (3, 0)]);
+    }
+
+    /// uid 缺席的降级路径可编码(可送达但不渲染;r6),类型保持 uin 路由。
+    #[test]
+    fn friend_without_uid_falls_back_to_uin_route() {
+        let f = encode_pb_send_msg(
+            &SendTarget::Friend { uin: 10001, uid: None },
+            "hi",
+            1,
+            2,
+            1_760_000_000,
+        )
+        .unwrap();
+        let mut r = Reader::new(&f).unwrap();
+        let t = r.tag().unwrap();
+        assert_eq!((t.field, t.wire), (1, WT_LEN));
+        let mut rh = r.enter().unwrap();
+        let rt = rh.tag().unwrap();
+        assert_eq!((rt.field, rt.wire), (1, WT_VARINT), "无 uid → varint uin");
+        assert_eq!(rh.varint().unwrap(), 10001);
     }
 
     /// 超长正文拒绝(有界)。
@@ -140,7 +191,13 @@ mod tests {
     fn oversize_text_rejected() {
         let big = "x".repeat(super::MAX_MESSAGE_BYTES + 1);
         assert!(matches!(
-            encode_pb_send_msg(&SendTarget::Friend { uin: 1 }, &big, 0, 0),
+            encode_pb_send_msg(
+                &SendTarget::Friend { uin: 1, uid: None },
+                &big,
+                0,
+                0,
+                1_760_000_000
+            ),
             Err(CodecError::TooLarge { .. })
         ));
     }
