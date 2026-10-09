@@ -171,3 +171,10 @@ QQ 主进程(wrapper 加载者)于本轮分析中途退出(20016 消失,现存 5
 2. 注入 + `--g2-run-report`:验 g2_manager/g2_swap/g2_restore 阶段全 true、
    无座位丢失;
 3. 采样:10 私聊 + 10 群唯一编号消息 → captured fixture 回填 P5 字段验证。
+
+## 8. G2 判定(2026-10-09):PASS
+
+机制 = begin_node 单指针交换(§7.4)。现场证据:21732 实例 4 次窗口,
+注册/接收/恢复全 PASS,私聊+群聊 0 丢失,restore 对称,QQ 存活。
+开放项(不阻塞):元素记录 sender/chat_type/ts 偏移、120s 窗口上限、
+shim 实例现场覆盖、CJK 正文样本。见 ledger 同日条目。
