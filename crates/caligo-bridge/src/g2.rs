@@ -17,8 +17,9 @@
 //! 路线 A(+0x140 单观察者交换)保留为弃用代码(§8),运行时不再选择。
 //!
 //! 纪律:
-//! - 证据:msg 对象头 0x40 字节 opaque hexdump(captured fixture,P5 字段
-//!   验证回填用)——**不解析、不猜字段**;
+//! - 证据:msg 对象头 opaque hexdump(captured fixture)——**不解析、不猜
+//!   字段**;r5 起 0x200(64 qword 连续前缀)+ Type S 池快照(深度 2),
+//!   供 N1 记录级字段测绘;
 //! - 环形缓冲:回调只做内存拷贝,落盘由运行线程在窗口结束后统一进行;
 //! - 伪节点 value(+0x20 起)除 listener 指针外全零:若窗口内 QQ 插入节点
 //!   触发 begin 重算/键比较,零值按"空键"处理,不会解引用越界;
@@ -58,11 +59,35 @@ pub struct G2Ctx {
 }
 
 /// 捕获环(回调侧 push,窗口结束 drain)。有界:满则丢弃并计数。
+///
+/// r5 扩展(0x200 对象图测绘):头从 0x40 扩到 0x200(64 qword,连续前缀
+/// 读取,部分可读也保留);Type S 头的池指针(+0x28/+0x30)在回调内做
+/// 0x80 字节快照(对象图深度 2,在池对象被 QQ 释放前固定证据)。
 struct Ring {
-    items: Mutex<Vec<(u64, u64)>>, // (msg_obj 头 8 字节, 次八字节)
-    dropped: AtomicU64,
-    pushed: AtomicU64,
-    cap: usize,
+    heads: Mutex<Vec<HeadRec>>,
+    pools: Mutex<Vec<PoolRec>>,
+    dropped_heads: AtomicU64,
+    dropped_pools: AtomicU64,
+    pushed_heads: AtomicU64,
+    pushed_pools: AtomicU64,
+    cap_heads: usize,
+    cap_pools: usize,
+}
+
+/// 一条通知头(最多 64 qword = 0x200;`got` = 实际读到的连续前缀长度)。
+struct HeadRec {
+    shape: u8, // 'A' = arg2 即对象;'B' = arg2 为 &{obj,ctrl}
+    got: usize,
+    q: [u64; 64],
+}
+
+/// 池快照(Type S 头 +0x28/+0x30 指向的批次共享池,深度 2)。
+struct PoolRec {
+    head_idx: u32,
+    slot: u8, // 6 或 7(头内 qword 序号)
+    addr: u64,
+    got: usize,
+    q: [u64; POOL_QWORDS],
 }
 
 static RING: std::sync::OnceLock<Ring> = std::sync::OnceLock::new();
@@ -76,10 +101,14 @@ fn r_unreadable() -> &'static std::sync::atomic::AtomicU64 {
 
 fn ring() -> &'static Ring {
     RING.get_or_init(|| Ring {
-        items: Mutex::new(Vec::new()),
-        dropped: AtomicU64::new(0),
-        pushed: AtomicU64::new(0),
-        cap: 512,
+        heads: Mutex::new(Vec::new()),
+        pools: Mutex::new(Vec::new()),
+        dropped_heads: AtomicU64::new(0),
+        dropped_pools: AtomicU64::new(0),
+        pushed_heads: AtomicU64::new(0),
+        pushed_pools: AtomicU64::new(0),
+        cap_heads: 256,
+        cap_pools: 512,
     })
 }
 
@@ -102,27 +131,90 @@ unsafe extern "system" fn g2_noop2(_a: *mut c_void, _b: *mut c_void) {}
 unsafe extern "system" fn g2_noop3(_a: *mut c_void, _b: *mut c_void, _c: *mut c_void) {}
 
 /// slot6 处理器:捕获 msg 对象头 → 环。无转发需求(QQ 监听器被原生遍历通知)。
-/// 读对象头 0x40 字节(8 qword,全 RPM-self)。任一不可读返回 None。
-fn read_head(obj: usize) -> Option<[u64; 8]> {
-    let mut head = [0u64; 8];
-    for (i, h) in head.iter_mut().enumerate() {
-        *h = safe_read_qword(obj + i * 8)?;
+/// 读对象头最多 0x200 字节(64 qword 连续前缀,全 RPM-self;部分可读保留)。
+const HEAD_QWORDS: usize = 64;
+// 池快照 4KB(512 qword):r4 归档的正文 TLV 在池 +0xc62 处,128B 快照不够。
+const POOL_QWORDS: usize = 512;
+// Type S 头池指针位(2026-10-10 实例 27108 实测):+0x30/+0x38 = q6/q7
+// (q4=0x31、q5=0x25 常量;早前 [5,6] 系 r4 jsonl 打包偏移误读)。
+const POOL_SLOTS: [usize; 2] = [6, 7];
+
+/// 连续前缀读取:从 obj 起逐 qword 读,首个不可读即停;返回实际读到数。
+fn read_head_ext(obj: usize) -> (usize, [u64; HEAD_QWORDS]) {
+    let mut head = [0u64; HEAD_QWORDS];
+    let mut got = 0usize;
+    while got < HEAD_QWORDS {
+        match safe_read_qword(obj + got * 8) {
+            Some(v) => {
+                head[got] = v;
+                got += 1;
+            }
+            None => break,
+        }
     }
-    Some(head)
+    (got, head)
 }
 
-fn push_head(head: [u64; 8]) {
-    let r = ring();
-    let mut q = r.items.lock().unwrap();
-    if q.len() < r.cap {
-        // 打包 8 qword → 4 条 (u64,u64) 记录(顺序保留)。
-        for c in 0..4 {
-            q.push((head[c * 2], head[c * 2 + 1]));
-        }
-        r.pushed.fetch_add(4, Ordering::Relaxed);
-    } else {
-        r.dropped.fetch_add(1, Ordering::Relaxed);
+/// Type S 判形(与 native_receive::classify 同准则):SSO 短形态合法。
+fn sso_like(q0: u64) -> bool {
+    // 短形态 len∈1..=22 即认(Type P 判定由 addr_plausible 承担;
+    // 2026-10-10 现场教训:10 位账号填满首 qword,高位非零是常态)。
+    let b0 = (q0 & 0xFF) as u8;
+    b0 & 1 == 0 && (1..=22).contains(&((b0 >> 1) as usize))
+}
+
+fn snapshot_pools(head_idx: u32, head: &[u64; HEAD_QWORDS]) {
+    if !sso_like(head[0]) {
+        return; // 仅 Type S;Type P 的 +0x28/+0x30 语义未定证
     }
+    let r = ring();
+    for &slot in POOL_SLOTS.iter() {
+        let addr = head[slot] as usize;
+        if addr < 0x1_0000 || addr & 7 != 0 {
+            continue;
+        }
+        let mut q = [0u64; POOL_QWORDS];
+        let mut got = 0usize;
+        while got < POOL_QWORDS {
+            match safe_read_qword(addr + got * 8) {
+                Some(v) => {
+                    q[got] = v;
+                    got += 1;
+                }
+                None => break,
+            }
+        }
+        if got == 0 {
+            continue;
+        }
+        let mut pools = r.pools.lock().unwrap();
+        if pools.len() < r.cap_pools {
+            pools.push(PoolRec { head_idx, slot: slot as u8, addr: addr as u64, got, q });
+            r.pushed_pools.fetch_add(1, Ordering::Relaxed);
+        } else {
+            r.dropped_pools.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn push_head(shape: u8, got: usize, head: [u64; HEAD_QWORDS]) {
+    if got < 8 {
+        // 不足旧版 0x40:按不可读计(旧合同保底口径)。
+        r_unreadable().fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let r = ring();
+    let idx = {
+        let mut q = r.heads.lock().unwrap();
+        if q.len() >= r.cap_heads {
+            r.dropped_heads.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        q.push(HeadRec { shape, got, q: head });
+        (q.len() - 1) as u32
+    };
+    r.pushed_heads.fetch_add(1, Ordering::Relaxed);
+    snapshot_pools(idx, &head);
 }
 
 unsafe extern "system" fn g2_slot6(_this: *mut c_void, payload: *mut c_void) {
@@ -138,15 +230,17 @@ unsafe extern "system" fn g2_slot6(_this: *mut c_void, payload: *mut c_void) {
             return;
         }
         let pl = payload as usize;
-        if let Some(head) = read_head(pl) {
-            push_head(head);
+        let (got_a, head_a) = read_head_ext(pl);
+        if got_a >= 8 {
+            push_head(b'A', got_a, head_a);
             return;
         }
         if let Some(inner) = safe_read_qword(pl) {
             let obj = inner as usize;
             if obj != 0 {
-                if let Some(head) = read_head(obj) {
-                    push_head(head);
+                let (got_b, head_b) = read_head_ext(obj);
+                if got_b >= 8 {
+                    push_head(b'B', got_b, head_b);
                     return;
                 }
             }
@@ -388,7 +482,7 @@ pub unsafe fn g2_listen_run(ctx: *const G2Ctx) -> u32 {
     // SAFETY: ctx 由 loader 写入。
     let (wrapper_base, report_path, observe_ms) =
         unsafe { ((*ctx).wrapper_base, (*ctx).report_path, (*ctx).observe_ms) };
-    let observe_ms = observe_ms.min(120_000).max(500);
+    let observe_ms = observe_ms.min(300_000).max(500);
 
     // wrapper 身份核验(getter 租约 + 锚点;沿用 v1 机械)。
     let getter: GetterFn = unsafe { core::mem::transmute(wrapper_base + GETTER_RVA) };
@@ -483,30 +577,55 @@ pub unsafe fn g2_listen_run(ctx: *const G2Ctx) -> u32 {
         );
     }
 
-    // drain 环 → captured fixture。
+    // drain 环 → captured fixture(r5 格式:head200 + pool 快照)。
     let r = ring();
-    let q = r.items.lock().unwrap();
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(report_path_str(report_path)) {
-        for (i, (a, b)) in q.iter().enumerate() {
-            let _ = writeln!(f, "{{\"kind\":\"msg_head\",\"i\":{},\"q0\":{a},\"q1\":{b}}}", i / 4);
+        let heads = r.heads.lock().unwrap();
+        for (i, h) in heads.iter().enumerate() {
+            let qs: Vec<String> = h.q[..h.got].iter().map(|v| format!("{v}")).collect();
+            let _ = writeln!(
+                f,
+                "{{\"kind\":\"head200\",\"i\":{},\"shape\":\"{}\",\"got\":{},\"q\":[{}]}}",
+                i,
+                h.shape as char,
+                h.got,
+                qs.join(",")
+            );
         }
+        drop(heads);
+        let pools = r.pools.lock().unwrap();
+        for p in pools.iter() {
+            let qs: Vec<String> = p.q[..p.got].iter().map(|v| format!("{v}")).collect();
+            let _ = writeln!(
+                f,
+                "{{\"kind\":\"pool\",\"i\":{},\"slot\":{},\"addr\":{},\"got\":{},\"q\":[{}]}}",
+                p.head_idx,
+                p.slot,
+                p.addr,
+                p.got,
+                qs.join(",")
+            );
+        }
+        drop(pools);
         let _ = writeln!(
             f,
-            "{{\"kind\":\"summary\",\"pushed\":{},\"dropped\":{},\"unreadable\":{}}}",
-            r.pushed.load(Ordering::Relaxed),
-            r.dropped.load(Ordering::Relaxed),
+            "{{\"kind\":\"summary\",\"pushed_heads\":{},\"dropped_heads\":{},\"pushed_pools\":{},\"dropped_pools\":{},\"unreadable\":{}}}",
+            r.pushed_heads.load(Ordering::Relaxed),
+            r.dropped_heads.load(Ordering::Relaxed),
+            r.pushed_pools.load(Ordering::Relaxed),
+            r.dropped_pools.load(Ordering::Relaxed),
             UNREADABLE.load(Ordering::Relaxed)
         );
     }
-    drop(q);
     stage(
         report_path,
         "g2_done",
         true,
         &format!(
-            "captured={} unreadable={}",
-            r.pushed.load(Ordering::Relaxed),
+            "captured_heads={} captured_pools={} unreadable={}",
+            r.pushed_heads.load(Ordering::Relaxed),
+            r.pushed_pools.load(Ordering::Relaxed),
             UNREADABLE.load(Ordering::Relaxed)
         ),
     );
@@ -544,12 +663,14 @@ mod route_a_deprecated {
         // SAFETY: 边界内只做有界内存读 + ring 拷贝 + 转发;panic 隔离。
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // 同 slot6 纪律与双形状逻辑。
-            if let Some(head) = read_head(msg_pair as usize) {
-                push_head(head);
+            let (got_a, head_a) = read_head_ext(msg_pair as usize);
+            if got_a >= 8 {
+                push_head(b'A', got_a, head_a);
             } else if let Some(inner) = safe_read_qword(msg_pair as usize) {
                 let obj = inner as usize;
-                if let Some(head) = read_head(obj) {
-                    push_head(head);
+                let (got_b, head_b) = read_head_ext(obj);
+                if got_b >= 8 {
+                    push_head(b'B', got_b, head_b);
                 } else {
                     r_unreadable().fetch_add(1, Ordering::Relaxed);
                 }
@@ -686,8 +807,9 @@ mod tests {
             );
 
             // 垫片路径通知(活实例实证):listener->vtbl slot3(+0x18) 落入捕获环。
-            let pushed_before = ring().pushed.load(Ordering::Relaxed);
-            let msg_obj = [0xCADEu64, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8];
+            let pushed_before = ring().pushed_heads.load(Ordering::Relaxed);
+            // 64 qword 可读缓冲(Box 泄漏保活;模拟真实对象头内存)。
+            let msg_obj = Box::leak(Box::new([0xCADEu64; HEAD_QWORDS]));
             let pair = [msg_obj.as_ptr() as u64, 0u64];
             let lptr = ours_obj as *mut usize;
             let vptr = *lptr; // 我们的对象 vptr = OUR_VTABLE
@@ -696,7 +818,7 @@ mod tests {
                 unsafe { core::mem::transmute(core::ptr::read_volatile((vptr + 3 * 8) as *const usize)) };
             unsafe { f(ours_obj, core::ptr::from_ref(&pair).cast::<c_void>().cast_mut()) };
             assert!(
-                ring().pushed.load(Ordering::Relaxed) > pushed_before,
+                ring().pushed_heads.load(Ordering::Relaxed) > pushed_before,
                 "slot3(+0x18) 通知已入捕获环"
             );
         }

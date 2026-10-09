@@ -15,7 +15,7 @@
 //! - Clean 仅在原生侧确认排空时给出,否则 Quarantined(T13)。
 
 use crate::native_response::{
-    Cookie, Completion, RegisterError, ResponseLedger, ResponseOutcome,
+    Cookie, Completion, ResponseLedger, ResponseOutcome,
 };
 
 /// 附加证据(调用方已完成门核对后传入;本模块如实登记,不重复核对)。

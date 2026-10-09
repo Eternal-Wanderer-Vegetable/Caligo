@@ -42,7 +42,7 @@ impl CapturedRecordHead {
     fn classify(q: [u64; 8]) -> Self {
         let b0 = (q[0] & 0xFF) as u8;
         let sso_len = (b0 >> 1) as usize;
-        let sso_like = b0 & 1 == 0 && (1..=22).contains(&sso_len) && (q[0] >> 48) == 0;
+        let sso_like = b0 & 1 == 0 && (1..=22).contains(&sso_len);
         let heap_like = crate::g3::addr_plausible(q[0]);
         if !sso_like && heap_like {
             Self::Pointer(q)
