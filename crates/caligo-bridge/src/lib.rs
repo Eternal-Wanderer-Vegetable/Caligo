@@ -49,6 +49,8 @@ pub mod daemon_client;
 pub mod native_abi;
 pub mod native_handle;
 pub mod native_msf;
+pub mod native_receive;
+pub mod native_response;
 pub mod envrun;
 pub mod exec;
 pub mod gate;
