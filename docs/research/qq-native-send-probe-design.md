@@ -119,16 +119,21 @@ MSF 层  MSFService::SendSSORequestInternal(0x732A80, msf_service.cc)
 - LAB:`g3` 模块测试(存根编码、捕获记录形状、恢复对称——假宿主);
 - 现场:`evidence/p6-g3/`(注入 jsonl + 捕获 fixture + 事后 observe 复查)。
 
-## 3. G3-P2 受控发送(P1 之后,本文仅登记方向)
+## 3. G3-P2 受控发送(2026-10-09 实现 + 首次现场 PASS)
 
-1. 以 P1 实证的 blob 类型构造请求体(P5 编码器产出 PbSendMsg 字节;
-   分配须经 QQ 侧分配器——具体途径依 P1 类型定,`[assumed]`)。
-2. 调 `0x7329f6`(成员适配器,bool=1)或直接 slot7:cmd=`MessageSvc.PbSendMsg`,
-   目标=机器人账号;回调块自建({payload 0x10, callable@+0x10, dtor@+0x18})。
-3. 响应侧:注册消费者途径(F8)或先以 G2 接收侧自同步推送(olpush)为相关证据。
-4. 线程准入:G1 先例(getter 从我们线程可调)+ F6 跨线程二次派发结构支持;
-   现场首次提交即为终验。
-5. 通过门:机器人账号收到测试消息 + 全程零崩溃 + 恢复对称。
+1. ~~blob 类型~~ **已定案(phaseF)**:libc++ `vector<uint8>`,data 须
+   QQ 分配器(0xB75000 operator new);vector 头 24B 按指针传递、同步移转;
+2. ~~cmd~~ `MessageSvc.PbSendMsg`;param_2(本机账号串)从活对象
+   svc+0x1f0 逐字节复制(零编码猜测);回调 = QQ 原生空函数
+   (0x72D596/0x72D5C8;MSF 层回调本就被置空,结果路由走 BaseMsgMgr
+   token 注册,我们无消费者);
+3. 响应侧:无消费者(见 2)——发送失败为静默丢弃,不崩溃;
+4. 线程准入:G1 getter 先例 + dispatcher 跨线程二次派发;**现场首验 PASS**
+   (2026-10-09 11:24,实例 24316,§见 ledger 终章);
+5. 请求体:最小 SendMsgReq(字段号与 caligo-core qq_protocol::send 同源,
+   verified=false;本次发送 = 该编码首次真实核验)。
+6. 通过门:对端(主账号 3089665724)收到测试消息 + 全程零崩溃。
+   前者待现场确认,后者已 PASS。
 
 ## 4. 边界
 

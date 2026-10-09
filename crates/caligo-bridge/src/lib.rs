@@ -403,6 +403,26 @@ pub unsafe extern "system" fn caligo_g3_probe_run(ctx: *const g3::G3Ctx) -> u32 
     unsafe { g3::g3_probe_run(ctx) }
 }
 
+/// G3-P2 受控发送(P7;`g3.rs`):单次调用 SendSSORequestInternal,
+/// 零插桩、无常驻修改。发送结果异步,验证 = 对端收到消息。
+///
+/// K4-D0 门控:普通构建返回 [`gate::ERR_RESEARCH_DISABLED`]。
+///
+/// # Safety
+///
+/// `ctx` 必须指向本进程内有效的 [`g3::G3SendCtx`]。
+#[no_mangle]
+pub unsafe extern "system" fn caligo_g3_send_run(ctx: *const g3::G3SendCtx) -> u32 {
+    if let Some(code) = gate::reject_legacy() {
+        return code;
+    }
+    if ctx.is_null() {
+        return probe_code::ERR_NULL_PATH;
+    }
+    // SAFETY: ctx 由 loader 写入且位于本进程。
+    unsafe { g3::g3_send_run(ctx) }
+}
+
 pub unsafe extern "system" fn caligo_obs_run2(ctx: *const obs::ObsCtx) -> u32 {
     if let Some(code) = gate::reject_legacy() {
         return code;

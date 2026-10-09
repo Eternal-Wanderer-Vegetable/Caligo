@@ -49,6 +49,8 @@ caligo-cli <K1 probe>
                     [--native-run-report <nr.jsonl> --native-run-ms <ms>]
                     [--g2-run-report <g2.jsonl> --g2-run-ms <ms>]
                     [--g3-run-report <g3.jsonl> --g3-run-ms <ms>]
+                    [--g3-send-report <g3s.jsonl> --g3-send-peer <uin>
+                     --g3-send-text <text> [--g3-send-seq <n>] [--g3-send-rand <n>]]
                     [--register-entry] [--wait-ms <ms>]
                     [--intr-report <intr.jsonl> --intr-env <ptr-hex>]
                     [--intr-vftable <va-hex>] [--intr-wait-ms <ms>]
@@ -920,6 +922,11 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut g2_run_ms: u32 = 10_000;
     let mut g3_run_report: Option<PathBuf> = None;
     let mut g3_run_ms: u32 = 120_000;
+    let mut g3_send_report: Option<PathBuf> = None;
+    let mut g3_send_peer: u64 = 0;
+    let mut g3_send_text: Option<String> = None;
+    let mut g3_send_seq: u32 = 1;
+    let mut g3_send_rand: u32 = 42;
     let mut env_report: Option<PathBuf> = None;
     let mut register_entry = false;
     let mut confirmed = false;
@@ -1022,6 +1029,41 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => g3_run_ms = v,
                 None => {
                     eprintln!("--g3-run-ms 需要数字参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-send-report" => match next(&mut i) {
+                Some(v) => g3_send_report = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("--g3-send-report 需要路径参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-send-peer" => match next(&mut i).and_then(|v| v.parse().ok()) {
+                Some(v) => g3_send_peer = v,
+                None => {
+                    eprintln!("--g3-send-peer 需要数字 uin 参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-send-text" => match next(&mut i) {
+                Some(v) => g3_send_text = Some(v.to_string()),
+                None => {
+                    eprintln!("--g3-send-text 需要文本参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-send-seq" => match next(&mut i).and_then(|v| v.parse().ok()) {
+                Some(v) => g3_send_seq = v,
+                None => {
+                    eprintln!("--g3-send-seq 需要数字参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-send-rand" => match next(&mut i).and_then(|v| v.parse().ok()) {
+                Some(v) => g3_send_rand = v,
+                None => {
+                    eprintln!("--g3-send-rand 需要数字参数");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1229,6 +1271,24 @@ fn cmd_inject(args: &[String]) -> ExitCode {
         std::fs::OpenOptions::new().create(true).append(true).open(&p).ok();
         p
     });
+    let g3_send_report = g3_send_report.map(|p| {
+        std::fs::OpenOptions::new().create(true).append(true).open(&p).ok();
+        p
+    });
+    let g3_send = match (&g3_send_report, &g3_send_text) {
+        (Some(p), Some(text)) => {
+            if g3_send_peer == 0 {
+                eprintln!("--g3-send-text 需要配对 --g3-send-peer");
+                return ExitCode::FAILURE;
+            }
+            Some((p.as_path(), g3_send_peer, text.as_str(), g3_send_seq, g3_send_rand))
+        }
+        (None, None) => None,
+        _ => {
+            eprintln!("--g3-send-report/--g3-send-text 需成对提供");
+            return ExitCode::FAILURE;
+        }
+    };
     let obs_report = match obs_report {
         Some(p) => {
             let abs = match to_absolute(&p) {
@@ -1464,6 +1524,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             g2_run_ms,
             g3_run_report.as_deref(),
             g3_run_ms,
+            g3_send,
         )
     };
     match outcome {

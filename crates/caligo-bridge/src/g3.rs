@@ -505,8 +505,7 @@ struct ServicePair {
     ctrl: *mut c_void,
 }
 
-/// G3-P1(v3)探测主入口(loader 经 `caligo_g3_probe_run` 远程线程调用)。
-///
+/// G3-P1(v3)探测主入口(loader 经 `caligo_g3_probe_run` 远程线程调用)。///
 /// 返回 [`OK`] 时机制链(adopt→site→swap→restore→drain)已完整走完;
 /// captured=0 属正常(窗口内无 SSO 发送),看报告 stages 判定。
 ///
@@ -695,6 +694,296 @@ pub unsafe fn g3_probe_run(ctx: *const G3Ctx) -> u32 {
         );
     }
     stage(report_path, "g3_done", true, &format!("captured={pushed} dropped={dropped}"));
+    OK
+}
+
+// ===== G3-P2 受控发送(无插桩,单次调用;2026-10-09 用户批准)=====
+//
+// 静态依据(r4-g3 phaseF + send-probe-design §1):
+// - 入口 = MSFService::SendSSORequestInternal(0x732A80),五参:
+//   (this, const string& cmd, vector<uint8>& body /*移转*/, bool, callback32B& /*移转*/);
+//   1b4e4ec(transport slot7)语义:未连接同步失败(token=0 不排队),已连接
+//   组闭包经 D32138 提交全局 dispatcher(跨线程唤醒)——单次直接调用,
+//   **零插桩、零常驻修改**;
+// - body = libc++ vector<uint8>{begin,end,cap}(phaseF 0x21866d0 定案:
+//   BaseMsgMgr 经 vtbl+0x100 取得,内容 = 编码好的请求体);task 析构由 QQ
+//   侧释放 → **data 必须来自 QQ 分配器**(b75000 = 全局 operator new);
+// - cmd = "MessageSvc.PbSendMsg"(chat_type 常规);回调 = QQ 自身空函数
+//   (0x72D596/0x72D5C8)——MSF 层回调本就被 b7f6f6 置空,结果路由走
+//   BaseMsgMgr token 注册表,我们无消费者,空回调 = QQ 原生 inert 表示;
+// - param_2(uin 串)从活对象 svc+0x1f0 逐字节复制(短形态内联;长形态
+//   头部原样保留、data 换为我们 QQ 分配的副本)——零编码猜测。
+//
+// 请求体:最小 SendMsgReq protobuf(字段号与 caligo-core
+// qq_protocol::send 同源,verified=false——本次发送同时是该编码的首次
+// 真实核验;桥不依赖 core,内联同款 writer)。
+
+const SEND_SSO_RVA: usize = 0x732A80;
+const QQ_OPERATOR_NEW_RVA: usize = 0xB75000;
+const EMPTY_FN_CALLABLE_RVA: usize = 0x72D596;
+const EMPTY_FN_DTOR_RVA: usize = 0x72D5C8;
+/// MSFService+0x1f0 = 本机账号串(732a80 param_2 的源)。
+const SVC_FIELD_SELF_STRING: usize = 0x1F0;
+
+// 与 caligo-core qq_protocol::send 常量保持同步。
+const PB_F_ROUTING_HEAD: u32 = 1;
+const PB_F_CONTENT_HEAD: u32 = 2;
+const PB_F_BODY: u32 = 3;
+const PB_F_CLIENT_SEQ: u32 = 4;
+const PB_F_RANDOM: u32 = 5;
+const PB_F_FRIEND_UIN: u32 = 1;
+const PB_F_CONTENT_TYPE: u32 = 1;
+const PB_F_BODY_RICH: u32 = 1;
+const PB_F_RICH_ELEMS: u32 = 2;
+const PB_F_ELEM_TEXT: u32 = 1;
+const PB_F_TEXT_STR: u32 = 1;
+const PB_CONTENT_TYPE_FRIEND_TEXT: u64 = 1;
+
+pub const ERR_SEND_BODY: u32 = 41;
+pub const ERR_SEND_ALLOC: u32 = 42;
+
+#[repr(C)]
+pub struct G3SendCtx {
+    pub wrapper_base: usize,
+    pub report_path: *const u16,
+    pub peer_uin: u64,
+    pub text_ptr: *const u16, // NUL 结尾 UTF-16(远程缓冲,loader 写入)
+    pub client_seq: u32,
+    pub random: u32,
+}
+
+fn pb_varint(out: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let b = (v & 0x7F) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(b);
+            break;
+        }
+        out.push(b | 0x80);
+    }
+}
+
+fn pb_tag(out: &mut Vec<u8>, field: u32, wire: u32) {
+    pb_varint(out, (((field as u64) << 3) | wire as u64) & 0xFFFF_FFFF);
+}
+
+fn pb_varint_field(out: &mut Vec<u8>, field: u32, v: u64) {
+    pb_tag(out, field, 0);
+    pb_varint(out, v);
+}
+
+fn pb_len_field(out: &mut Vec<u8>, field: u32, body: &[u8]) {
+    pb_tag(out, field, 2);
+    pb_varint(out, body.len() as u64);
+    out.extend_from_slice(body);
+}
+
+/// 最小 SendMsgReq(好友私聊文本;字段号与 core 同源,verified=false)。
+fn encode_send_msg(peer_uin: u64, text: &str, client_seq: u32, random: u32) -> Vec<u8> {
+    let mut w = Vec::with_capacity(text.len() + 48);
+    let mut routing = Vec::new();
+    pb_varint_field(&mut routing, PB_F_FRIEND_UIN, peer_uin);
+    pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
+    let mut content = Vec::new();
+    pb_varint_field(&mut content, PB_F_CONTENT_TYPE, PB_CONTENT_TYPE_FRIEND_TEXT);
+    pb_len_field(&mut w, PB_F_CONTENT_HEAD, &content);
+    let mut elem = Vec::new();
+    {
+        let mut txt = Vec::new();
+        pb_len_field(&mut txt, PB_F_TEXT_STR, text.as_bytes());
+        pb_len_field(&mut elem, PB_F_ELEM_TEXT, &txt);
+    }
+    let mut rich = Vec::new();
+    pb_len_field(&mut rich, PB_F_RICH_ELEMS, &elem);
+    pb_len_field(&mut w, PB_F_BODY, &rich.as_slice());
+    pb_varint_field(&mut w, PB_F_CLIENT_SEQ, client_seq as u64);
+    pb_varint_field(&mut w, PB_F_RANDOM, random as u64);
+    w
+}
+
+/// 短形态 libc++ string 物化(≤22B;"MessageSvc.PbSendMsg" = 20B)。
+fn make_short_string(dst: &mut [u8; 24], s: &[u8]) {
+    *dst = [0; 24];
+    dst[0] = (s.len() as u8) << 1;
+    dst[1..1 + s.len()].copy_from_slice(s);
+}
+
+type OperatorNewFn = unsafe extern "system" fn(usize) -> *mut c_void;
+type SendSsoFn = unsafe extern "system" fn(usize, usize, usize, u8, usize);
+
+/// G3-P2 受控发送主入口(loader 经 `caligo_g3_send_run` 远程线程调用)。
+///
+/// 单次调用 SendSSORequestInternal;零插桩、无常驻修改、零转发。
+/// 缓冲所有权:body data 经移转归 QQ(本侧不释放);回调为 QQ 原生空函数。
+/// 发送结果异步(无消费者),验证 = 对端收到消息(现场确认)。
+///
+/// SAFETY: ctx 必须指向本进程内有效的 [`G3SendCtx`]。
+pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
+    // SAFETY: ctx 由 loader 写入。
+    let (wrapper_base, report_path, peer_uin, text_ptr, client_seq, random) = unsafe {
+        ((*ctx).wrapper_base, (*ctx).report_path, (*ctx).peer_uin, (*ctx).text_ptr, (*ctx).client_seq, (*ctx).random)
+    };
+
+    // adopt(getter 租约;g1/g2/g3 探测同机械)。
+    let getter: GetterFn = unsafe { core::mem::transmute(wrapper_base + GETTER_RVA) };
+    let mut pair = ServicePair { obj: core::ptr::null_mut(), ctrl: core::ptr::null_mut() };
+    // SAFETY: getter 契约(R2 §4)。
+    let ret = unsafe { getter(&mut pair as *mut ServicePair) };
+    if ret as usize != &mut pair as *mut ServicePair as usize || pair.obj.is_null() {
+        stage(report_path, "g3s_adopt", false, "getter failed");
+        return ERR_NO_OBSERVER;
+    }
+    let vptr = unsafe { core::ptr::read_volatile(pair.obj as *const u64) };
+    if (vptr as usize).wrapping_sub(wrapper_base) != ANCHOR_SVC_VTBL_RVA {
+        stage(report_path, "g3s_adopt", false, "anchor mismatch");
+        return ERR_SWAP_STATE;
+    }
+    let svc = pair.obj as usize;
+    stage(report_path, "g3s_adopt", true, &format!("svc={svc:x}"));
+
+    // site:transport 在位(raw vptr)才发送。
+    let Some(transport) = safe_read_qword(svc + SVC_FIELD_TRANSPORT) else {
+        stage(report_path, "g3s_site", false, "svc+0x60 unreadable");
+        return ERR_NO_TRANSPORT;
+    };
+    if !addr_plausible(transport) {
+        stage(report_path, "g3s_site", false, "transport implausible");
+        return ERR_NO_TRANSPORT;
+    }
+    let t_vptr = safe_read_qword(transport as usize).unwrap_or(0);
+    let ok = (t_vptr as usize).wrapping_sub(wrapper_base) == TRANSPORT_VTBL_RVA;
+    stage(report_path, "g3s_site", ok, &format!("transport={transport:x} vptr={t_vptr:x}"));
+    if !ok {
+        return ERR_NO_TRANSPORT;
+    }
+
+    // 正文(UTF-16 → UTF-8)。
+    let text = {
+        // SAFETY: loader 写入的 NUL 结尾 UTF-16。
+        let mut len = 0usize;
+        unsafe {
+            while len < 16 * 1024 && *text_ptr.add(len) != 0 {
+                len += 1;
+            }
+        }
+        if len == 0 || len >= 16 * 1024 {
+            stage(report_path, "g3s_text", false, "text empty/oversize");
+            return ERR_SEND_BODY;
+        }
+        String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text_ptr, len) })
+    };
+    stage(report_path, "g3s_text", true, &format!("bytes={}", text.len()));
+
+    // 编码请求体(最小 SendMsgReq;verified=false)。
+    let body = encode_send_msg(peer_uin, &text, client_seq, random);
+    stage(
+        report_path,
+        "g3s_encode",
+        true,
+        &format!("len={} head={}", body.len(), bytes_hex(&body[..body.len().min(24)])),
+    );
+
+    // body data:QQ 分配器(QQ 侧释放;本侧永不释放)。
+    let new_fn: OperatorNewFn = unsafe { core::mem::transmute(wrapper_base + QQ_OPERATOR_NEW_RVA) };
+    // SAFETY: operator new 契约;失败返回 null(MSVC new 实际抛异常,
+    // 小分配不触发;null 检查兜底)。
+    let buf = unsafe { new_fn(body.len().max(1)) };
+    if buf.is_null() {
+        stage(report_path, "g3s_alloc", false, "operator new returned null");
+        return ERR_SEND_ALLOC;
+    }
+    // SAFETY: buf 容量 ≥ body.len()(new(size))。
+    unsafe { core::ptr::copy_nonoverlapping(body.as_ptr(), buf as *mut u8, body.len()) };
+    let begin = buf as u64;
+    let end = begin + body.len() as u64;
+    let mut vec_hdr: [u64; 3] = [begin, end, end];
+    stage(report_path, "g3s_alloc", true, &format!("buf={begin:x} len={}", body.len()));
+
+    // param_2:本机账号串——逐字节复制活对象 svc+0x1f0(零编码猜测)。
+    // 短形态:24B 原样;长形态:头部原样 + data 换 QQ 分配副本。
+    let mut self_str = [0u8; 24];
+    {
+        let mut raw = [0u64; 3];
+        if read_qwords_into(svc + SVC_FIELD_SELF_STRING, &mut raw) != 3 {
+            stage(report_path, "g3s_selfstr", false, "svc+0x1f0 unreadable");
+            return ERR_SEND_BODY;
+        }
+        let q0bytes = raw[0].to_le_bytes();
+        if q0bytes[0] & 1 == 0 {
+            for (i, q) in raw.iter().enumerate() {
+                self_str[i * 8..i * 8 + 8].copy_from_slice(&q.to_le_bytes());
+            }
+            stage(
+                report_path,
+                "g3s_selfstr",
+                true,
+                &format!("short len={}", q0bytes[0] >> 1),
+            );
+        } else {
+            let size = raw[1] as usize;
+            let data_ptr = raw[2] as usize;
+            if !addr_plausible(raw[2]) || size == 0 || size > 256 {
+                stage(report_path, "g3s_selfstr", false, "long-form bad size/ptr");
+                return ERR_SEND_BODY;
+            }
+            let copy = unsafe { new_fn(size + 1) };
+            if copy.is_null() {
+                stage(report_path, "g3s_selfstr", false, "selfstr alloc failed");
+                return ERR_SEND_ALLOC;
+            }
+            let mut raw_bytes = [0u8; 256];
+            let nq;
+            {
+                let mut tmp = [0u64; 32];
+                nq = read_qwords_into(data_ptr, &mut tmp[..(size + 7) / 8]);
+                for (i, q) in tmp.iter().take(nq).enumerate() {
+                    raw_bytes[i * 8..i * 8 + 8].copy_from_slice(&q.to_le_bytes());
+                }
+            }
+            if nq * 8 < size {
+                stage(report_path, "g3s_selfstr", false, "selfstr readback short");
+                return ERR_SEND_BODY;
+            }
+            let bytes = &raw_bytes[..size];
+            // SAFETY: copy 容量 size+1。
+            unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), copy as *mut u8, size) };
+            // SAFETY: 末位写 NUL(字符串非二进制;QQ 串以长度计量)。
+            unsafe { core::ptr::write((copy as *mut u8).add(size), 0) };
+            self_str[0..8].copy_from_slice(&raw[0].to_le_bytes()); // cap|1 原样
+            self_str[8..16].copy_from_slice(&(size as u64).to_le_bytes());
+            self_str[16..24].copy_from_slice(&(copy as u64).to_le_bytes());
+            stage(report_path, "g3s_selfstr", true, &format!("long len={size} copy={:#x}", copy as usize));
+        }
+    }
+
+    // cmd 串 + 空回调块(QQ 原生 empty-function 表示)。
+    let mut cmd = [0u8; 24];
+    make_short_string(&mut cmd, b"MessageSvc.PbSendMsg");
+    let mut cb = [0u64; 4];
+    cb[2] = (wrapper_base + EMPTY_FN_CALLABLE_RVA) as u64;
+    cb[3] = (wrapper_base + EMPTY_FN_DTOR_RVA) as u64;
+
+    // 单次调用(本线程;发送经全局 dispatcher 异步执行)。
+    let send: SendSsoFn = unsafe { core::mem::transmute(wrapper_base + SEND_SSO_RVA) };
+    // SAFETY: 契约见模块注释;全部实参为 QQ 侧可消费的合法对象。
+    unsafe {
+        send(
+            svc,
+            cmd.as_mut_ptr() as usize,
+            vec_hdr.as_mut_ptr() as usize,
+            1,
+            cb.as_mut_ptr() as usize,
+        )
+    };
+    // 移转后:buf/cb/串副本所有权归 QQ 或已失效;本侧一律不再触碰。
+    stage(
+        report_path,
+        "g3s_submitted",
+        true,
+        &format!("send returned (async); peer={peer_uin} body_len={} seq={client_seq}", body.len()),
+    );
+    stage(report_path, "g3s_done", true, "ok — verify delivery on peer");
     OK
 }
 
@@ -893,5 +1182,84 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, CAND_CAP);
+    }
+
+    /// P2 编码:好友私聊最小 SendMsgReq 结构(与 core 同字段号;手工解析校验)。
+    #[test]
+    fn send_msg_encoding_friend() {
+        let body = encode_send_msg(3089665724, "G3P2", 7, 9);
+        // 顶层字段序:1(routing)2(content)3(body)4(seq)5(rand)。
+        let mut pos = 0usize;
+        let mut fields = Vec::new();
+        while pos < body.len() {
+            // tag(varint,单字节足够:field≤5,wire≤2)
+            let tag = body[pos];
+            pos += 1;
+            let field = (tag >> 3) as u32;
+            let wire = tag & 7;
+            if wire == 2 {
+                let mut len = 0u64;
+                let mut shift = 0;
+                loop {
+                    let b = body[pos];
+                    pos += 1;
+                    len |= ((b & 0x7F) as u64) << shift;
+                    if b & 0x80 == 0 {
+                        break;
+                    }
+                    shift += 7;
+                }
+                fields.push((field, wire, body[pos..pos + len as usize].to_vec()));
+                pos += len as usize;
+            } else {
+                assert_eq!(wire, 0);
+                let mut v = 0u64;
+                let mut shift = 0;
+                loop {
+                    let b = body[pos];
+                    pos += 1;
+                    v |= ((b & 0x7F) as u64) << shift;
+                    if b & 0x80 == 0 {
+                        break;
+                    }
+                    shift += 7;
+                }
+                fields.push((field, wire, v.to_le_bytes().to_vec()));
+            }
+        }
+        assert_eq!(pos, body.len());
+        assert_eq!(fields.len(), 5);
+        assert_eq!(fields[0].0, PB_F_ROUTING_HEAD);
+        // routing = {1: varint peer} — 解码回读。
+        let r = &fields[0].2;
+        assert_eq!(r[0], (PB_F_FRIEND_UIN << 3) as u8);
+        let mut v = 0u64;
+        let mut shift = 0;
+        for b in &r[1..] {
+            v |= ((b & 0x7F) as u64) << shift;
+            if b & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        assert_eq!(v, 3089665724);
+        assert_eq!(fields[1].0, PB_F_CONTENT_HEAD);
+        assert_eq!(fields[2].0, PB_F_BODY);
+        assert_eq!(fields[3].0, PB_F_CLIENT_SEQ);
+        assert_eq!(fields[4].0, PB_F_RANDOM);
+        // body.rich_text.elems.text.str == "G3P2"
+        let body_bytes = &fields[2].2;
+        let hex = bytes_hex(body_bytes);
+        assert!(hex.ends_with(&bytes_hex(b"G3P2")), "text not at leaf: {hex}");
+    }
+
+    /// 短形态串物化。
+    #[test]
+    fn short_string_materialize() {
+        let mut s = [0u8; 24];
+        make_short_string(&mut s, b"MessageSvc.PbSendMsg");
+        assert_eq!(s[0], 40); // 20<<1
+        assert_eq!(&s[1..21], b"MessageSvc.PbSendMsg");
+        assert!(s[21..].iter().all(|b| *b == 0));
     }
 }

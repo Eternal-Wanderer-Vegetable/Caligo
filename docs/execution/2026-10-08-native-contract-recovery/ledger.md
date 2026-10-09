@@ -346,3 +346,35 @@ r1(镜像 vtable 补丁)与 r2(对象 vptr 交换)为**两种不同插桩机制*
   由执行者与用户另行决策**;本台账不解封任何现场发送;
 - 发送侧静态合同(命令串/六参 slot7/b7ce8a 状态门/dispatcher 提交/
   SC+transport 拓扑/第二入口 7333fe)仍然成立,已入库供实现期使用。
+
+## 2026-10-09(终章):A(blob 定案)+ B(首次受控发送,全链 PASS、QQ 存活)
+
+### A —— request blob 类型定案(phaseF,0x21866d0)
+- BaseMsgMgr 经服务门面 vtbl+0x100 取得的 out 参数 = **libc++
+  `vector<uint8>`**({begin,end,cap};末尾 290a = vector dtor,此前误判
+  shared_ptr pair);方法内部:vtbl+0x110 取大小 → resize(参数3=1 时前置
+  `htonl(len+4)`;BaseMsgMgr 传 0)→ 在 vector 内存上架流/写对象 → 按元素
+  类型分发序列化;
+- **推论:body data 必须来自 QQ 分配器**(task 析构由 QQ 侧释放)——
+  `0xB75000` = 全局 operator new 实锤(0x60/0x20/0x50/0x88 各处分配皆用之)。
+
+### B —— g3_send_run(机器人实例 24316,11:06 登录,11:24 发送)
+- 实现:`g3.rs` 新增 `caligo_g3_send_run`——单次调用
+  `SendSSORequestInternal(0x732A80)`,**零插桩、无常驻修改**;请求体 =
+  内联最小 SendMsgReq 编码(字段号与 caligo-core qq_protocol::send 同源,
+  verified=false;桥不依赖 core);param_2(本机账号串)从活对象
+  svc+0x1f0 逐字节复制(短形态内联);回调 = QQ 原生空函数
+  (0x72D596/0x72D5C8)——MSF 层回调本就被 b7f6f6 置空;body data 经
+  QQ operator new 分配后移转(QQ 释放);
+- LAB:g3 模块 8/8(新增编码结构解析、短串物化);全仓绿;
+- 现场(证据 `evidence/p6-g3/g3-send-24316-r3.jsonl`):observe 预检 PASS →
+  注入双 gate PASS → **adopt/site/text/encode(46B)/alloc(QQ
+  new→0x1dea5869e90)/selfstr(short len=10)/submitted/done 全链 PASS**;
+  body 解码自证:field1 routing{1: uin 3089665724} + field2 content{1: type 1}
+  + field3 body.rich.elems.text.str="G3P2 native-send probe";
+- **QQ 存活**(24316 同 PID,内存正常增长)——**首次原生调用发送路径成功:
+  线程准入(G1 getter 先例)+ 我们线程提交 + dispatcher 异步执行全链打通;
+  thread-contract §10.4.1 "任意线程提交"条款获得首次运行时证据**;
+- 待现场确认:对端(主账号 3089665724)收到 "G3P2 native-send probe"。
+  注:响应无消费者(空回调 = QQ 原生 inert 表示;BaseMsgMgr token 注册
+  未建立),发送失败亦无错误回读——失败模式为静默丢弃,不崩溃。

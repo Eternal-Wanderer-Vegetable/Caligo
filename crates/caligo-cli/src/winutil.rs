@@ -265,6 +265,8 @@ pub struct InjectOutcome {
     pub g2_exit_code: Option<u32>,
     /// `caligo_g3_probe_run` 的返回码(仅在 g3_run_report 提供时)。
     pub g3_exit_code: Option<u32>,
+    /// `caligo_g3_send_run` 的返回码(仅在 g3_send_report 提供时)。
+    pub g3_send_exit_code: Option<u32>,
     /// `caligo_env_start` 的返回码(仅在 env_report 提供时;链路线程异步执行)。
     pub env_exit_code: Option<u32>,
     /// `caligo_interrupt_run` 的返回码(仅在 intr 提供时;同步执行)。
@@ -354,6 +356,7 @@ pub unsafe fn inject_and_probe(
     g2_run_ms: u32,
     g3_run_report: Option<&Path>,
     g3_run_ms: u32,
+    g3_send: Option<(&Path, u64, &str, u32, u32)>, // (report, peer_uin, text, seq, rand)
 ) -> Result<InjectOutcome, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
@@ -853,6 +856,69 @@ pub unsafe fn inject_and_probe(
                 g3_exit = Some(code);
             }
 
+            // 可选:G3-P2 受控发送(caligo_g3_send_run):单次调用,
+            // 零插桩。同步返回(发送本身异步)。
+            let mut g3_send_exit: Option<u32> = None;
+            if let Some((send_report, peer_uin, text, seq, rand)) = g3_send {
+                let send_addr =
+                    match read_remote_export(proc_h, remote_base, "caligo_g3_send_run") {
+                        Ok(Some(a)) => a,
+                        Ok(None) => return Err("caligo_g3_send_run not found in remote".into()),
+                        Err(e) => return Err(format!("remote export lookup (g3s): {e}")),
+                    };
+                let wrapper_base = *module_bases_in(pid)?.get("wrapper.node").unwrap_or(&0);
+                if wrapper_base == 0 {
+                    return Err("wrapper.node base unresolved in target (g3s)".into());
+                }
+                let send_abs = if send_report.is_absolute() {
+                    send_report.to_path_buf()
+                } else {
+                    std::env::current_dir()
+                        .map_err(|e| format!("current_dir: {e}"))?
+                        .join(send_report)
+                };
+                let send_wide = to_wide(&send_abs.to_string_lossy());
+                let remote_send_path = alloc_and_write(&send_wide, "alloc g3s report path")?;
+                buf_obs = Some(remote_send_path);
+                let mut text_u16: Vec<u16> = text.encode_utf16().collect();
+                text_u16.push(0);
+                let remote_text = alloc_and_write(&text_u16, "alloc g3s text")?;
+                buf_report = Some(remote_text);
+                let mut ctx_bytes = Vec::with_capacity(40);
+                ctx_bytes.extend_from_slice(&wrapper_base.to_le_bytes());
+                ctx_bytes.extend_from_slice(&(remote_send_path as usize).to_le_bytes());
+                ctx_bytes.extend_from_slice(&peer_uin.to_le_bytes());
+                ctx_bytes.extend_from_slice(&(remote_text as usize).to_le_bytes());
+                ctx_bytes.extend_from_slice(&seq.to_le_bytes());
+                ctx_bytes.extend_from_slice(&rand.to_le_bytes());
+                let remote_send_ctx = alloc_and_write_bytes(&ctx_bytes, "alloc g3s ctx")?;
+                buf_obs = Some(remote_send_ctx);
+                let send_fn: unsafe extern "system" fn(*const core::ffi::c_void) -> u32 =
+                    std::mem::transmute::<usize, unsafe extern "system" fn(*const core::ffi::c_void) -> u32>(send_addr);
+                let start_send: RemoteThreadFn =
+                    std::mem::transmute::<usize, RemoteThreadFn>(send_fn as usize);
+                let send_thread = CreateRemoteThread(
+                    proc_h,
+                    std::ptr::null(),
+                    0,
+                    Some(start_send),
+                    remote_send_ctx,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if send_thread.is_null() {
+                    return Err(format!("CreateRemoteThread(g3s): Win32 error {}", GetLastError()));
+                }
+                let wait_send = WaitForSingleObject(send_thread, 30_000);
+                let mut code: u32 = u32::MAX;
+                GetExitCodeThread(send_thread, &mut code);
+                CloseHandle(send_thread);
+                if wait_send != 0 {
+                    return Err(format!("g3s remote thread wait failed: code {wait_send:#x}"));
+                }
+                g3_send_exit = Some(code);
+            }
+
             // 可选:只读运行时观测 v2(caligo_obs_run2;基址由本加载器进程解析,
             // 远程线程不再调用 GetModuleHandleW/Toolhelp —— EXP-F1-R4 缺陷修复)。
             let mut obs_exit: Option<u32> = None;
@@ -1331,6 +1397,7 @@ pub unsafe fn inject_and_probe(
                 native_exit_code: native_exit,
                 g2_exit_code: g2_exit,
                 g3_exit_code: g3_exit,
+                g3_send_exit_code: g3_send_exit,
                 env_exit_code: env_exit,
                 intr_exit_code: intr_exit,
                 async_exit_code: async_exit,

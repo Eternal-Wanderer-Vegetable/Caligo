@@ -1,0 +1,8 @@
+{"ts":1791516240258,"tid":36708,"stage":"g3s_adopt","ok":true,"detail":"svc=1dea1bd0000"}
+{"ts":1791516240258,"tid":36708,"stage":"g3s_site","ok":true,"detail":"transport=1dea18add40 vptr=7fff1c0203b8"}
+{"ts":1791516240258,"tid":36708,"stage":"g3s_text","ok":true,"detail":"bytes=22"}
+{"ts":1791516240258,"tid":36708,"stage":"g3s_encode","ok":true,"detail":"len=46 head=0a0608bc9da2c10b120208011a1c121a0a180a1647335032"}
+{"ts":1791516240258,"tid":36708,"stage":"g3s_alloc","ok":true,"detail":"buf=1dea5869e90 len=46"}
+{"ts":1791516240259,"tid":36708,"stage":"g3s_selfstr","ok":true,"detail":"short len=10"}
+{"ts":1791516240259,"tid":36708,"stage":"g3s_submitted","ok":true,"detail":"send returned (async); peer=3089665724 body_len=46 seq=1"}
+{"ts":1791516240259,"tid":36708,"stage":"g3s_done","ok":true,"detail":"ok — verify delivery on peer"}
