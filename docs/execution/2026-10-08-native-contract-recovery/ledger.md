@@ -461,5 +461,17 @@ r4-g3 phaseS2(`136222c.c`):chat4 路径推
 record 的运行时字符串解析(1e9f8b)+ EBus 键(0x8c910/5005)。
 **结论:普通群文本发送走哪条编码器,取决于消息记录类的 chat_type 语义
 (94224a/941f62/953188 三个判别器 + record vtbl 语义)——下一个逆向
-工作块 = 消息记录类完整解码(vtbl+8/0x18/0x30/0xa0/0xb0/0x158 等)。**
+工作块 = 消息记录类完整解码(vtbl+8/0x18/0x30/0xa0/0xb0/0x158 等)。
 证据:r4-g3 phaseS2(6 函数)。
+
+### RTTI 锚点(记录类定位,下会话起点)
+- `nt::im_core::MsgRecord` TypeDescriptor @ RVA **0x5d61100**;
+  `IMsgRecord` @ **0x5d61130**;`MsgElement`/`IMsgElement` @ 0x5e24bf0/0x5e24c20;
+- 事件类 `CreateMsgRecordAndSetPbMsg`(TD @ **0x5d686b0**)——记录创建入口;
+- msg record 使用面(已见虚调用):vtbl+8(chat_type)、+0x18/+0x30(int)、
+  +0xa0(peer 串)、+0xb0(串)、+0x128(特性查询 0x17d5/0x17d6/…)、
+  +0x158(int)、+0x80/+0x120(元素表,特性键 0x9f60/0x9f61/0x9f62)、
+  元素类型键 0xafca(=9 文本/100)与 0xa21e(=1 文本)。
+- 注:IMsgRecord 无 COL(MSVC x64 RTTI 未发 vtable),定位走
+  CreateMsgRecordAndSetPbMsg handler 或 25757ea 调用方链
+  (0x12f88a8/0x1300876/0x130112e)。
