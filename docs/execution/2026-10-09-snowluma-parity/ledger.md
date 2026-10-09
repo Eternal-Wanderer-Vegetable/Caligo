@@ -240,3 +240,23 @@ read_resp_consumer_strings.py、record_snowluma_events.py)。
 - **池观测替代路径**:发送后扫池可读响应层日志(诊断用),不阻塞于消费者安装。
 
 本轮零新增注入(仅 r6 一次捕获窗口,按双门纪律);证据均在本轮 reference 目录。
+## 2026-10-10(再续):二进制记录区定位 + 响应日志通道裁决
+
+### N3R11/N3R12(零人工,API 自产流量)
+
+- **二进制记录区已定位**(N3R11-X):time(u32 1791589640)与 seq(u32 397874)
+  在 0x1d771f63c48/0x1d771f63c80 相邻出现;周围为重复条目族
+  {key u32, index u32, value, owner-ptr 0x1d771a79590},含 null(0x80)/int
+  等 tag 形态;同一结构族在 N3R12 的 seq 命中处复现(4 处)。
+  **剩余:owner 容器链与条目 key 语义**(owner+0 处非 wrapper 内 vtable,
+  需从"谁指向该数组"向上找容器对象——下一轮任务)。
+- **响应日志通道裁决**(N3R12 发送后 0.5s 全堆扫):
+  - seq u32 4 处命中(存储条目);mid u32 0(message_id 是 OneBot 派生值,
+    不落原生内存);
+  - "got empty response"/"[MSF] Unknow Error!"/retCode 串 **0 命中** ——
+    成功路径无堆内响应日志(错误模板仅失败时物化);
+  - "MessageSvc.PbSendMsg" 15 处(发送命令上下文常驻)。
+  **结论:成功发送不可经池扫描观测;retCode 通道仍以消费者安装(或错误
+  触发后的失败日志扫描)为路径** —— @ 拒绝场景属失败路径,错误日志物化
+  可期(下一轮 @ 探针配合即时扫描验证)。
+- CPBMessageOpti vptr 扫描计数修正:299 实例(随消息活动增长;此前 56)。
