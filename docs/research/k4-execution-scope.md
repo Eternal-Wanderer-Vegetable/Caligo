@@ -71,3 +71,30 @@
    旧 probe/通用 exec/onebotd 不复用)。
 
 研究 feature 的启用不改变上述任何一步。
+
+## 6. 2026-10-09 更新:G3 收束后的生产化输入(不改变上述冻结/恢复条件)
+
+本节只登记事实与要求,供 D2–D7 阶段吸收;不授权任何现场动作。
+
+### 6.1 已 field-proven 的能力(生产 bridge 直接采用)
+- **私聊+群聊文本发送**(capability profile `gates.send`):
+  传输合同不变(0x732A80 单次调用 + QQ operator new + inert 回调);
+  形状见 profile `basis`(r18:群 RH{2: Grp{1: varint}};无 ContentHead)。
+- **auto-seq**(r19):自管理单调计数器(状态文件,per-conversation),
+  bridge 常驻后应改驻内存;random = rdtsc 现场生成。
+- **送达判据(自动化)**:接收方内存 JSON 记录形态残留
+  (sendNickName/msgUid/abstractContent)。生产期由响应消费者取代(§6.2)。
+
+### 6.2 生产前必做(阻塞项)
+- **响应侧消费者**(docs/research/response-consumer-scope.md,锚点齐):
+  发送失败可观测 + seq/msgUid 会话关联。无它,@ 等增量功能的失败不可归因
+  (r20–r28b 八轮静默拒的直接教训)。
+- @ 元素:形状已解(f12 结构化 + Attr + 元素9/16 + at-scene elem37),
+  仍被拒——阻塞于 §6.2;恢复前不进生产面。
+
+### 6.3 运维经验(研究构建期)
+- bot 进程锁旧 DLL:每轮改动须换 `--target-dir`(r16–r28b 已用 12 个目录);
+  生产版常驻 bridge 需版本化文件名 + 原子换载策略。
+- 多桥可共存于同一实例(最多时 5+),但报告文件/状态文件须按轮隔离。
+- 实例损失记录续增:24316(原因未明,疑似非注入因素);重启后首次注入前
+  observe-msf 预检必须重跑。

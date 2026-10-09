@@ -753,6 +753,23 @@ pub struct G3SendCtx {
     pub group_code: u64,      // 非 0 = 群聊发送(路由 Grp,type=82)
     pub client_seq: u32,
     pub random: u32,
+    pub at_uid_ptr: *const u8, // NUL 结尾 ASCII:被 @ 人 peerUid(null = 无 @)
+    pub at_uin: u32,           // 被 @ 人 uin(attr 用;v1 由调用方提供)
+}
+
+/// 读远程 NUL 结尾 ASCII(空/不可读 → None)。
+unsafe fn read_ascii_opt(ptr: *const u8) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    while len < 512 && *ptr.add(len) != 0 {
+        len += 1;
+    }
+    if len == 0 || len >= 512 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(ptr, len) }).into_owned())
 }
 
 /// 读远程 NUL 结尾 UTF-16(空/不可读 → None)。
@@ -814,6 +831,8 @@ fn encode_send_msg(
     text: &str,
     client_seq: u32,
     random: u32,
+    at_uid: Option<&str>,
+    at_uin: u32,
 ) -> Vec<u8> {
     let mut w = Vec::with_capacity(text.len() + 128);
     // 群消息真实三值(2026-10-09 主账号存储记录 capture-main-group-body.jsonl
@@ -891,7 +910,90 @@ fn encode_send_msg(
             0x00, 0x18, 0x00, 0x20, 0x00, 0xd8, 0x06, 0xef, 0x8f, 0x18, 0xa0, 0x07,
             0xc3, 0x8c, 0xa2, 0x8c, 0xae, 0xee, 0xe2, 0xfd, 0x89, 0x01,
         ];
-        pb_len_field(&mut rich, 2, GROUP_ELEM37);
+        // @ 消息要求 Rich.Attr(field1)——真实 @ 样本含 {1:0,2:ts,3:rand,4:0,5:10,6:0,7:134,8:2,9:"媒体"}
+        // (普通文本无 Attr 可过,@ 被拒两轮后回补;r22)。
+        {
+            let mut attr = Vec::new();
+            pb_varint_field(&mut attr, 1, 0);
+            pb_varint_field(&mut attr, 2, ts);
+            pb_varint_field(&mut attr, 3, random as u64);
+            pb_varint_field(&mut attr, 4, 0);
+            pb_varint_field(&mut attr, 5, 10);
+            pb_varint_field(&mut attr, 6, 0);
+            pb_varint_field(&mut attr, 7, 134);
+            pb_varint_field(&mut attr, 8, 2);
+            pb_len_field(&mut attr, 9, &[0xe5, 0xaa, 0x92, 0xe4, 0xbd, 0x93]);
+            pb_len_field(&mut rich, 1, &attr);
+        }
+        // @ 场景专用 elem37(125B 照抄):field81 形状不同({f2:17} vs 普通版
+        // {f1:2,f2:45}),疑似服务器按此分流消息类型(r28)。
+        const AT_ELEM37: &[u8] = &[
+            0xaa, 0x02, 0x7a, 0x08, 0x00, 0x50, 0x00, 0x60, 0x00, 0x68, 0x00, 0x80,
+            0x01, 0x00, 0x88, 0x01, 0x00, 0x9a, 0x01, 0x69, 0x08, 0x06, 0x20, 0xcb,
+            0x50, 0x78, 0x00, 0xc8, 0x01, 0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00,
+            0x90, 0x02, 0x00, 0xc8, 0x02, 0x00, 0x98, 0x03, 0x00, 0xa0, 0x03, 0x00,
+            0xb0, 0x03, 0x00, 0xb8, 0x03, 0x00, 0xc0, 0x03, 0x00, 0xd0, 0x03, 0x00,
+            0xe8, 0x03, 0x00, 0x8a, 0x04, 0x02, 0x10, 0x11, 0x90, 0x04, 0x80, 0x01,
+            0xb8, 0x04, 0x00, 0xc0, 0x04, 0x00, 0xca, 0x04, 0x00, 0xf8, 0x04, 0xcc,
+            0x84, 0x08, 0x80, 0x05, 0x4d, 0x88, 0x05, 0x00, 0x80, 0x06, 0x00, 0xb2,
+            0x06, 0x0a, 0x0a, 0x08, 0x08, 0x00, 0x10, 0x00, 0x18, 0x00, 0x20, 0x00,
+            0xd8, 0x06, 0x8b, 0x95, 0x18, 0xa0, 0x07, 0xcf, 0xfe, 0xe3, 0xc3, 0xee,
+            0xdd, 0xc9, 0xa1, 0xef, 0x01,
+        ];
+        if at_uid.is_some() {
+            pb_len_field(&mut rich, 2, AT_ELEM37);
+        } else {
+            pb_len_field(&mut rich, 2, GROUP_ELEM37);
+        }
+        // 元素 9(6B 固定):真实 @ 消息在 elem37 后、@text 前携带
+        // (r25 试探;普通文本可省,疑似 @ 场景服务器要求)。
+        if at_uid.is_some() {
+            pb_len_field(&mut rich, 2, &[0x4a, 0x04, 0x08, 0x00, 0x40, 0x01]);
+        }
+        // @ 元素(2026-10-09 真实 @Stella 消息字节级实证,wirecap/at-capture):
+        // Rich{2: text{1: "@段", 3: attr13B(00 01 <len_be32> 00 <uin_be32> 00 00),
+        // 12: {3: <被@人 peerUid>}}},其余文本是独立 text 元素。
+        if let Some(atuid) = at_uid {
+            if let Some(sp) = text.find(' ') {
+                let (at_name, rest) = text.split_at(sp);
+                let mut at_txt = Vec::new();
+                pb_len_field(&mut at_txt, 1, at_name.as_bytes());
+                let mut attr = vec![0u8, 1u8];
+                attr.extend_from_slice(&(at_name.len() as u32).to_be_bytes());
+                attr.push(0u8);
+                attr.extend_from_slice(&at_uin.to_be_bytes());
+                attr.extend_from_slice(&[0u8, 0u8]);
+                pb_len_field(&mut at_txt, 3, &attr);
+                // f12(38B 实证):{3: 2(atType), 4: uin(varint), 5: 0,
+                // 9: peerUid, 11: 0}——r20 误为 {3: uid串} 被拒,此为修正。
+                let mut f12 = Vec::new();
+                pb_varint_field(&mut f12, 3, 2);
+                pb_varint_field(&mut f12, 4, at_uin as u64);
+                pb_varint_field(&mut f12, 5, 0);
+                pb_len_field(&mut f12, 9, atuid.as_bytes());
+                pb_varint_field(&mut f12, 11, 0);
+                pb_len_field(&mut at_txt, 12, &f12);
+                pb_len_field(&mut rich, 2, &at_txt);
+                let mut rest_txt = Vec::new();
+                pb_len_field(&mut rest_txt, 1, rest.as_bytes());
+                pb_len_field(&mut rich, 2, &rest_txt);
+                // 元素16(20B 照抄,真实 @ 样本链尾;{16:{2:"武舞",3:1,5:3,7:""}}):
+                if at_uid.is_some() {
+                    pb_len_field(&mut rich, 2, &[
+                        0x82, 0x01, 0x11, 0x12, 0x09, 0xe6, 0xad, 0xa6, 0xe8, 0x88,
+                        0x9e, 0x18, 0x01, 0x28, 0x03, 0x3a, 0x00,
+                    ]);
+                }
+                let body_nested = pb_len_field_vec(PB_F_BODY_RICH, &rich);
+                pb_len_field(&mut w, PB_F_BODY, &body_nested);
+                pb_varint_field(&mut w, PB_F_CLIENT_SEQ, client_seq as u64);
+                pb_varint_field(&mut w, PB_F_RANDOM, random as u64);
+                let mut f6 = Vec::new();
+                pb_varint_field(&mut f6, 1, ts);
+                pb_len_field(&mut w, 6, &f6);
+                return w;
+            }
+        }
         pb_len_field(&mut rich, 2, &elem);
     } else {
         pb_len_field(&mut rich, 2, ELEM_GENERAL_FLAGS);
@@ -938,6 +1040,14 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     // SAFETY: ctx 由 loader 写入。
     let (wrapper_base, report_path, peer_uin, text_ptr, uid_ptr, group_code, client_seq, random) = unsafe {
         ((*ctx).wrapper_base, (*ctx).report_path, (*ctx).peer_uin, (*ctx).text_ptr, (*ctx).uid_ptr, (*ctx).group_code, (*ctx).client_seq, (*ctx).random)
+    };
+    // random = 0 时现场生成(每消息新鲜值;真实客户端同语义,服务器不校验来源)。
+    let random = if random == 0 {
+        let mut t = unsafe { core::arch::x86_64::_rdtsc() };
+        t ^= t >> 32;
+        (t as u32) | 1
+    } else {
+        random
     };
 
     // adopt(getter 租约;g1/g2/g3 探测同机械)。
@@ -996,7 +1106,9 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
         stage(report_path, "g3s_uid", true, &format!("len={}", u.len()));
     }
     // 编码请求体(最小 SendMsgReq;verified=false)。
-    let body = encode_send_msg(peer_uin, peer_uid.as_deref(), group_code, &text, client_seq, random);
+    let at_uid = read_ascii_opt((*ctx).at_uid_ptr);
+    let at_uin = (*ctx).at_uin;
+    let body = encode_send_msg(peer_uin, peer_uid.as_deref(), group_code, &text, client_seq, random, at_uid.as_deref(), at_uin);
     stage(
         report_path,
         "g3s_encode",

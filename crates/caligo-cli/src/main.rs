@@ -930,6 +930,9 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut g3_send_uid: Option<String> = None;
     let mut g3_send_group: u64 = 0;
     let mut g3_send_seq: u32 = 1;
+    let mut g3_send_seq_auto = false;
+    let mut g3_send_at: Option<String> = None;
+    let mut g3_send_at_uin: u32 = 0;
     let mut g3_send_rand: u32 = 42;
     let mut env_report: Option<PathBuf> = None;
     let mut register_entry = false;
@@ -1071,10 +1074,33 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             },
-            "--g3-send-seq" => match next(&mut i).and_then(|v| v.parse().ok()) {
-                Some(v) => g3_send_seq = v,
+            "--g3-send-seq" => match next(&mut i) {
+                Some(v) => {
+                    if v == "auto" {
+                        g3_send_seq_auto = true;
+                    } else if let Ok(n) = v.parse() {
+                        g3_send_seq = n;
+                    } else {
+                        eprintln!("--g3-send-seq 需要数字或 auto");
+                        return ExitCode::FAILURE;
+                    }
+                }
                 None => {
                     eprintln!("--g3-send-seq 需要数字参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-send-at" => match next(&mut i) {
+                Some(v) => g3_send_at = Some(v.to_string()),
+                None => {
+                    eprintln!("--g3-send-at 需要参数(peerUid)");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-send-at-uin" => match next(&mut i).and_then(|v| v.parse().ok()) {
+                Some(v) => g3_send_at_uin = v,
+                None => {
+                    eprintln!("--g3-send-at-uin 需要数字 uin");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1293,13 +1319,36 @@ fn cmd_inject(args: &[String]) -> ExitCode {
         std::fs::OpenOptions::new().create(true).append(true).open(&p).ok();
         p
     });
+    let mut g3_seq_state_path: Option<PathBuf> = None;
     let g3_send = match (&g3_send_report, &g3_send_text) {
         (Some(p), Some(text)) => {
             if g3_send_peer == 0 && g3_send_group == 0 {
                 eprintln!("--g3-send-text 需要配对 --g3-send-peer 或 --g3-send-group");
                 return ExitCode::FAILURE;
             }
-            Some((p.as_path(), g3_send_peer, text.as_str(), g3_send_uid.as_deref(), g3_send_group, g3_send_seq, g3_send_rand))
+            // auto seq:自管理单调计数(状态文件与 report 同目录;服务器不校验
+            // 会话 seq,唯一失败模式是自发消息 seq 撞车——计数器即解)。
+            if g3_send_seq_auto {
+                let state = p.with_file_name("g3-seq-state.txt");
+                let kind = if g3_send_group != 0 { "group" } else { "peer" };
+                let val = if g3_send_group != 0 { g3_send_group } else { g3_send_peer };
+                let mut last: u64 = 0;
+                if let Ok(s) = std::fs::read_to_string(&state) {
+                    for line in s.lines() {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() == 3
+                            && parts[0] == kind
+                            && parts[1] == val.to_string()
+                        {
+                            last = parts[2].parse().unwrap_or(0);
+                        }
+                    }
+                }
+                g3_send_seq = (last + 1) as u32;
+                g3_seq_state_path = Some(state);
+                println!("[g3-send] seq = {} (auto: state+1)", g3_send_seq);
+            }
+            Some((p.as_path(), g3_send_peer, text.as_str(), g3_send_uid.as_deref(), g3_send_group, g3_send_seq, g3_send_rand, g3_seq_state_path.clone(), g3_send_at.clone().map(|u| (u, g3_send_at_uin))))
         }
         (None, None) => None,
         _ => {
@@ -1542,11 +1591,42 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             g2_run_ms,
             g3_run_report.as_deref(),
             g3_run_ms,
-            g3_send,
+            g3_send.clone(),
         )
     };
     match outcome {
         Ok(o) => {
+            // auto seq:发送链完成(g3s_done)后回写本次已用 seq。
+            if let (Some(state_path), Some((report_path, _, _, _, group, used_seq, _, _, _))) =
+                (g3_seq_state_path.as_deref(), g3_send)
+            {
+                if let Ok(s) = std::fs::read_to_string(report_path) {
+                    if s.contains("\"stage\":\"g3s_done\"") {
+                        let kind = if group != 0 { "group" } else { "peer" };
+                        let val = if group != 0 { group } else { g3_send_peer };
+                        let mut lines: Vec<String> = std::fs::read_to_string(state_path)
+                            .map(|s| s.lines().map(String::from).collect())
+                            .unwrap_or_default();
+                        let new_line = format!("{kind} {val} {used_seq}");
+                        let mut replaced = false;
+                        for line in lines.iter_mut() {
+                            let parts: Vec<&str> = line.split_whitespace().collect();
+                            if parts.len() == 3 && parts[0] == kind && parts[1] == val.to_string() {
+                                *line = new_line.clone();
+                                replaced = true;
+                            }
+                        }
+                        if !replaced {
+                            lines.push(new_line);
+                        }
+                        if let Err(e) = std::fs::write(state_path, lines.join("\n") + "\n") {
+                            eprintln!("[g3-send] seq 状态回写失败: {e}");
+                        } else {
+                            println!("[g3-send] seq 状态已回写: {kind} {val} -> {used_seq}");
+                        }
+                    }
+                }
+            }
             println!(
                 "[inject] 完成:remote_base={:#x} probe_exit_code={} ({})",
                 o.remote_base,

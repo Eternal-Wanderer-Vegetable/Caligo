@@ -589,3 +589,46 @@ Residual 不变(响应侧无消费者、seq/random 非会话态、生产按 K4)�
 
 **G3 群聊发送 milestone CLOSED。** 剩余工程项:响应侧拒绝码消费者(增强
 可观测性,非阻塞)、seq/random 会话态接入、生产化 K4。
+
+## 2026-10-09(夜):剩余任务块——seq/random 交付;@ 元素形状全解但被拒(归档);响应侧/K4 范围文档
+
+### ① seq/random 会话态接入 —— **交付**
+- `--g3-send-seq auto`:自管理单调计数(状态文件 g3-seq-state.txt 与 report
+  同目录,g3s_done 后回写)。验证:连续发送 seq 1→2→…→13 全程单调无撞车,
+  r19/r19b/r19c 三条全送达(主账号 78 处残留)。
+- random:bridge 端 rand=0 时 rdtsc 现场生成(`_rdtsc`,每消息新鲜值)。
+- 依据:服务器不校验会话 seq(r18 用 seq=18 vs 群真实 ~4700 仍 PASS),
+  唯一失败模式 = 自发消息撞车,计数器即解;nt_msg.db 为 QQ 加密包装
+  (伪 SQLite 头)不可读,活 record 无群条目化——计数器为最稳方案。
+
+### ② 群聊 @ 元素 —— 形状全解,发送被拒(8 轮迭代归档)
+真实 @ 消息(用户 UI 发 @Stella,高频捕获 wirecap/at-capture.jsonl 231 命中)
+字节级解出:
+- **f12(38B)结构化** = {3: 2(atType), 4: uin(varint), 5: 0,
+  9: peerUid(len), 11: 0}——r20 误为 {3: uid串} 即拒。
+- **attr(13B 原始字节)** = 00 01 <@段字节长_be32> 00 <uin_be32> 00 00。
+- 元素链:Attr(33B 动态) + elem37(**125B at 场景变体**,field81={f2:17} vs
+  普通版 {f1:2,f2:45}) + 元素9(4a 04 08 00 40 01) + @text + rest_text
+  + 元素16(20B,{16:{2:"武舞",3:1,5:3,7:""}},语义未明)。
+- 迭代:r20(f12 误)→r21(f12 修正)→r22(+Attr)→r23(@ 别人,排除自@自)
+  →r25(+元素9)→r27(+元素16)→r28b(at-scene elem37)——全部静默拒。
+- **对照实验**:普通文本同桥同时段 PASS(r24,43 处)——排除频率限制/
+  账号状态/桥缺陷,拒因精确定位于 @ 附加面,但字节级变量已穷尽。
+- **结论**:继续盲试无效,阻塞于响应侧 retCode;归档为独立块,
+  全部形状知识已入代码(g3.rs at 分支,--g3-send-at/--g3-send-at-uin)。
+
+### ③ 响应侧拒绝码消费者 —— 范围文档交付
+`docs/research/response-consumer-scope.md`:95d4e6 注册契约(cookie=客户端
+自配 16B msgUid;双键 = combine(cookieArr@97b0f/0x3faa680, 0x4721cdf/0x4791e1d);
+门控 940588@0x605d22)+ 73bd6c 分发契约(错误码 resp+0x40/0x60/100 三级;
+消费者调用 (0x10, errCode, errStr, msgUid))。实现路径四步 + 未决四项已列。
+
+### ④ K4 执行范围更新
+`k4-execution-scope.md` §6:生产化输入登记(field-proven 能力清单、
+响应消费者为生产前必做、DLL 锁/多桥/实例损失的运维经验)。
+
+### 构建/实例状态
+- 本轮新增 target-dir:r19/r19b/r20/r21/r22/r25/r26/r27/r28/r28b
+  (bot 进程锁 DLL 所致;26104 只读)。
+- bot 27624 现驻桥:r16/r17/r18/r19/r19b/r20/r21/r22/r25/r26/r27/r28 系列。
+- 提交:见 git log(本轮 2 commits:r18 收束 dd452af + 本块)。
