@@ -816,29 +816,36 @@ fn encode_send_msg(
     random: u32,
 ) -> Vec<u8> {
     let mut w = Vec::with_capacity(text.len() + 128);
+    // 群消息真实三值(2026-10-09 主账号存储记录 capture-main-group-body.jsonl
+    // addr=0x24b715d5f30 字节级实证):divSeq=2122933745、random=395811、
+    // CH.29=395247。ts 每发实时取。
+    const GROUP_DIVSEQ: u64 = 2_122_933_745;
+    const GROUP_CH_RANDOM: u64 = 395_811;
+    const GROUP_CH_F29: u64 = 395_247;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     if group_code != 0 {
-        // ===== 群聊(形态 Y:私聊顶层 + 群版 ContentHead)=====
-        // 存储记录实证的群 ContentHead = {1: 82, 4: divSeq, 5: random,
-        // 6: {1: ts}, 7: 1, 12: divSeq}。divSeq 用抓到的群计数器值。
+        // ===== 群聊(r16:与真实存储记录同形状)=====
+        // ContentHead 10 键:{1:82, 4:divSeq, 5:random, 6:ts(varint 直接,
+        // 非嵌套!), 7:1, 12:divSeq|1<<63, 29:小随机, 30:1, 32:64位随机}。
         let mut routing = Vec::new();
         let mut grp = Vec::new();
         let code_str = group_code.to_string();
         pb_len_field(&mut grp, 1, code_str.as_bytes());
         pb_len_field(&mut routing, 2, &grp);
         pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
         let mut content = Vec::new();
         pb_varint_field(&mut content, PB_F_CONTENT_TYPE, 82);
-        pb_varint_field(&mut content, 4, 2121648353);
-        pb_varint_field(&mut content, 5, random as u64);
-        let mut c6 = Vec::new();
-        pb_varint_field(&mut c6, 1, ts);
-        pb_len_field(&mut content, 6, &c6);
+        pb_varint_field(&mut content, 4, GROUP_DIVSEQ);
+        pb_varint_field(&mut content, 5, GROUP_CH_RANDOM);
+        pb_varint_field(&mut content, 6, ts);
         pb_varint_field(&mut content, 7, 1);
-        pb_varint_field(&mut content, 12, 2121648353);
+        pb_varint_field(&mut content, 12, GROUP_DIVSEQ | (1u64 << 63));
+        pb_varint_field(&mut content, 29, GROUP_CH_F29);
+        pb_varint_field(&mut content, 30, 1);
+        pb_varint_field(&mut content, 32, GROUP_DIVSEQ << 20 | 0x55);
         pb_len_field(&mut w, PB_F_CONTENT_HEAD, &content);
     } else {
         // 13665a0 实证:朋友路由 = RoutingHead{1: C2C{2: uid}},无 uin 字段
@@ -875,24 +882,37 @@ fn encode_send_msg(
     ];
     let mut rich = Vec::new();
     if group_code != 0 {
-        // 群版富文本:属性字段(0a21)+群版元素37——字节自真实群消息存储
-        // 记录照抄(capture-main-group-body.jsonl)。
-        const GROUP_RICH_ATTRS: &[u8] = &[
-            0x0a, 0x21, 0x08, 0x00, 0x10, 0xd8, 0xf9, 0xa1, 0xd6, 0x06, 0x18,
-            0xa9, 0xbc, 0xb2, 0xf4, 0x07, 0x20, 0x00, 0x28, 0x0a, 0x30, 0x00,
-            0x38, 0x86, 0x01, 0x40, 0x02,
-        ];
+        // 群版 RichText.Attr(field1):真实记录字节
+        // {1:0, 2:ts, 3:divSeq, 4:0, 5:10, 6:0, 7:134, 8:2, 9:"媒体"}
+        // (r13 旧常量多包了一层 0a 21 前缀,系双层包装畸形,此轮修正为
+        // 动态构造)。divSeq/ts 与 ContentHead 同源。
+        let mut attr = Vec::new();
+        pb_varint_field(&mut attr, 1, 0);
+        pb_varint_field(&mut attr, 2, ts);
+        pb_varint_field(&mut attr, 3, GROUP_DIVSEQ);
+        pb_varint_field(&mut attr, 4, 0);
+        pb_varint_field(&mut attr, 5, 10);
+        pb_varint_field(&mut attr, 6, 0);
+        pb_varint_field(&mut attr, 7, 134);
+        pb_varint_field(&mut attr, 8, 2);
+        pb_len_field(&mut attr, 9, "媒体".as_bytes());
+        pb_len_field(&mut rich, 1, &attr);
+        // 元素37(群版):真实记录 118B 全量字节照抄(2026-10-09 捕获
+        // addr=0x24b715d5f30)。r13 旧常量仅 88B 且第 5 字节误 0x06——
+        // 声明长 0x73=115B 实只 85B,服务器解析整条错位,系 r13–r15
+        // 静默拒的最强解释。本常量自捕获直接提取,结构校验 118B OK。
         const GROUP_ELEM37: &[u8] = &[
-            0xaa, 0x02, 0x73, 0x50, 0x00, 0x06, 0x00, 0x68, 0x00, 0x88, 0x01,
-            0x00, 0x9a, 0x01, 0x67, 0x08, 0x06, 0x20, 0xcb, 0x50, 0x78, 0x00,
-            0xc8, 0x01, 0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00, 0x90, 0x02,
-            0x00, 0x98, 0x03, 0x00, 0xa0, 0x03, 0x00, 0xb0, 0x03, 0x00, 0xc0,
-            0x03, 0x00, 0xd0, 0x03, 0x00, 0xe8, 0x03, 0x00, 0x8a, 0x04, 0x04,
-            0x08, 0x02, 0x10, 0x2d, 0x90, 0x04, 0x80, 0x01, 0xb8, 0x04, 0x00,
-            0xc0, 0x04, 0x01, 0xca, 0x04, 0x02, 0x10, 0x00, 0xf8, 0x04, 0xcc,
-            0x84, 0x08, 0x80, 0x05, 0x3a, 0x88, 0x05, 0x00, 0x80, 0x06, 0x00,
+            0xaa, 0x02, 0x73, 0x50, 0x00, 0x60, 0x00, 0x68, 0x00, 0x88, 0x01, 0x00,
+            0x9a, 0x01, 0x67, 0x08, 0x06, 0x20, 0xcb, 0x50, 0x78, 0x00, 0xc8, 0x01,
+            0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00, 0x90, 0x02, 0x00, 0x98, 0x03,
+            0x00, 0xa0, 0x03, 0x00, 0xb0, 0x03, 0x00, 0xc0, 0x03, 0x00, 0xd0, 0x03,
+            0x00, 0xe8, 0x03, 0x00, 0x8a, 0x04, 0x04, 0x08, 0x02, 0x10, 0x2d, 0x90,
+            0x04, 0x80, 0x01, 0xb8, 0x04, 0x00, 0xc0, 0x04, 0x01, 0xca, 0x04, 0x02,
+            0x10, 0x00, 0xf8, 0x04, 0xcc, 0x84, 0x08, 0x80, 0x05, 0x3a, 0x88, 0x05,
+            0x00, 0x80, 0x06, 0x00, 0xb2, 0x06, 0x0a, 0x0a, 0x08, 0x08, 0x00, 0x10,
+            0x00, 0x18, 0x00, 0x20, 0x00, 0xd8, 0x06, 0xef, 0x8f, 0x18, 0xa0, 0x07,
+            0xc3, 0x8c, 0xa2, 0x8c, 0xae, 0xee, 0xe2, 0xfd, 0x89, 0x01,
         ];
-        pb_len_field(&mut rich, 1, GROUP_RICH_ATTRS);
         pb_len_field(&mut rich, 2, GROUP_ELEM37);
         pb_len_field(&mut rich, 2, &elem);
     } else {

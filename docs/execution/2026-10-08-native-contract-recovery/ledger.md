@@ -481,3 +481,58 @@ record 的运行时字符串解析(1e9f8b)+ EBus 键(0x8c910/5005)。
   该初始化器中 0x3f54bc0 lea 附近的注册调用(FUN_180663d30)取
   handler 函数指针 → handler 即 record 创建逻辑(反汇编 dump 为空,
   需重生成后分析)。
+
+## 2026-10-09(续):MsgRecord 完整解码 + r13–r15 拒因定位(elem37 常量损坏)+ r16 就绪
+
+### 逆向闭环(静态 + 活内存双证)
+- **vtable 解析修正**:MSVC TypeDescriptor 结构体地址 = 类型名字符串 RVA − 16
+  (此前按名字地址搜 COL 必落空)。MsgRecord vftable 实际 = **0x3f51a78**
+  (46 槽整齐代码指针);MsgElement vtable 仅 8 虚函数。
+- **属性键族解密**:MsgRecord 全部虚槽 = 「按 16 位属性键查内部对象」包装
+  (this+0x18 → 对象 vtbl+0x30 取 int / +0x68 取 string / +0x80 取数组)。
+  键区:0x9c41–0x9c9f 主属性、0xa411 族、0x9f60/0x9f61 元素表、
+  0xafca 元素类型。后端存储类 = **CPBMessageOpti**(vtable 0x42615c8):
+  +8 = 12 字节条目数组({u32 key, tagged qword},tag 0x0c=int/0x20=string),
+  +0x10 = 条目数 —— **活内存可直接读任意 record 全部属性**(扫描器已入
+  r4-g3 会话脚本)。
+- **cmd 分派实证**(25757ea):`chat_type == 4 → "MsgProxy.SendMsg"`,
+  否则 `"MessageSvc.PbSendMsg"`。chat4 编码器 136222c 属 chat_type=4
+  (AI 会话;活内存 1 条 ct=4 记录为 AI 群)。
+- **chat_type 语义(活内存 46 条有效 record)**:16 = C2C(双 u_ uid,
+  42 条);2 = C2C 同 uid;4 = AI;群记录不在活对象(仅存储层)。
+- **MsgCodecMgr 拓扑**(构造器 0x1359d00,服务工厂 0x88365e):主接口
+  vtable 0x40a9e78(slot2=13665a0 路由,slot3=136222c chat4),基类子接口
+  0x40a9ea8(slot3=1360ebc C2C,slot4=1360480 群,注册表门控)。
+- **懒注册表 0x674F4C8** = libc++ map,首次访问从 BSS 静态链表 0x674f4b8
+  批量初始化;两活进程均仅 1 条 '-':值 {0x2d, 0, 500, 257},
+  941fa0('-') = 257。注册器族 = 942126/94225e/9435b3(均为运行时构建,
+  静态不可算条目值)。**群发送不依赖此表**(真实路径在群 session 打开时
+  才注册条目;bot 从未打开群 session → 表空)。
+
+### **拒因定位:r13–r15 的 elem37 常量双重损坏(字节级实证)**
+对照 2026-10-09 13:38 主账号捕获(capture-main-group-body.jsonl
+addr=0x24b715d5f30,群 263402786 哨兵消息 CAPTUREGRP123 完整存储记录):
+1. r13 常量仅 **88B**,而真实 elem37 = **118B**(`aa 02 73` 声明内容
+   115B,常量实给 85B → **服务器 protobuf 解析长度错位,整条消息必炸**);
+2. 第 5 字节误抄 `0x06`(非法 tag,真实为 `0x60` = field12 varint)。
+r12(1360480 形状)不带此常量、r13–r15 全带 → 与"r10–r15 全静默拒"一致。
+
+### 真实群消息形状(r16 基准,全部字节级实证)
+- 顶层 = {1: RoutingHead{2: Grp{1: code串}}, 2: ContentHead, 3: MsgBody{1: RichText}}
+  (存储序列化 {2: CH}{3: MB} 与 wire 同形,私聊 r6–r9 已证拓扑)。
+- **ContentHead 10 键**:`{1:82, 4:divSeq, 5:random, 6:ts(varint 直接,
+  非嵌套!), 7:1, 12:divSeq|1<<63, 29:395247, 30:1, 32:64位随机}`。
+- **RichText.Attr(field1)必带**:`{1:0, 2:ts, 3:divSeq, 4:0, 5:10, 6:0,
+  7:134, 8:2, 9:"媒体"}`(r13 旧常量多包一层 0a 21 前缀,双层包装畸形)。
+- elem37(群版)= 118B 全量(r16 已换正确常量,结构校验通过)。
+- 本群锚定值:peerUid=u_KxYzu_qQPbCC-Ca8mLteVA,msgRandom=0x7dcceaa2,
+  msgSeq=4694,divSeq=2122933745(@13:38 捕获),群名"Lumi和Nox粉丝交流群"。
+
+### r16 状态
+- g3.rs 群分支重写(真实 CH 10 键 + 动态 Attr + 118B elem37);
+  `cargo build` PASS,LAB 28/28;target-dir = target-g3r16。
+- **bot 实例(24316)已死**(本轮开局发现,现无任何注入实例);
+  用户选择等待重启 bot 实例后按原范围(研究构建指定实例)发送 r16。
+  备选(用户暂未采纳):注入主账号 26104(确定在群内)发送。
+- 悬留:divSeq 新鲜度未解决(服务器是否校验未知);bot 号是否在
+  263402786 群内未验证(若 r16 仍拒,此为头号嫌疑)。
