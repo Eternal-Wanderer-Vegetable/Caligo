@@ -827,26 +827,15 @@ fn encode_send_msg(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     if group_code != 0 {
-        // ===== 群聊(r16:与真实存储记录同形状)=====
-        // ContentHead 10 键:{1:82, 4:divSeq, 5:random, 6:ts(varint 直接,
-        // 非嵌套!), 7:1, 12:divSeq|1<<63, 29:小随机, 30:1, 32:64位随机}。
+        // ===== 群聊(r18:r17 形状 + varint 群号)=====
+        // 13665a0 chat_type==2 分支字节级语义:peer 串经 1e9f8b 转 u64,
+        // Grp.field1 = varint 数字(非字符串!)。r10–r17 全用字符串群号;
+        // r10 试过 varint 但带 CH。经典协议 Grp.1 本就是 u64。
         let mut routing = Vec::new();
         let mut grp = Vec::new();
-        let code_str = group_code.to_string();
-        pb_len_field(&mut grp, 1, code_str.as_bytes());
+        pb_varint_field(&mut grp, 1, group_code);
         pb_len_field(&mut routing, 2, &grp);
         pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
-        let mut content = Vec::new();
-        pb_varint_field(&mut content, PB_F_CONTENT_TYPE, 82);
-        pb_varint_field(&mut content, 4, GROUP_DIVSEQ);
-        pb_varint_field(&mut content, 5, GROUP_CH_RANDOM);
-        pb_varint_field(&mut content, 6, ts);
-        pb_varint_field(&mut content, 7, 1);
-        pb_varint_field(&mut content, 12, GROUP_DIVSEQ | (1u64 << 63));
-        pb_varint_field(&mut content, 29, GROUP_CH_F29);
-        pb_varint_field(&mut content, 30, 1);
-        pb_varint_field(&mut content, 32, GROUP_DIVSEQ << 20 | 0x55);
-        pb_len_field(&mut w, PB_F_CONTENT_HEAD, &content);
     } else {
         // 13665a0 实证:朋友路由 = RoutingHead{1: C2C{2: uid}},无 uin 字段
         // (C2C 字段1 若为 string 类型,varint 会造成 wire 不匹配 → 整包解析失败)。
@@ -882,21 +871,10 @@ fn encode_send_msg(
     ];
     let mut rich = Vec::new();
     if group_code != 0 {
-        // 群版 RichText.Attr(field1):真实记录字节
-        // {1:0, 2:ts, 3:divSeq, 4:0, 5:10, 6:0, 7:134, 8:2, 9:"媒体"}
-        // (r13 旧常量多包了一层 0a 21 前缀,系双层包装畸形,此轮修正为
-        // 动态构造)。divSeq/ts 与 ContentHead 同源。
-        let mut attr = Vec::new();
-        pb_varint_field(&mut attr, 1, 0);
-        pb_varint_field(&mut attr, 2, ts);
-        pb_varint_field(&mut attr, 3, GROUP_DIVSEQ);
-        pb_varint_field(&mut attr, 4, 0);
-        pb_varint_field(&mut attr, 5, 10);
-        pb_varint_field(&mut attr, 6, 0);
-        pb_varint_field(&mut attr, 7, 134);
-        pb_varint_field(&mut attr, 8, 2);
-        pb_len_field(&mut attr, 9, "媒体".as_bytes());
-        pb_len_field(&mut rich, 1, &attr);
+        // r17:群版 RichText 无 Attr(真 wire 无此字段;存储记录里的 Attr
+        // 是存储层附加,不进请求)。
+        // 元素37(群版)118B 全量照抄——真实为动态生成(长度 104–118B 浮动,
+        // 尾部嵌每消息随机值),静态常量赌服务器只查结构。
         // 元素37(群版):真实记录 118B 全量字节照抄(2026-10-09 捕获
         // addr=0x24b715d5f30)。r13 旧常量仅 88B 且第 5 字节误 0x06——
         // 声明长 0x73=115B 实只 85B,服务器解析整条错位,系 r13–r15

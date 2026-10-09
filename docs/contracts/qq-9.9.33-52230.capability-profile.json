@@ -187,9 +187,9 @@
   },
   "send": {
    "state": "field-proven-research",
-   "basis": "2026-10-09 实例 24316(机器人账号):自有线程单次调用 MSFService::SendSSORequestInternal(0x732A80) 送达且对端正常渲染(r8/r9,证据 evidence/p6-g3/g3-send-24316-r8|r9.jsonl)。请求体 SendMsgReq = {1: RoutingHead{1: C2C{2: peerUid}}, 2: ContentHead{1: type, 2: 0, 3: 0}, 3: Body{1: RichText{2: [elem37, elem9?, text]}}, 4: clientSeq, 5: random, 6: {1: 秒级时间戳}};blob = libc++ vector<uint8>,data 须 QQ operator new(0xB75000)",
+   "basis": "2026-10-09 实例 24316(私聊 r8/r9)+ 实例 27624(群聊 r18,机器人号 1694717255):自有线程单次调用 MSFService::SendSSORequestInternal(0x732A80)送达且群内正常渲染(证据 evidence/p6-g3/g3-send-24316-r8|r9.jsonl、g3-send-27624-r18.jsonl)。私聊 SendMsgReq = {1: RoutingHead{1: C2C{2: peerUid 串}}, 2: ContentHead{1: type, 2: 0, 3: 0}(服务器忽略,可不发), 3: Body{1: RichText{2: [elem37, text]}}, 4: clientSeq, 5: random, 6: {1: 秒}}; 群聊 SendMsgReq = {1: RoutingHead{2: Grp{1: varint groupCode}}, 3: Body{1: RichText{2: [elem37(118B 静态可用), 2: text{1:{1:str}}]}}, 4: seq, 5: random, 6: {1: 秒}} —— 群聊不得带 ContentHead(带即静默拒, r10–r17);群号是 varint u64 非字符串(r18)。blob = libc++ vector<uint8>,data 须 QQ operator new(0xB75000)",
    "residual": "响应侧无消费者(MSF 回调被 QQ 置空,失败=静默);clientSeq/random 未取自会话状态;插桩式捕获(slot7 路径)已否决(2/2 fatal,ledger 2026-10-09);生产路线按 K4 常驻 bridge",
-   "unblock_history": "P4 LAB -> P5 编解码 -> P6 G1 -> 本门 2026-10-09 以受控发送实测通过"
+   "unblock_history": "P4 LAB -> P5 编解码 -> P6 G1 -> 私聊门 2026-10-09(r9) -> 群聊门 2026-10-09(r18),r10–r17 八轮静默拒归因:ContentHead 赘余 + 群号 string/varint 之辨(根因阶梯见 ledger)"
   },
   "lifecycle_stop": {
    "state": "rejected",

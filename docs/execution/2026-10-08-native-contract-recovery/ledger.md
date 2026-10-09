@@ -536,3 +536,56 @@ r12(1360480 形状)不带此常量、r13–r15 全带 → 与"r10–r15 全静�
   备选(用户暂未采纳):注入主账号 26104(确定在群内)发送。
 - 悬留:divSeq 新鲜度未解决(服务器是否校验未知);bot 号是否在
   263402786 群内未验证(若 r16 仍拒,此为头号嫌疑)。
+
+## 2026-10-09(收束):r16→r18 三轮迭代——**群聊发送判定 PASS(r18 送达且渲染)**
+
+### 迭代表(实例 27624 = 16:54 重启的 bot 号 1694717255,双桥注入 r16/r17/r18)
+
+| 轮 | 形状 | wire | 结果 |
+|---|---|---|---|
+| r16 | 真实存储记录复刻:CH 10 键 + Attr + 修复版 elem37(118B) | 265B | 拒(未广播) |
+| r17 | C2C 真 wire 同构:**无 CH、无 Attr**,顶层 {1,3,4,5,6};群号**字符串** | 179B | 拒(未广播) |
+| r18 | r17 + 群号改 **varint**(RH{2: Grp{1: u64}}) | 173B | **送达+渲染** ✓ |
+
+### 根因阶梯(最终;两条件同时满足才 PASS)
+1. **请求体不得带 ContentHead**(r17 排除;r10–r16 十轮全带)。真 wire
+   (C2C 抓包实证)= {1: RH, 3: Body{1: Rich{2: [elem37, text]}}, 4: seq,
+   5: rand, 6: {1: ts}};存储记录里的 CH/Attr 是存储层附加,不进请求。
+2. **群号是 varint u64,不是字符串**(r18 补齐):13665a0 chat_type==2
+   分支字节级语义 = peer 串经 1e9f8b 转 u64 → Grp.field1(varint)。
+   r10 试过 varint 但当时带 CH——两条件缺一不可。
+
+### r16–r18 期间的排查收获(存档)
+- **bot 资格排除**:bot(1694717255)在群 263402786 内(UI 发 bot-ui-test
+  成功、能收 WIRECAP2026);主账号无 bot 群成员数据关联为假阴性(那是
+  C2C 会话数据)。
+- **懒注册表 0x674F4C8 恒空**('-', 之外无条目)→ 群 UI 发送不走
+  1360480(注册表门控过不去)→ 群与私聊同族(1360ebc 家族),仅路由
+  形状不同——与 r18 形状互证。
+- **elem37 是动态生成**(同群不同消息 104–118B 浮动,尾部嵌每消息随机
+  值);118B 静态常量在 r18 中随整体通过,服务器不校验其动态性。
+- **"divSeq"非单调计数器**(三次成功发送值 21.2 亿→5657 万→12.5 亿乱跳),
+  实为消息级随机数;ContentHead 校验嫌疑彻底排除。
+- r16 前修复的 elem37 常量截断(88B/118B)与 0x06 错字节仍属实(历史
+  轮次无效性成立),但非最终拒因。
+- 主账号收到判定:消息落地后主账号内存出现 JSON 记录形态残留(sendNickName/
+  msgUid/abstractContent,13 处)——「接收方内存 JSON 形态残留」可作为
+  群送达的自动化判据。
+
+### capability profile 更新
+`gates.send` → **field-proven-research(群聊+私聊)**:群聊形状 =
+SendMsgReq{1: RH{2: Grp{1: varint groupCode}}, 3: Body{1: Rich{2: [elem37(118B 静态可用),
+2: text{1:{1:str}}]}}, 4: seq, 5: rand, 6: {1: 秒}};同一线程契约/分配器/
+回调约定(0x732A80 + QQ operator new + 空回调)。
+Residual 不变(响应侧无消费者、seq/random 非会话态、生产按 K4)。
+
+### 证据索引
+- `evidence/p6-g3/g3-send-27624-r16|r17|r18.jsonl` + `inject-27624-r16|r17|r18.json`
+- `E:/stella/_reference/qq-native-r4-g3-20261009/wirecap/`(wirecap-late.jsonl
+  = WIRECAP2026 全部上下文、botuitest.jsonl = bot UI 发送上下文、
+  r18-delivery-main.jsonl = 主账号接收证据)
+- 反编译 r4-g3 phaseV2/W2/X2/Y2/Z2/AA2/AB2/AC2/AD2(MsgRecord 属性键族、
+  MsgCodecMgr 拓扑、CPBMessageOpti、cmd 分派、13665a0/1360480/136222c)
+
+**G3 群聊发送 milestone CLOSED。** 剩余工程项:响应侧拒绝码消费者(增强
+可观测性,非阻塞)、seq/random 会话态接入、生产化 K4。
