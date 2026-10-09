@@ -157,3 +157,56 @@ self = **1694717255**(bot 号,与 r10–r28b 同一账号)——即重启后的�
 
 声明:本轮现场部分仅 observe-msf(外部只读)+ 静态字符串 RPM 读取,零注入;
 native_session 为离线合同,未接真实地址,不构成常驻准入。
+
+## 2026-10-10:接收捕获专项(g2x r1–r5,实例 27108)+ SnowLuma 对照接入
+
+### 捕获工具升级(3b2a4c7)
+
+- g2 头捕获 0x40 → 0x200(64 qword 连续前缀,部分可读保留);Type S 头池快照
+  4KB(回调内,槽位 **q6/q7** —— 实例 27108 实测布局 [SSO q0/q1, 0, permsg32 q3,
+  0x31 q4, 0x25 q5, pool q6, pool q7];早前 [5,6] 系 r4 jsonl 打包偏移误读);
+  窗口上限 120s → 300s。
+- **sso_like 现场修正**:删除 `(q0>>48)==0` 条款 —— 10 位账号 SSO 恰好填满
+  首 qword,高位非零是常态;窗口 1 池快照 0/22 触发即此 bug(现场数据抓到
+  代码缺陷);native_receive::classify 同步修正。
+
+### 现场窗口(r1–r5,全部 restore 对称、零不可读、QQ 存活)
+
+| 窗口 | 时长 | 结果 |
+|---|---|---|
+| r1 | 120s | 42 头全完整(got=64) |
+| r2 | 60s | 23 头;唯一 Type S 的池快照含 `trpc.msg.olpush.OlPushService.MsgPush` + u_ uid |
+| r3 | 300s | 75 头 + 38 池;18 个 MsgPush 池,身份日志碎片(`id:7694798992310132705,seq:`、`peer_uid:1124196924`) |
+| r4 | 300s | 70 头 + 26 池 |
+| r5 | 300s | 91 头 + 38 池;与 SnowLuma 事件流并行录制 |
+
+### 私聊谜题裁决(标记消息三轮未达的根因)
+
+- r2/r4 的 N3R6-G1、N3R8-G1(群)与 N3R8-SELF1(自发)在 bot 进程内存命中
+  (消息存储记录:sender uid + 群码 + 正文);**N3R5/N3R6/N3R8 全部私聊标记
+  在堆段扫描中零命中**。
+- SnowLuma `get_friend_msg_history`(3089665724):最后一条是 10-09 晚验收
+  消息;**10-10 全天主→bot 私聊为零**(10-09 的 CAPTURETEST123 正常到达)。
+- 事实链:主账号在线(群成员表 last_sent_time 落在 r4 窗口内)+ 群消息送达 +
+  好友关系在 ⇒ **主→bot 私聊通道当前单向异常**(主账号重登后发生),待用户
+  在主账号侧核实发送状态。注:主账号 10-09 曾异常离线。
+
+### SnowLuma 对照接入(用户建议;零人工流量)
+
+- 实例 = `NapCatQQ Desktop\components\SnowLuma
+ode.exe index.mjs`(PID 35896),
+  **挂载账号 = 1694717255 = 本项目 bot 实例 27108**(bot.json `backend_type:
+  snowluma`);OneBot v11:HTTP 3000(无 token)、WS 3001(无 token)。
+- 真值表:`gt-friends.json`(好友含主账号 〈Ain〉3089665724)、
+  `gt-group-members.json`(群 263402786 全 384 成员,uin 键控)。
+- **关联链路打通**(r5):SnowLuma 事件(seq=397856,user=3089665724,
+  text)→ 堆扫描命中消息存储记录(sender uid `u_KxYzu_qQPbCC-Ca8mLteVA` +
+  正文,长度前缀字符串区 = 0xC513 族 TLV)→ QQ 自身日志行
+  `[roam_872_263402786]OnQueryMessageList, chat_type=2 peer_uid:263402786,
+  begin_seq:397856` —— **事件 seq ↔ 原生日志 seq ↔ 存储记录三方一致**。
+- 接收映射的剩余工作:TLV 记录内 time/msgId/sender 字段的精确键与偏移
+  (方法已证,数据在 r5 归档 + 后续窗口可续采);私聊映射待私聊通道恢复。
+
+证据:`E:/stella/_reference/caligo-n3-resident-20261009/`(observe t1–t4、
+g2x-r1..r5 capture/report、snowluma-events.jsonl、gt-*.json、
+read_resp_consumer_strings.py、record_snowluma_events.py)。
