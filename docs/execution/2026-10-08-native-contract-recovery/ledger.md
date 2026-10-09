@@ -475,3 +475,9 @@ record 的运行时字符串解析(1e9f8b)+ EBus 键(0x8c910/5005)。
 - 注:IMsgRecord 无 COL(MSVC x64 RTTI 未发 vtable),定位走
   CreateMsgRecordAndSetPbMsg handler 或 25757ea 调用方链
   (0x12f88a8/0x1300876/0x130112e)。
+- kNTCmd 命令表总注册器已定位:0x64c74c..0x6556a5(3.6KB 初始化器,
+  运行时构建 N 条 {kNTCmd 名, handler} 注册);事件名串
+  kNTCmdCreateMsgRecordAndSetPbMsg @ 0x3f54bc0;下一跳 = 汇编级分析
+  该初始化器中 0x3f54bc0 lea 附近的注册调用(FUN_180663d30)取
+  handler 函数指针 → handler 即 record 创建逻辑(反汇编 dump 为空,
+  需重生成后分析)。
