@@ -51,6 +51,7 @@ caligo-cli <K1 probe>
                     [--g3-run-report <g3.jsonl> --g3-run-ms <ms>]
                     [--g3-send-report <g3s.jsonl> --g3-send-peer <uin>
                      --g3-send-text <text> [--g3-send-uid <u_xxx>]
+                     [--g3-send-group <group_code>]
                      [--g3-send-seq <n>] [--g3-send-rand <n>]]
                     [--register-entry] [--wait-ms <ms>]
                     [--intr-report <intr.jsonl> --intr-env <ptr-hex>]
@@ -927,6 +928,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut g3_send_peer: u64 = 0;
     let mut g3_send_text: Option<String> = None;
     let mut g3_send_uid: Option<String> = None;
+    let mut g3_send_group: u64 = 0;
     let mut g3_send_seq: u32 = 1;
     let mut g3_send_rand: u32 = 42;
     let mut env_report: Option<PathBuf> = None;
@@ -1059,6 +1061,13 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => g3_send_uid = Some(v.to_string()),
                 None => {
                     eprintln!("--g3-send-uid 需要参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-send-group" => match next(&mut i).and_then(|v| v.parse().ok()) {
+                Some(v) => g3_send_group = v,
+                None => {
+                    eprintln!("--g3-send-group 需要数字群号参数");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1290,7 +1299,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 eprintln!("--g3-send-text 需要配对 --g3-send-peer");
                 return ExitCode::FAILURE;
             }
-            Some((p.as_path(), g3_send_peer, text.as_str(), g3_send_uid.as_deref(), g3_send_seq, g3_send_rand))
+            Some((p.as_path(), g3_send_peer, text.as_str(), g3_send_uid.as_deref(), g3_send_group, g3_send_seq, g3_send_rand))
         }
         (None, None) => None,
         _ => {

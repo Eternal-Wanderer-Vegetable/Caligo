@@ -750,6 +750,7 @@ pub struct G3SendCtx {
     pub peer_uin: u64,
     pub text_ptr: *const u16, // NUL 结尾 UTF-16(远程缓冲,loader 写入)
     pub uid_ptr: *const u16,  // 对端 uid("u_xxx";可空 = 无 uid 字段)
+    pub group_code: u64,      // 非 0 = 群聊发送(路由 Grp,type=82)
     pub client_seq: u32,
     pub random: u32,
 }
@@ -803,14 +804,26 @@ fn pb_len_field(out: &mut Vec<u8>, field: u32, body: &[u8]) {
     out.extend_from_slice(body);
 }
 
-/// 最小 SendMsgReq(好友私聊文本;字段号与 core 同源,verified=false)。
-/// NTQQ 路由:C2C{1: uin, 2: uid("u_xxx")}——uid 为 NT 路由主键。
-fn encode_send_msg(peer_uin: u64, peer_uid: Option<&str>, text: &str, client_seq: u32, random: u32) -> Vec<u8> {
+/// 最小 SendMsgReq(私聊/群聊文本;字段号与 core 同源,verified=false;
+/// 私聊路由/ContentHead 三键/元素37 均经真实报文实证)。
+/// 群聊路由 = Grp{1: group_code},ContentHead type=82。
+fn encode_send_msg(
+    peer_uin: u64,
+    peer_uid: Option<&str>,
+    group_code: u64,
+    text: &str,
+    client_seq: u32,
+    random: u32,
+) -> Vec<u8> {
     let mut w = Vec::with_capacity(text.len() + 64);
     // 13665a0 实证:朋友路由 = RoutingHead{1: C2C{2: uid}},**无 uin 字段**
     // (C2C 字段1 若为 string 类型,varint 会造成 wire 不匹配 → 整包解析失败)。
     let mut routing = Vec::new();
-    if let Some(uid) = peer_uid {
+    if group_code != 0 {
+        let mut grp = Vec::new();
+        pb_varint_field(&mut grp, 1, group_code);
+        pb_len_field(&mut routing, 2, &grp);
+    } else if let Some(uid) = peer_uid {
         let mut c2c = Vec::new();
         pb_len_field(&mut c2c, PB_F_FRIEND_UID, uid.as_bytes());
         pb_len_field(&mut routing, PB_F_FRIEND_UIN, &c2c);
@@ -819,8 +832,9 @@ fn encode_send_msg(peer_uin: u64, peer_uid: Option<&str>, text: &str, client_seq
     }
     pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
     // ContentHead = {1: type, 2: 0, 3: 0}(1360ebc 实证:嵌套推三键)。
+    let content_type = if group_code != 0 { 82 } else { PB_CONTENT_TYPE_FRIEND_TEXT };
     let mut content = Vec::new();
-    pb_varint_field(&mut content, PB_F_CONTENT_TYPE, PB_CONTENT_TYPE_FRIEND_TEXT);
+    pb_varint_field(&mut content, PB_F_CONTENT_TYPE, content_type);
     pb_varint_field(&mut content, 2, 0);
     pb_varint_field(&mut content, 3, 0);
     pb_len_field(&mut w, PB_F_CONTENT_HEAD, &content);
@@ -877,8 +891,8 @@ type SendSsoFn = unsafe extern "system" fn(usize, usize, usize, u8, usize);
 /// SAFETY: ctx 必须指向本进程内有效的 [`G3SendCtx`]。
 pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     // SAFETY: ctx 由 loader 写入。
-    let (wrapper_base, report_path, peer_uin, text_ptr, uid_ptr, client_seq, random) = unsafe {
-        ((*ctx).wrapper_base, (*ctx).report_path, (*ctx).peer_uin, (*ctx).text_ptr, (*ctx).uid_ptr, (*ctx).client_seq, (*ctx).random)
+    let (wrapper_base, report_path, peer_uin, text_ptr, uid_ptr, group_code, client_seq, random) = unsafe {
+        ((*ctx).wrapper_base, (*ctx).report_path, (*ctx).peer_uin, (*ctx).text_ptr, (*ctx).uid_ptr, (*ctx).group_code, (*ctx).client_seq, (*ctx).random)
     };
 
     // adopt(getter 租约;g1/g2/g3 探测同机械)。
@@ -937,7 +951,7 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
         stage(report_path, "g3s_uid", true, &format!("len={}", u.len()));
     }
     // 编码请求体(最小 SendMsgReq;verified=false)。
-    let body = encode_send_msg(peer_uin, peer_uid.as_deref(), &text, client_seq, random);
+    let body = encode_send_msg(peer_uin, peer_uid.as_deref(), group_code, &text, client_seq, random);
     stage(
         report_path,
         "g3s_encode",
@@ -1248,7 +1262,7 @@ mod tests {
     /// P2 编码:好友私聊最小 SendMsgReq 结构(与 core 同字段号;手工解析校验)。
     #[test]
     fn send_msg_encoding_friend() {
-        let body = encode_send_msg(3089665724, Some("u_TESTPEER"), "G3P2", 7, 9);
+        let body = encode_send_msg(3089665724, Some("u_TESTPEER"), 0, "G3P2", 7, 9);
         // 顶层字段序:1(routing)2(content)3(body)4(seq)5(rand)。
         let mut pos = 0usize;
         let mut fields = Vec::new();

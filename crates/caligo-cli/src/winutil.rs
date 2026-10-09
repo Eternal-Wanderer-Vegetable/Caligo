@@ -356,7 +356,7 @@ pub unsafe fn inject_and_probe(
     g2_run_ms: u32,
     g3_run_report: Option<&Path>,
     g3_run_ms: u32,
-    g3_send: Option<(&Path, u64, &str, Option<&str>, u32, u32)>, // (report, peer_uin, text, uid, seq, rand)
+    g3_send: Option<(&Path, u64, &str, Option<&str>, u64, u32, u32)>, // (report, peer_uin, text, uid, group_code, seq, rand)
 ) -> Result<InjectOutcome, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
@@ -859,7 +859,7 @@ pub unsafe fn inject_and_probe(
             // 可选:G3-P2 受控发送(caligo_g3_send_run):单次调用,
             // 零插桩。同步返回(发送本身异步)。
             let mut g3_send_exit: Option<u32> = None;
-            if let Some((send_report, peer_uin, text, uid, seq, rand)) = g3_send {
+            if let Some((send_report, peer_uin, text, uid, group_code, seq, rand)) = g3_send {
                 let send_addr =
                     match read_remote_export(proc_h, remote_base, "caligo_g3_send_run") {
                         Ok(Some(a)) => a,
@@ -894,12 +894,13 @@ pub unsafe fn inject_and_probe(
                 };
                 let remote_uid = alloc_and_write(&uid_u16, "alloc g3s uid")?;
                 buf_obs = Some(remote_uid);
-                let mut ctx_bytes = Vec::with_capacity(48);
+                let mut ctx_bytes = Vec::with_capacity(56);
                 ctx_bytes.extend_from_slice(&wrapper_base.to_le_bytes());
                 ctx_bytes.extend_from_slice(&(remote_send_path as usize).to_le_bytes());
                 ctx_bytes.extend_from_slice(&peer_uin.to_le_bytes());
                 ctx_bytes.extend_from_slice(&(remote_text as usize).to_le_bytes());
                 ctx_bytes.extend_from_slice(&(remote_uid as usize).to_le_bytes());
+                ctx_bytes.extend_from_slice(&group_code.to_le_bytes());
                 ctx_bytes.extend_from_slice(&seq.to_le_bytes());
                 ctx_bytes.extend_from_slice(&rand.to_le_bytes());
                 let remote_send_ctx = alloc_and_write_bytes(&ctx_bytes, "alloc g3s ctx")?;
