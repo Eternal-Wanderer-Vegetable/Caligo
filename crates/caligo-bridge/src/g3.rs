@@ -770,6 +770,12 @@ unsafe fn read_utf16_opt(ptr: *const u16) -> Option<String> {
     Some(String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(ptr, len) }))
 }
 
+fn pb_len_field_vec(field: u32, body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(body.len() + 5);
+    pb_len_field(&mut out, field, body);
+    out
+}
+
 fn pb_varint(out: &mut Vec<u8>, mut v: u64) {
     loop {
         let b = (v & 0x7F) as u8;
@@ -837,7 +843,9 @@ fn encode_send_msg(peer_uin: u64, peer_uid: Option<&str>, text: &str, client_seq
     pb_len_field(&mut rich, 2, ELEM_GENERAL_FLAGS);
     pb_len_field(&mut rich, 2, ELEM_ID9);
     pb_len_field(&mut rich, 2, &elem);
-    pb_len_field(&mut w, PB_F_BODY, &rich.as_slice());
+    // Body = {1: richText}(真实报文 0a39 包装;缺失 → 对端找不到富文本)。
+    let body_nested = pb_len_field_vec(PB_F_BODY_RICH, &rich);
+    pb_len_field(&mut w, PB_F_BODY, &body_nested);
     pb_varint_field(&mut w, PB_F_CLIENT_SEQ, client_seq as u64);
     pb_varint_field(&mut w, PB_F_RANDOM, random as u64);
     // 键6 = {1: 发送时刻(秒)}(真实报文实证)。
@@ -1291,6 +1299,8 @@ mod tests {
         assert_eq!(r[2], 0x12, "uid under key2");
         assert_eq!(fields[1].0, PB_F_CONTENT_HEAD);
         assert_eq!(fields[2].0, PB_F_BODY);
+        // body = {1: rich} 一层包装
+        assert_eq!(fields[2].2[0], 0x0A, "rich must nest under body field 1");
         assert_eq!(fields[3].0, PB_F_CLIENT_SEQ);
         assert_eq!(fields[4].0, PB_F_RANDOM);
         assert_eq!(fields[5].0, 6);
