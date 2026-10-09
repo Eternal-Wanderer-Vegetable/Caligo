@@ -816,28 +816,33 @@ fn encode_send_msg(
     random: u32,
 ) -> Vec<u8> {
     let mut w = Vec::with_capacity(text.len() + 64);
-    // 13665a0 实证:朋友路由 = RoutingHead{1: C2C{2: uid}},**无 uin 字段**
-    // (C2C 字段1 若为 string 类型,varint 会造成 wire 不匹配 → 整包解析失败)。
-    let mut routing = Vec::new();
     if group_code != 0 {
-        let mut grp = Vec::new();
-        pb_varint_field(&mut grp, 1, group_code);
-        pb_len_field(&mut routing, 2, &grp);
-    } else if let Some(uid) = peer_uid {
-        let mut c2c = Vec::new();
-        pb_len_field(&mut c2c, PB_F_FRIEND_UID, uid.as_bytes());
-        pb_len_field(&mut routing, PB_F_FRIEND_UIN, &c2c);
+        // ===== 群聊顶层结构(1360480 实证,与私聊完全不同)=====
+        // {1: int 1, 2: {1: 群号字符串}, 3: Body{1: rich{2: elems}}}
+        pb_varint_field(&mut w, 1, 1);
+        let mut key2 = Vec::new();
+        let code_str = group_code.to_string();
+        pb_len_field(&mut key2, 1, code_str.as_bytes());
+        pb_len_field(&mut w, 2, &key2);
     } else {
-        pb_varint_field(&mut routing, PB_F_FRIEND_UIN, peer_uin);
+        // 13665a0 实证:朋友路由 = RoutingHead{1: C2C{2: uid}},无 uin 字段
+        // (C2C 字段1 若为 string 类型,varint 会造成 wire 不匹配 → 整包解析失败)。
+        let mut routing = Vec::new();
+        if let Some(uid) = peer_uid {
+            let mut c2c = Vec::new();
+            pb_len_field(&mut c2c, PB_F_FRIEND_UID, uid.as_bytes());
+            pb_len_field(&mut routing, PB_F_FRIEND_UIN, &c2c);
+        } else {
+            pb_varint_field(&mut routing, PB_F_FRIEND_UIN, peer_uin);
+        }
+        pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
+        // ContentHead = {1: type, 2: 0, 3: 0}(1360ebc 实证:嵌套推三键)。
+        let mut content = Vec::new();
+        pb_varint_field(&mut content, PB_F_CONTENT_TYPE, PB_CONTENT_TYPE_FRIEND_TEXT);
+        pb_varint_field(&mut content, 2, 0);
+        pb_varint_field(&mut content, 3, 0);
+        pb_len_field(&mut w, PB_F_CONTENT_HEAD, &content);
     }
-    pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
-    // ContentHead = {1: type, 2: 0, 3: 0}(1360ebc 实证:嵌套推三键)。
-    let content_type = if group_code != 0 { 82 } else { PB_CONTENT_TYPE_FRIEND_TEXT };
-    let mut content = Vec::new();
-    pb_varint_field(&mut content, PB_F_CONTENT_TYPE, content_type);
-    pb_varint_field(&mut content, 2, 0);
-    pb_varint_field(&mut content, 3, 0);
-    pb_len_field(&mut w, PB_F_CONTENT_HEAD, &content);
     let mut elem = Vec::new();
     {
         let mut txt = Vec::new();
@@ -859,16 +864,19 @@ fn encode_send_msg(
     // Body = {1: richText}(真实报文 0a39 包装;缺失 → 对端找不到富文本)。
     let body_nested = pb_len_field_vec(PB_F_BODY_RICH, &rich);
     pb_len_field(&mut w, PB_F_BODY, &body_nested);
-    pb_varint_field(&mut w, PB_F_CLIENT_SEQ, client_seq as u64);
-    pb_varint_field(&mut w, PB_F_RANDOM, random as u64);
-    // 键6 = {1: 发送时刻(秒)}(真实报文实证)。
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let mut f6 = Vec::new();
-    pb_varint_field(&mut f6, 1, ts);
-    pb_len_field(&mut w, 6, &f6);
+    if group_code == 0 {
+        // 私聊附加键(真实报文实证);群路径(1360480)不推这些键。
+        pb_varint_field(&mut w, PB_F_CLIENT_SEQ, client_seq as u64);
+        pb_varint_field(&mut w, PB_F_RANDOM, random as u64);
+        // 键6 = {1: 发送时刻(秒)}(真实报文实证)。
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut f6 = Vec::new();
+        pb_varint_field(&mut f6, 1, ts);
+        pb_len_field(&mut w, 6, &f6);
+    }
     w
 }
 

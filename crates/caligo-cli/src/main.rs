@@ -1295,8 +1295,8 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     });
     let g3_send = match (&g3_send_report, &g3_send_text) {
         (Some(p), Some(text)) => {
-            if g3_send_peer == 0 {
-                eprintln!("--g3-send-text 需要配对 --g3-send-peer");
+            if g3_send_peer == 0 && g3_send_group == 0 {
+                eprintln!("--g3-send-text 需要配对 --g3-send-peer 或 --g3-send-group");
                 return ExitCode::FAILURE;
             }
             Some((p.as_path(), g3_send_peer, text.as_str(), g3_send_uid.as_deref(), g3_send_group, g3_send_seq, g3_send_rand))

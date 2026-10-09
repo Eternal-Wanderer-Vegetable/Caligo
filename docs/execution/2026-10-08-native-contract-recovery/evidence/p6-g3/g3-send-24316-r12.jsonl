@@ -1,0 +1,24 @@
+{"ts":1791525398452,"tid":42512,"stage":"g3s_adopt","ok":true,"detail":"svc=1dea1bd0000"}
+{"ts":1791525398453,"tid":42512,"stage":"g3s_site","ok":true,"detail":"transport=1dea18add40 vptr=7fff1c0203b8"}
+{"ts":1791525398453,"tid":42512,"stage":"g3s_text","ok":true,"detail":"bytes=25"}
+{"ts":1791525398453,"tid":42512,"stage":"g3s_encode","ok":true,"detail":"len=100 head=0a0d120b0a0932363334303237383612060852100018001a"}
+{"ts":1791525398453,"tid":42512,"stage":"g3s_alloc","ok":true,"detail":"buf=1df31506690 len=100"}
+{"ts":1791525398453,"tid":42512,"stage":"g3s_selfstr","ok":true,"detail":"short len=10"}
+{"ts":1791525398453,"tid":42512,"stage":"g3s_submitted","ok":true,"detail":"send returned (async); peer=0 body_len=100 seq=12"}
+{"ts":1791525398453,"tid":42512,"stage":"g3s_done","ok":true,"detail":"ok — verify delivery on peer"}
+{"ts":1791525433616,"tid":23960,"stage":"g3s_adopt","ok":true,"detail":"svc=1dea1bd0000"}
+{"ts":1791525433616,"tid":23960,"stage":"g3s_site","ok":true,"detail":"transport=1dea18add40 vptr=7fff1c0203b8"}
+{"ts":1791525433616,"tid":23960,"stage":"g3s_text","ok":true,"detail":"bytes=25"}
+{"ts":1791525433616,"tid":23960,"stage":"g3s_encode","ok":true,"detail":"len=86 head=0a0d120b0a0932363334303237383612060852100018001a"}
+{"ts":1791525433617,"tid":23960,"stage":"g3s_alloc","ok":true,"detail":"buf=1dea18b62e0 len=86"}
+{"ts":1791525433617,"tid":23960,"stage":"g3s_selfstr","ok":true,"detail":"short len=10"}
+{"ts":1791525433617,"tid":23960,"stage":"g3s_submitted","ok":true,"detail":"send returned (async); peer=0 body_len=86 seq=12"}
+{"ts":1791525433617,"tid":23960,"stage":"g3s_done","ok":true,"detail":"ok — verify delivery on peer"}
+{"ts":1791525536023,"tid":40652,"stage":"g3s_adopt","ok":true,"detail":"svc=1dea1bd0000"}
+{"ts":1791525536023,"tid":40652,"stage":"g3s_site","ok":true,"detail":"transport=1dea18add40 vptr=7fff1c0203b8"}
+{"ts":1791525536023,"tid":40652,"stage":"g3s_text","ok":true,"detail":"bytes=25"}
+{"ts":1791525536023,"tid":40652,"stage":"g3s_encode","ok":true,"detail":"len=78 head=0801120b0a093236333430323738361a3d0a3b121aaa0217"}
+{"ts":1791525536023,"tid":40652,"stage":"g3s_alloc","ok":true,"detail":"buf=1dea23d0af0 len=78"}
+{"ts":1791525536023,"tid":40652,"stage":"g3s_selfstr","ok":true,"detail":"short len=10"}
+{"ts":1791525536023,"tid":40652,"stage":"g3s_submitted","ok":true,"detail":"send returned (async); peer=0 body_len=78 seq=12"}
+{"ts":1791525536023,"tid":40652,"stage":"g3s_done","ok":true,"detail":"ok — verify delivery on peer"}
