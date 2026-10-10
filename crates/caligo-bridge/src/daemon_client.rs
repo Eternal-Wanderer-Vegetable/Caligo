@@ -75,6 +75,10 @@ pub struct DaemonClientConfig {
     pub host_nonce: u64,
     /// 宿主进程创建时间(取不到为空;默认 GetProcessTimes 的 unix 秒)。
     pub host_process_created_utc: String,
+    /// 本账号 uid(u_* 形态;可选)。CPB 记录的 sender 为 uid 形态,
+    /// 与 account(uin)不同域 —— 提供时 direction 判别才能识别自发回流;
+    /// 空 = 一律 incoming(不猜映射)。
+    pub self_uid: String,
     /// 心跳间隔(计划 §6.4 建议 5s)。
     pub heartbeat_ms: u64,
     /// 重连退避起点(计划 §6.4:1/2/4…上限 30s)。
@@ -92,6 +96,7 @@ impl Default for DaemonClientConfig {
             module_baseline: String::new(),
             host_nonce: host_instance_nonce(),
             host_process_created_utc: process_created_utc(),
+            self_uid: String::new(),
             heartbeat_ms: 5_000,
             reconnect_backoff_ms: 1_000,
         }
@@ -730,10 +735,20 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
                 session_generation: cfg.session_generation,
                 session: serde_json::json!({
                     "account": cfg.account,
-                    "kind": if ev.chat_type == 2 { "group" } else { "private" },
+                    // kind 零猜测:2=群、1=私聊、其他(含 native 路线的
+                    // unknown=0)如实上送,core 按"缺必需真实字段"处理。
+                    "kind": match ev.chat_type {
+                        2 => "group",
+                        1 => "private",
+                        _ => "unknown",
+                    },
                     "peer": ev.peer_uid,
                 }),
-                direction: if !cfg.account.is_empty() && ev.sender_uin == cfg.account {
+                // 自发判别:account(uin)或 self_uid(uid)双域比对;
+                // 两者都未提供/不匹配 = incoming(不猜映射)。
+                direction: if (!cfg.account.is_empty() && ev.sender_uin == cfg.account)
+                    || (!cfg.self_uid.is_empty() && ev.sender_uin == cfg.self_uid)
+                {
                     "self_sent"
                 } else {
                     "incoming"

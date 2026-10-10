@@ -142,6 +142,7 @@ fn worker_config_host(prefix: &str, auth: &str, host_nonce: u64) -> DaemonClient
         module_baseline: "qq-9.9.33-52230".into(),
         host_nonce,
         host_process_created_utc: "2026-10-08T00:00:00Z".into(),
+        self_uid: String::new(),
         heartbeat_ms: 500,
         reconnect_backoff_ms: 50,
     }

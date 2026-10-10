@@ -596,3 +596,57 @@ exit_code=0,QQ 存活(27108 起始时间不变)。
 caligo-n3-session-20261010/`(r1/r2 capture+report,g3s1/g3s2 DLL)。
 N3 常驻化剩余:宿主合法初始化 + IPC 事件交付 + SeenRecords 移入 worker
 (均为已验证部件组装,无未知结构)。
+## 2026-10-10(二十一):N3 常驻 native 后端现场接线 —— 派发/接收/事件/IPC/关闭 全链贯通
+
+### 离线交付
+- **native_resident.rs**(bridge,research 门控):
+  - `NativeHostAdapter`:owner = 泵线程自声明;env = 锚点探针逐次重查;
+    current_context 恒可(g3 FFI 无 JS 上下文前提,远线程现场实证);
+  - 发送 = SendText → qq_wire 已证形状(群)→ `enqueue_send` → SendFired →
+    **CPB 回流匹配**(EchoMatcher:peer+text+时间容差 120s;时间缺席的
+    半成品记录不确认)→ complete_sends;私聊显式拒绝(native code 11);
+  - 接收 = worker CPB 差分轮询(默认 1s)——ledger(十三)定稿形态的
+    **严格子集(纯轮询)**,通知 swap 常驻化留作独立增量(需生命周期评审);
+  - kind 零猜测:仅认部署配置群号表(→2 群),否则 0=unknown;
+  - close 诚实分类(r2 现场 unknown=1 如实上送,零伪造 Clean)。
+- daemon_client:`self_uid` 双域 direction 判别;kind 映射 2=群/1=私聊/_=unknown。
+- lib.rs 导出 `caligo_native_resident_run`;CLI `--native-resident-*`(winutil
+  80B ctx:wrapper/report/pipe/token/account/baseline/gen/groups/self_uid/poll/observe);
+  **caligod 零改动**(bridge 管道/actor/journal 直接复用)。
+- 验收:workspace research **200/0**,default **176/0**(+3:EchoMatcher 匹配/
+  时间容差/过期清理;kind 白名单)。
+
+### 现场 r1/r2(PID 27108 双查通过;caligod --expect-pid 27108)
+- **r1 教训**:长管道名(`\.\pipe\…`)经 bash→CLI→远线程链路被破坏 →
+  worker connects=0;现场参数一律用**短名**(daemon-client/daemon 两侧同
+  规则自动补根)。
+- **r2(短名)全链贯通**:
+  - daemon-control send → actor 受理(Queued)→ dispatch_out → Dispatch →
+    resident.submit(Accepted)→ NativeStarted 上报 → pump drain →
+    enqueue_send 派发;
+  - 接收 worker 120s:**205 事件**入列(partial=112 半成品如实计数)→
+    IPC v3 上行 **events_sent=884 / acked=205 / gap_dropped=0**;
+    事件含全字段(peer/sender uid/text/seq/time;direction;
+    kind=group 正确;kind=unknown 被 daemon `caligo_target` 强转为 private
+    —— core Target 类型只有 group|private,扩 Unknown 变体列 TODO);
+  - close:cancelled=0 **unknown=1**(发送回流未至,如实 Unknown,不伪造)。
+- **原生发送回归(独立发现,非本轮引入)**:N3R24-RESIDENT(常驻)与
+  N3R24-G3PROBE(g3_session 对照)均"派发 FFI 成功但零服务端效果"(无 CPB
+  回流、群历史无消息);对照 **API 发送(NapCat/QQ 自有栈)秒达 seq=399386**。
+  本路线代码与 21:45 N3R23 成功轮逐字节相同(g3_ops 此后零改动)→ 判定
+  **目标实例内部发送服务状态漂移**(legacy 732A80 路径依赖状态衰减;
+  接收全程正常流动)。私聊探针(3089665724)FFI 完成但对端通道断无法验证。
+  待办:发送后即时响应日志扫描诊断("got empty response" 通道);
+  实例按 recovery-notes 恢复退出/重启后复测。
+- **现场缺陷(既有代码)**:daemon_client session_loop 的未确认窗口重放
+  位于循环体内(注释称"恰一处重放"实为每轮重放)→ ack 滞后时冗余帧
+  (884 sent / 205 acked);daemon 按 seq 去重正确性无损,效率缺陷
+  TODO:重放移至 Hello 后仅新连接执行。
+
+### 状态
+**N3 常驻 native 后端首轮现场贯通**:IPC v3 + actor/journal(core 零改动)+
+常驻状态机 + CPB 差分接收 + 事件上行 + 诚实关闭,全部 field-proven。
+剩余:① 发送服务漂移调查(独立);② notify 信号常驻化(即时性增量);
+③ daemon Target Unknown 变体;④ 宿主合法初始化路线(设计审查)。
+证据:`E:/stella/_reference/caligo-n3res-20261010/`(r1/r2 capture、
+g3probe/g3send 探针、caligod 日志、journal)。

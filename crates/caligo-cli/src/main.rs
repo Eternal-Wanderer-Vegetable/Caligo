@@ -55,6 +55,11 @@ caligo-cli <K1 probe>
                      [--g3-send-seq <n>] [--g3-send-rand <n>]]
                     [--g3-session-report <g3sess.jsonl> --g3-session-group <code>
                      --g3-session-text <text> [--g3-session-ms <ms>]]
+                    [--native-resident-report <nr.jsonl> --native-resident-pipe <name>
+                     --native-resident-token <t> --native-resident-account <uin>
+                     [--native-resident-baseline <id>] [--native-resident-gen <n>]
+                     [--native-resident-groups <c1,c2>] [--native-resident-self-uid <u_x>]
+                     [--native-resident-poll-ms <ms>] [--native-resident-ms <ms>]]
                     [--register-entry] [--wait-ms <ms>]
                     [--intr-report <intr.jsonl> --intr-env <ptr-hex>]
                     [--intr-vftable <va-hex>] [--intr-wait-ms <ms>]
@@ -928,6 +933,16 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut g3_session_group: u64 = 0;
     let mut g3_session_text: Option<String> = None;
     let mut g3_session_ms: u32 = 30_000;
+    let mut native_resident_report: Option<PathBuf> = None;
+    let mut native_resident_pipe: Option<String> = None;
+    let mut native_resident_token: Option<String> = None;
+    let mut native_resident_account: Option<String> = None;
+    let mut native_resident_baseline = "qq-9.9.33-52230".to_string();
+    let mut native_resident_gen: u64 = 1;
+    let mut native_resident_groups = String::new();
+    let mut native_resident_self_uid = String::new();
+    let mut native_resident_poll_ms: u32 = 1_000;
+    let mut native_resident_ms: u32 = 90_000;
     let mut g3_run_report: Option<PathBuf> = None;
     let mut g3_run_ms: u32 = 120_000;
     let mut g3_send_report: Option<PathBuf> = None;
@@ -1142,6 +1157,76 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => g3_session_ms = v,
                 None => {
                     eprintln!("--g3-session-ms 需要数字参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--native-resident-report" => match next(&mut i) {
+                Some(v) => native_resident_report = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("--native-resident-report 需要路径参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--native-resident-pipe" => match next(&mut i) {
+                Some(v) => native_resident_pipe = Some(v),
+                None => {
+                    eprintln!("--native-resident-pipe 需要参数(bridge 管道全名)");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--native-resident-token" => match next(&mut i) {
+                Some(v) => native_resident_token = Some(v),
+                None => {
+                    eprintln!("--native-resident-token 需要参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--native-resident-account" => match next(&mut i) {
+                Some(v) => native_resident_account = Some(v),
+                None => {
+                    eprintln!("--native-resident-account 需要参数(uin)");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--native-resident-baseline" => match next(&mut i) {
+                Some(v) => native_resident_baseline = v,
+                None => {
+                    eprintln!("--native-resident-baseline 需要参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--native-resident-gen" => match next(&mut i).and_then(|v| v.parse().ok()) {
+                Some(v) => native_resident_gen = v,
+                None => {
+                    eprintln!("--native-resident-gen 需要数字参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--native-resident-groups" => match next(&mut i) {
+                Some(v) => native_resident_groups = v,
+                None => {
+                    eprintln!("--native-resident-groups 需要参数(逗号分隔群号)");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--native-resident-self-uid" => match next(&mut i) {
+                Some(v) => native_resident_self_uid = v,
+                None => {
+                    eprintln!("--native-resident-self-uid 需要参数(u_* 形态)");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--native-resident-poll-ms" => match next(&mut i).and_then(|v| v.parse().ok()) {
+                Some(v) => native_resident_poll_ms = v,
+                None => {
+                    eprintln!("--native-resident-poll-ms 需要数字参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--native-resident-ms" => match next(&mut i).and_then(|v| v.parse().ok()) {
+                Some(v) => native_resident_ms = v,
+                None => {
+                    eprintln!("--native-resident-ms 需要数字参数");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1412,6 +1497,42 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let native_resident_report = native_resident_report.map(|p| {
+        std::fs::OpenOptions::new().create(true).append(true).open(&p).ok();
+        p
+    });
+    let native_resident = match (
+        &native_resident_report,
+        &native_resident_pipe,
+        &native_resident_token,
+        &native_resident_account,
+    ) {
+        (Some(report), Some(pipe), Some(token), Some(account)) => {
+            println!(
+                "[native-resident] pipe={pipe} account={account} groups={:?} observe_ms={native_resident_ms}",
+                native_resident_groups
+            );
+            Some(winutil::NativeResidentRequest {
+                report: report.clone(),
+                pipe_name: pipe.clone(),
+                auth_token: token.clone(),
+                account: account.clone(),
+                module_baseline: native_resident_baseline.clone(),
+                session_generation: native_resident_gen,
+                group_codes: native_resident_groups.clone(),
+                self_uid: native_resident_self_uid.clone(),
+                poll_ms: native_resident_poll_ms,
+                observe_ms: native_resident_ms,
+            })
+        }
+        (None, None, None, None) => None,
+        _ => {
+            eprintln!(
+                "--native-resident-report/-pipe/-token/-account 需同时提供(其余可选)"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
     let obs_report = match obs_report {
         Some(p) => {
             let abs = match to_absolute(&p) {
@@ -1649,10 +1770,33 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             g3_run_ms,
             g3_send.clone(),
             g3_session.clone(),
+            native_resident.as_ref(),
         )
     };
     match outcome {
         Ok(o) => {
+            if let Some(nr_code) = o.native_resident_exit_code {
+                println!(
+                    "[native-resident] caligo_native_resident_run:exit_code={} ({})",
+                    nr_code,
+                    match nr_code {
+                        0 => "OK(窗口关闭)",
+                        1 => "attach 失败(probe_service)",
+                        2 => "session attach 失败",
+                        3 => "线程创建失败",
+                        _ => "UNKNOWN",
+                    }
+                );
+                if let Some(rp) = native_resident_report.as_deref() {
+                    match std::fs::read_to_string(rp) {
+                        Ok(content) => {
+                            println!("=== native-resident report ({}) ===", rp.display());
+                            println!("{content}");
+                        }
+                        Err(e) => eprintln!("native-resident 报告读取失败 {}: {e}", rp.display()),
+                    }
+                }
+            }
             if let Some(gs_code) = o.g3_session_exit_code {
                 println!(
                     "[g3-session] caligo_g3_session_run:exit_code={} ({})",

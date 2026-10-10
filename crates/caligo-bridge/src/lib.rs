@@ -68,6 +68,8 @@ pub mod g2;
 pub mod g3;
 pub mod g3_ops;
 pub mod g3_session;
+#[cfg(feature = "research")]
+pub mod native_resident;
 pub mod register;
 pub mod resident;
 
@@ -402,6 +404,26 @@ pub unsafe extern "system" fn caligo_g3_session_run(ctx: *const g3_session::G3Se
     }
     // SAFETY: ctx 由 loader 写入且位于本进程。
     unsafe { g3_session::g3_session_run(ctx) }
+}
+
+/// N3 常驻 native 后端入口(research 构建;注入纪律与 g2/g3-session 同)。
+/// attach → 泵/接收/daemon-client 三线程 → observe_ms 有界窗口或停止。
+///
+/// `ctx` 必须指向本进程内有效的
+/// [`native_resident::NativeResidentCtx`]。
+#[no_mangle]
+#[cfg(feature = "research")]
+pub unsafe extern "system" fn caligo_native_resident_run(
+    ctx: *const native_resident::NativeResidentCtx,
+) -> u32 {
+    if let Some(code) = gate::reject_legacy() {
+        return code;
+    }
+    if ctx.is_null() {
+        return probe_code::ERR_NULL_PATH;
+    }
+    // SAFETY: ctx 由 loader 写入且位于本进程。
+    unsafe { native_resident::native_resident_run(ctx) }
 }
 
 /// G3 发送探测 P1(P7;`g3.rs`):transport vtable slot7 捕获交换,

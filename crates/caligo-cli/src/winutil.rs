@@ -277,6 +277,33 @@ pub struct InjectOutcome {
     pub async_exit_code: Option<u32>,
     /// `caligo_exec_run` 的返回码(仅在 exec 提供时;同步执行)。
     pub exec_exit_code: Option<u32>,
+    /// `caligo_native_resident_run` 的返回码(仅在 native_resident 提供时)。
+    pub native_resident_exit_code: Option<u32>,
+}
+
+/// N3 常驻 native 后端请求(布局对应 caligo_bridge::native_resident::NativeResidentCtx;
+/// 字符串均 NUL 结尾由 loader 侧写入)。
+pub struct NativeResidentRequest {
+    /// JSONL 报告路径。
+    pub report: PathBuf,
+    /// daemon bridge 管道全名(前缀 + "-bridge")。
+    pub pipe_name: String,
+    /// 认证 token(caligod 首行 JSON 输出)。
+    pub auth_token: String,
+    /// bot uin 十进制串(与 caligod --account 一致)。
+    pub account: String,
+    /// 模块基线(如 "qq-9.9.33-52230")。
+    pub module_baseline: String,
+    /// 会话代次。
+    pub session_generation: u64,
+    /// 逗号分隔群号(kind 判别白名单;空 = 全部 unknown)。
+    pub group_codes: String,
+    /// 本账号 uid(u_* 形态;可选,空 = direction 一律 incoming)。
+    pub self_uid: String,
+    /// CPB 差分轮询周期(ms)。
+    pub poll_ms: u32,
+    /// 研究有界窗口(ms;0 = 直到 daemon 停止)。
+    pub observe_ms: u32,
 }
 
 /// WU3 RequestInterrupt 实验的请求参数(布局对应 caligo_bridge::intr::IntrCtx)。
@@ -360,6 +387,7 @@ pub unsafe fn inject_and_probe(
     g3_run_ms: u32,
     g3_send: Option<(&Path, u64, &str, Option<&str>, u64, u32, u32, Option<std::path::PathBuf>, Option<(String, u32)>)>, // (report, peer_uin, text, uid, group_code, seq, rand, seq_state, (at_uid, at_uin))
     g3_session: Option<(&Path, u64, &str, u32)>, // (report, group_code, text, observe_ms)
+    native_resident: Option<&NativeResidentRequest>,
 ) -> Result<InjectOutcome, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
@@ -1021,6 +1049,102 @@ pub unsafe fn inject_and_probe(
                 g3_session_exit = Some(code);
             }
 
+            // 可选:N3 常驻 native 后端(caligo_native_resident_run):
+            // attach → 泵/接收/daemon-client 三线程 → observe_ms 有界窗口。
+            let mut native_resident_exit: Option<u32> = None;
+            if let Some(nr) = native_resident {
+                let nr_addr =
+                    match read_remote_export(proc_h, remote_base, "caligo_native_resident_run") {
+                        Ok(Some(a)) => a,
+                        Ok(None) => {
+                            return Err("caligo_native_resident_run not found in remote".into())
+                        }
+                        Err(e) => return Err(format!("remote export lookup (n3res): {e}")),
+                    };
+                let wrapper_base = *module_bases_in(pid)?.get("wrapper.node").unwrap_or(&0);
+                if wrapper_base == 0 {
+                    return Err("wrapper.node base unresolved in target (n3res)".into());
+                }
+                // 绝对化:远程线程按目标进程 CWD 解析相对路径,必须传全路径。
+                let nr_abs = if nr.report.is_absolute() {
+                    nr.report.to_path_buf()
+                } else {
+                    std::env::current_dir()
+                        .map_err(|e| format!("current_dir: {e}"))?
+                        .join(&nr.report)
+                };
+                let nr_wide = to_wide(&nr_abs.to_string_lossy());
+                let remote_nr_path = alloc_and_write(&nr_wide, "alloc n3res report path")?;
+                buf_obs = Some(remote_nr_path);
+                let pipe_wide: Vec<u16> = nr.pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
+                let remote_nr_pipe = alloc_and_write(&pipe_wide, "alloc n3res pipe")?;
+                buf_obs = Some(remote_nr_pipe);
+                // UTF-8 NUL 结尾串(token/account/baseline/groups/self_uid)。
+                let alloc_u8 = |label: &'static str, s: &str| -> Result<*mut core::ffi::c_void, String> {
+                    let mut v = s.as_bytes().to_vec();
+                    v.push(0);
+                    alloc_and_write_bytes(&v, label)
+                };
+                let remote_nr_token = alloc_u8("alloc n3res token", &nr.auth_token)?;
+                buf_obs = Some(remote_nr_token);
+                let remote_nr_account = alloc_u8("alloc n3res account", &nr.account)?;
+                buf_obs = Some(remote_nr_account);
+                let remote_nr_baseline = alloc_u8("alloc n3res baseline", &nr.module_baseline)?;
+                buf_obs = Some(remote_nr_baseline);
+                let remote_nr_groups = alloc_u8("alloc n3res groups", &nr.group_codes)?;
+                buf_obs = Some(remote_nr_groups);
+                let remote_nr_selfuid = alloc_u8("alloc n3res self_uid", &nr.self_uid)?;
+                buf_obs = Some(remote_nr_selfuid);
+                // NativeResidentCtx:80B(见 native_resident.rs ctx 布局)。
+                let mut ctx_bytes = Vec::with_capacity(80);
+                ctx_bytes.extend_from_slice(&wrapper_base.to_le_bytes()); // +0x00
+                ctx_bytes.extend_from_slice(&(remote_nr_path as usize).to_le_bytes()); // +0x08
+                ctx_bytes.extend_from_slice(&(remote_nr_pipe as usize).to_le_bytes()); // +0x10
+                ctx_bytes.extend_from_slice(&(remote_nr_token as usize).to_le_bytes()); // +0x18
+                ctx_bytes.extend_from_slice(&(remote_nr_account as usize).to_le_bytes()); // +0x20
+                ctx_bytes.extend_from_slice(&(remote_nr_baseline as usize).to_le_bytes()); // +0x28
+                ctx_bytes.extend_from_slice(&nr.session_generation.to_le_bytes()); // +0x30
+                ctx_bytes.extend_from_slice(&(remote_nr_groups as usize).to_le_bytes()); // +0x38
+                ctx_bytes.extend_from_slice(&(remote_nr_selfuid as usize).to_le_bytes()); // +0x40
+                ctx_bytes.extend_from_slice(&nr.poll_ms.to_le_bytes()); // +0x48
+                ctx_bytes.extend_from_slice(&nr.observe_ms.to_le_bytes()); // +0x4c
+                let remote_nr_ctx = alloc_and_write_bytes(&ctx_bytes, "alloc n3res ctx")?;
+                buf_report = Some(remote_nr_ctx);
+                let nr_fn: unsafe extern "system" fn(*const core::ffi::c_void) -> u32 =
+                    std::mem::transmute::<usize, unsafe extern "system" fn(*const core::ffi::c_void) -> u32>(nr_addr);
+                let start_nr: RemoteThreadFn =
+                    std::mem::transmute::<usize, RemoteThreadFn>(nr_fn as usize);
+                let nr_thread = CreateRemoteThread(
+                    proc_h,
+                    std::ptr::null(),
+                    0,
+                    Some(start_nr),
+                    remote_nr_ctx,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if nr_thread.is_null() {
+                    return Err(format!(
+                        "CreateRemoteThread(n3res): Win32 error {}",
+                        GetLastError()
+                    ));
+                }
+                // 宽限 120s:窗口关闭后还有三轮汇合(泵/接收/daemon worker)。
+                let wait_nr = WaitForSingleObject(
+                    nr_thread,
+                    nr.observe_ms.saturating_add(120_000).max(130_000),
+                );
+                let mut code: u32 = u32::MAX;
+                GetExitCodeThread(nr_thread, &mut code);
+                CloseHandle(nr_thread);
+                if wait_nr != 0 {
+                    return Err(format!(
+                        "n3res remote thread wait failed: code {wait_nr:#x}"
+                    ));
+                }
+                native_resident_exit = Some(code);
+            }
+
             // 可选:只读运行时观测 v2(caligo_obs_run2;基址由本加载器进程解析,
             // 远程线程不再调用 GetModuleHandleW/Toolhelp —— EXP-F1-R4 缺陷修复)。
             let mut obs_exit: Option<u32> = None;
@@ -1501,6 +1625,7 @@ pub unsafe fn inject_and_probe(
                 g3_exit_code: g3_exit,
                 g3_send_exit_code: g3_send_exit,
                 g3_session_exit_code: g3_session_exit,
+                native_resident_exit_code: native_resident_exit,
                 env_exit_code: env_exit,
                 intr_exit_code: intr_exit,
                 async_exit_code: async_exit,
