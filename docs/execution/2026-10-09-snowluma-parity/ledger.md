@@ -284,3 +284,21 @@ read_resp_consumer_strings.py、record_snowluma_events.py)。
 - 记录对象为链式结构(ptr→ptr),完整字段解码基于 `r13-record-array.bin`
   (106KB,含索引数组 + 记录对象 + 日志区三结构)+ `r13-msgs.json` 真值,
   离线可续,不依赖活进程。
+## 2026-10-10(五):离线转储解剖 + CPB 构造器定位
+
+### 转储解剖(r13-record-array.bin)
+- "记录数组"实为**排序链表**:节点 = {next_ptr, msgSeq, msgSeq}(B 节点指向
+  的对象内是 A 的 seq 与更旧消息;非节点→记录对象间接)。
+- time/msgId/sender 均不在链表结构(time ASCII 仅日志区;bot_uid 3 处在
+  日志/上下文区);真记录 = CPBMessageOpti。
+
+### CPBMessageOpti 构造器定位(PE 字节级,wrapper.node)
+- vtable 0x42615c8 的 lea 引用 8 处,集中在 RVA 0x21832d0–0x2185xxx;
+- **构造器 = RVA 0x21856d0**,初始化模式(手读):
+  alloc(0x10) 16B 对象 → alloc(0x20) 32B CPB 本体 {vtbl_A@0, vtbl_B@8,
+  16B 载荷@0x10 清零} → alloc(0x28) 40B 包装 {vtbl_C@0, dword+8=0,
+  dword+0x10=0, ptr+0x18 → CPB 本体};
+- **偏移修正**:此前假设 count@+0x10 有误 —— 40B 包装的 dword@+8 = count、
+  dword@+0xC = capacity(活内存 0x1000000001 = {1, 16} 吻合);
+- 下一跳:对 0x21856d0 做一次 Ghidra 反编译(或续读后续字节)即得
+  entries 插入逻辑与 key 语义 —— 接收映射最后一个缺口。
