@@ -694,3 +694,51 @@ g3probe/g3send 探针、caligod 日志、journal)。
   observe-27108-t5.json、tw-*/s*-t*/m* 差分快照、trace-probe capture 同目录。
 - 现场纪律:本调查新增注入仅 4 次既定探针(N3R25-TRACE/TRACE2 + 2 次 API 校准),
   QQ 全程存活。
+## 2026-10-10(二十三):H-A 判别实验轮 —— 客户端侧假设全灭,日志考古突破
+
+实例:机器异常重启后全实例重启,bot = 最后启动实例(PID 38900,双查:observe
+锚点命中 + svc+0x1f0 self=1694717255 + SnowLuma API 一致)。DLL n3res2
+(新增 --g3-send-ch 形状二分通道)。
+
+### 判别结果(全部一次实验一结论)
+| 实验 | 结果 | 结论 |
+|---|---|---|
+| 新机器+新会话 legacy 基线(N3R27-LEGACY) | fail | 客户端态假设(H-B 余项)**全灭** |
+| API 引子 → 立即原生探针(N3R26-PRIMER/PRIMED,旧实例) | 引子落地 seq 399711;探针 fail | H-C 发送态预热 **排除** |
+| 真实 client_seq 399712 + 真实 random(N3R26-TRUESEQ) | fail | seq/rand 校验翻转 **排除** |
+| ContentHead type=1(N3R27-CH1) | fail(CH 字节 `1206080110001800` 实证入 wire) | CH{1:1} 不是缺的形状 |
+| ContentHead type=82(N3R27-CH82) | fail | CH{1:82} 同 |
+
+### 日志考古(零注入;wrapper.node 静态 + 内存取证)
+- **732A80 自带提交日志**:模板 `cmd={} trace={}` 的 xref 之一在 **0x732bda
+  (732A80 体内)** —— 内存中捞到的运行时碎片 "MessageSvc.PbSendMsg
+  trace=00-<uuid>-<uuid>-01"(W3C traceparent)即我们每次发送的提交日志;
+  证明请求走的是**正常提交路径**。
+- **响应判词模板**:`result|cmd={} error_code={} result_type={} error_msg={},
+  trace={}` @RVA 0x45F8E67(.rdata;file→RVA delta 0x1800),唯一调用点
+  **0x739d9b**(读 [rbp+40]=error_code、[rbp+44]=result_type)。邻族模板
+  "...seq={} result={} result_type={} error_msg={}"(0x7ffdf1fe925c 族)。
+- **零运行时实例**:全堆扫描 "result|cmd=" 仅命中静态模板 —— 我们的发送
+  **从未走到响应判词行** = 无任何响应被处理(与回调不 fire、无 store 记录
+  三角一致);API 发送后立即扫描同样无行(结果行生命周期短于全堆扫描耗时,
+  事后取证不可行)。
+- PE 感知 xref 扫描器(节表 file↔RVA 转换)已验证可用(本轮找到全部 5 处
+  引用;naive 偏移扫描会因 .text/.rdata 映射差漏检)。
+
+### 当前判定
+客户端提交路径完好且与正常发送不可区分;服务器**从不回应** legacy 形状的
+PbSendMsg(无响应、无错误、无回声),跨会话/跨机器重启稳定。形状侧已排除:
+seq/random 值、CH{1:1}/CH{1:82}。主导假设收窄为:**服务器对旧形状的静默
+丢弃点不看 CH 单键**——或需要现代请求的更多字段(msgRandom 语义、
+RoutingHead 附加键、cmd 头部的会话协商态),或按 ticket 级能力位路由。
+
+### 下一判别器(按优先序)
+1. **响应消费者注册**(cbCfg/9bef60 重定位,已列 N3 工作项):拿到服务器
+   真实响应或 -1 超时 —— 一锤定音"服务器无响应 vs 响应被客户端吞"。
+2. **管理员 pktmon 抓包**(需用户授权终端):直接看包是否出网卡 +
+   服务器是否回包(30 秒定案 wire 层)。
+3. 现代形状字段二分:以 PRIMER 回流记录/挖掘的请求结构为参照,逐字段
+   补齐(每次一探针)。
+### 本轮探针清单(全部既定测试通道)
+N3R27-LEGACY / N3R26-PRIMER(API)/ N3R26-PRIMED / N3R26-TRUESEQ /
+N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。

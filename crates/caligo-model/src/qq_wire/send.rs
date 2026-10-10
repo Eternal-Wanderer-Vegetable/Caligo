@@ -117,6 +117,21 @@ pub fn encode_group_text(
     random: u32,
     platform_ts: u64,
 ) -> Result<Vec<u8>, EncodeError> {
+    encode_group_text_ch(group_code, text, client_seq, random, platform_ts, 0)
+}
+
+/// 群文本 + 可选 ContentHead(发送漂移调查 N3R27:legacy 无 CH 形状被服务端
+/// 静默丢弃后的形状二分变体;`ch_type` = ContentHead.field1 值,0 = 不带 CH
+/// —— 与 r18 形状逐字节一致)。r10–r17 时代"带 CH 即静默拒";若服务端
+/// 策略已翻转为"缺 CH 即拒",本变体过验即定案。
+pub fn encode_group_text_ch(
+    group_code: u64,
+    text: &str,
+    client_seq: u32,
+    random: u32,
+    platform_ts: u64,
+    ch_type: u32,
+) -> Result<Vec<u8>, EncodeError> {
     if text.len() > MAX_TEXT_BYTES {
         return Err(EncodeError::TooLarge { limit: MAX_TEXT_BYTES });
     }
@@ -128,7 +143,15 @@ pub fn encode_group_text(
     pb_varint_field(&mut grp, 1, group_code);
     pb_len_field(&mut routing, 2, &grp);
     pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
-    // 群请求不带 ContentHead(r17 排除;r10–r16 十轮全带全拒)。
+    // ch_type = 0 → 不带 ContentHead(r18 形状;逐字节与 legacy 一致)。
+    // 非 0 → {1: ch_type, 2: 0, 3: 0}(N3R27 形状二分变体)。
+    if ch_type != 0 {
+        let mut content = Vec::new();
+        pb_varint_field(&mut content, PB_F_CONTENT_TYPE, ch_type as u64);
+        pb_varint_field(&mut content, 2, 0);
+        pb_varint_field(&mut content, 3, 0);
+        pb_len_field(&mut w, PB_F_CONTENT_HEAD, &content);
+    }
     push_body_tail(&mut w, GROUP_ELEM37, text, client_seq, random, platform_ts);
     Ok(w)
 }

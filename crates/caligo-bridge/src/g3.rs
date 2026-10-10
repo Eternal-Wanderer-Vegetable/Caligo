@@ -750,6 +750,9 @@ pub struct G3SendCtx {
     pub random: u32,
     pub at_uid_ptr: *const u8, // NUL 结尾 ASCII:被 @ 人 peerUid(null = 无 @)
     pub at_uin: u32,           // 被 @ 人 uin(attr 用;v1 由调用方提供)
+    /// N3R27 形状二分:0 = legacy(无 CH);非 0 = 群请求带 ContentHead
+    /// {1: 该值, 2: 0, 3: 0}(调查发送漂移的服务端形状策略翻转假设)。
+    pub use_ch: u32,
 }
 
 /// 读远程 NUL 结尾 ASCII(空/不可读 → None)。
@@ -830,6 +833,7 @@ fn encode_send_msg(
     random: u32,
     at_uid: Option<&str>,
     at_uin: u32,
+    use_ch: u32,
 ) -> Vec<u8> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -848,13 +852,14 @@ fn encode_send_msg(
         .unwrap_or_default();
     }
     if at_uid.is_none() {
-        // ===== 群聊(r18 形状:varint 群号 + 无 ContentHead;共享 codec)=====
-        return caligo_model::qq_wire::send::encode_group_text(
+        // ===== 群聊(r18 形状:varint 群号;use_ch>0 = 带 CH 调查变体)=====
+        return caligo_model::qq_wire::send::encode_group_text_ch(
             group_code,
             text,
             client_seq,
             random,
             ts,
+            use_ch,
         )
         .unwrap_or_default();
     }
@@ -1052,12 +1057,13 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     // 编码请求体(最小 SendMsgReq;verified=false)。
     let at_uid = read_ascii_opt((*ctx).at_uid_ptr);
     let at_uin = (*ctx).at_uin;
-    let body = encode_send_msg(peer_uin, peer_uid.as_deref(), group_code, &text, client_seq, random, at_uid.as_deref(), at_uin);
+    let use_ch = (*ctx).use_ch;
+    let body = encode_send_msg(peer_uin, peer_uid.as_deref(), group_code, &text, client_seq, random, at_uid.as_deref(), at_uin, use_ch);
     stage(
         report_path,
         "g3s_encode",
         true,
-        &format!("len={} head={}", body.len(), bytes_hex(&body[..body.len().min(24)])),
+        &format!("len={} ch={} head={}", body.len(), use_ch, bytes_hex(&body[..body.len().min(24)])),
     );
 
     // body data:QQ 分配器(QQ 侧释放;本侧永不释放)。
