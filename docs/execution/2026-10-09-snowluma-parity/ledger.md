@@ -333,3 +333,29 @@ read_resp_consumer_strings.py、record_snowluma_events.py)。
   (索引链表节点 → 记录对象 → props)或 observe 类工具的枚举式提交区扫描
   (Rust RPM-self 模式)。这两条都不依赖猜地址。
 - 属性访问器解码(e4fbc16)不受影响;键语义表待用结构链采样补全。
+## 2026-10-10(八):消息记录 CPB 定位成功 —— 键族浮出水面
+
+### record-scan 工具(observe-msf 扩展,外部只读)
+- `observe-msf --record-scan --pid N --out t.jsonl [--seq S --time T]`:
+  VirtualQueryEx 枚举提交区 → CPB vptr(0x42615c8)2505 实例 → 按已解码
+  布局(entries@+8/count@+0x10/12B 条目)全量输出条目表;0.4 秒完成;
+  指针型值附 40B raw 预览。**Python 固定区间扫描的替代方案正式落地**。
+
+### 键语义(活体实证,N3R16-R 消息)
+- 三个 CPB 含 "N3R16-R" 文本(0x1d773cd41c8/0x1d773cf50a8/0x1d7720e74c8):
+  - **key 0x9c54 = senderUid**(bot 自发 → 值指向自身 uid 串;
+    "u_1918755f…" 前缀出现);
+  - **key 0x9c55 = peerUid**(值 raw = `0a 09 "263402786"` 群码 protobuf 串;
+    另一记录为 "950238216" = 私聊对端 UIN 串);
+  - **key 0x9c41/0x9c43/0x9c5b/0x9c72** = 记录级整型(随机数/msgId 候选);
+  - **key 0xafc9/0xafca/0xb02d/0xb02e/0xbfc5** = 元素族(0xafca=元素类型;
+    0xb02d raw = `08 07` + 正文 —— 元素 blob 内嵌文本,与 r4 P5TEST1 同形态);
+  - 台账旧读数 0x9c4a="chat_type" 需重验(本次值 4 但非 AI 会话)。
+- seq 不在 CPB 条目(在索引节点 {next, seq, seq});**time 的键位仍未定位**
+  (值/LE 字节/ASCII 均未命中)——与索引节点/记录级字段的关系是下一跳。
+
+### 下一跳(单点,全部结构已解)
+1. time 键位:同批多条消息的 CPB 0x9c72/0x9c5b 值与 get_msg time 差分;
+2. seq ↔ CPB 绑定:索引节点 seq → 记录对象的链(节点 +0x18.. 零字段区
+   或外部 map);
+3. 键表写死 → native_receive.rs NormalizedNotice 字段落地。
