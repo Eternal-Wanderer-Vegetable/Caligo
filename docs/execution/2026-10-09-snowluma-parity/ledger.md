@@ -275,3 +275,12 @@ read_resp_consumer_strings.py、record_snowluma_events.py)。
   `r13-msgs.json` 真值可离线解剖;不再依赖活进程。
 - 下一步(离线可做):并排比对 A/B/C 记录字节差分 → time/seq/sender 键位
   → owner 容器链 → native_receive.rs 落地。
+### 转储离线解剖(首轮)
+
+- time 的 u32 不在记录数组(ASCII 形式仅在日志区 0x1d76ecd328e);
+- 0x1d76ece4000 区 = **24B 索引节点数组** `{record_ptr, msgSeq, msgSeq}`:
+  节点 0x133f0 → 记录 0x1d76ece4420(seq 397877 双份),0x13420 → 下一记录
+  (397876 双份),另见 r5 时代旧消息 397854 —— 按消息排序的内存索引链;
+- 记录对象为链式结构(ptr→ptr),完整字段解码基于 `r13-record-array.bin`
+  (106KB,含索引数组 + 记录对象 + 日志区三结构)+ `r13-msgs.json` 真值,
+  离线可续,不依赖活进程。
