@@ -493,5 +493,103 @@ mod record_tests {
         let f = read_record_fields(&mem, cpb);
         assert_eq!(f, RecordFields::default(), "超界 count → 全 None");
     }
+
+    #[test]
+    fn scan_and_collect_from_synthetic_region() {
+        let wrapper = 0x7fff17000000u64;
+        let mut region = vec![0u8; 0x200];
+        region[0x10..0x18].copy_from_slice(&(wrapper + 0x4261_5C8).to_le_bytes());
+        region[0x100..0x108].copy_from_slice(&(wrapper + 0x4261_5C8).to_le_bytes());
+
+        let mut cpbs = Vec::new();
+        scan_cpb_in_region(&region, 0x9000_0000, wrapper, &mut cpbs);
+        assert_eq!(cpbs, vec![0x9000_0010, 0x9000_0100]);
+
+        let mut mem = FakeMem(BTreeMap::new());
+        let mut hdr_a = vec![0u8; 0x14];
+        hdr_a[0..8].copy_from_slice(&0u64.to_le_bytes()); // entries = 0 → 跳过
+        hdr_a[8..12].copy_from_slice(&5u32.to_le_bytes());
+        mem.put(0x9000_0010 + 8, &hdr_a);
+        let mut hdr_b = vec![0u8; 0x14];
+        hdr_b[0..8].copy_from_slice(&0x7000_0000u64.to_le_bytes());
+        hdr_b[8..12].copy_from_slice(&1u32.to_le_bytes());
+        mem.put(0x9000_0100 + 8, &hdr_b);
+        let mut eb = vec![0u8; 12];
+        eb[0..4].copy_from_slice(&0x9c54u32.to_le_bytes());
+        eb[4..12].copy_from_slice(&0x7001_0000u64.to_le_bytes());
+        mem.put(0x7000_0000, &eb);
+        let mut snd = vec![0u8; 64];
+        snd[..10].copy_from_slice(b"u_TESTSEND");
+        mem.put(0x7001_0000, &snd);
+
+        let got = collect_record_fields(&mem, &cpbs, 10);
+        assert_eq!(got.len(), 1, "无 sender 的实例跳过");
+        assert_eq!(got[0].1.sender_uid.as_deref(), Some("u_TESTSEND"));
+    }
 }
 
+
+// ---------------------------------------------------------------------------
+// N3 接线预备(2026-10-10):进程内读取与 CPB 收集。
+//
+// time 标定策略(成文;N3 接线时执行):
+// - 0x9c72/0x9c43 是会话内局部基座序数(斜率 2;台账 2026-10-10 九),
+//   绝对 time/seq = 附加时用**第一条关联消息**标定基座
+//   (base = 真值 − 序数;之后 t = 序数 + base),或与事件真值逐条配对;
+// - 平台时间不确定期间,MsgEvent.platform_time 如实 None,
+//   序数随 native_id 通道携带 —— 不以本地时钟冒充平台时间。
+
+/// 进程内 RPM-self 读取器(g2 同款内核校验读;坏页返回 false 不抛异常)。
+pub struct RpmSelfReader;
+
+impl MemoryReader for RpmSelfReader {
+    fn read(&self, addr: u64, buf: &mut [u8]) -> bool {
+        use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let mut got = 0usize;
+        // SAFETY: 自进程 RPM;缓冲由调用方持有。
+        let ok = unsafe {
+            ReadProcessMemory(
+                GetCurrentProcess(),
+                addr as *const core::ffi::c_void,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut got,
+            )
+        };
+        ok != 0 && got == buf.len()
+    }
+}
+
+/// 在单个已提交区域缓冲内扫 CPB 实例(vptr == wrapper_base + 0x42615c8)。
+/// 8 字节步进(实例 vptr 天然 qword 对齐)。
+pub fn scan_cpb_in_region(buf: &[u8], region_base: u64, wrapper_base: u64, out: &mut Vec<u64>) {
+    let needle = (wrapper_base + 0x4261_5C8).to_le_bytes();
+    let mut i = 0;
+    while i + 8 <= buf.len() {
+        if buf[i..i + 8] == needle {
+            out.push(region_base + i as u64);
+        }
+        i += 8;
+    }
+}
+
+/// 收集 CPB 实例的记录字段(有界;无 sender 且无正文的实例跳过 ——
+/// 它们是其它对象族的属性表,不是消息记录)。
+pub fn collect_record_fields(
+    rd: &dyn MemoryReader,
+    cpbs: &[u64],
+    max: usize,
+) -> Vec<(u64, RecordFields)> {
+    let mut out = Vec::new();
+    for &obj in cpbs.iter().take(max) {
+        let f = read_record_fields(rd, obj);
+        if f.sender_uid.is_some() || f.text.is_some() || f.peer_uid.is_some() {
+            out.push((obj, f));
+        }
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}

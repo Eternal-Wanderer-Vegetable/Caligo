@@ -403,3 +403,17 @@ native_receive.rs 的落地不再需要更多逆向:
   与台账已登记现象同型,重跑全绿;新模块纯安全代码)。
 - **接收映射(逆向 + 读取器)闭环**。剩余工程:把 MemoryReader 接到常驻
   路径(N3),NormalizedNotice 字段填充 + time 基座标定策略定稿。
+## 2026-10-10(十一):N3 接线预备件落地
+
+- native_receive.rs 新增:**RpmSelfReader**(进程内 RPM-self MemoryReader,
+  内核校验读,坏页 false)、**scan_cpb_in_region**(区域缓冲参数化的 CPB
+  vptr 扫描,可测试)、**collect_record_fields**(有界收集,无 sender/正文/
+  peer 的非消息属性表跳过);time 标定策略成文(基座标定或事件配对,
+  platform_time 不确定期间如实 None)。
+- 测试 +1:合成区域扫描 → 实例定位 → 记录收集全链(FakeMem);
+  跳过无 sender 实例的合同。
+- 事故如实登记:一次 python heredoc 转义把字面 NUL 字节写入源码
+  (grep 二进制化/Edit 拒读暴露);已替换为 ` ` 转义并全文件验证无 NUL。
+- 验收:bridge 52 lib 全绿(+1);workspace research **183/0**。
+- 剩余(N3 现场):g2 通知头 → 索引链/CPB 的实时行走接入捕获处理器、
+  NormalizedNotice 填充、time 基座标定执行 —— 均为已解结构的接线工作。
