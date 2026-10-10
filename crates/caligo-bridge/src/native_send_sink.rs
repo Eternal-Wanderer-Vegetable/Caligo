@@ -54,7 +54,9 @@ where
                 code,
                 &payload.text,
                 0, // client_seq:服务器不校验(r18 实证);响应 seq 走 0x9c43。
-                payload.text.len() as u32 | 1,
+                // random 每消息新鲜(服务器 (uin, random) 近窗去重,N3R28 实证;
+                // 旧实现 text.len()|1 同长度即撞)。
+                caligo_model::qq_wire::send::fresh_random(),
                 ts,
             ),
             None => {

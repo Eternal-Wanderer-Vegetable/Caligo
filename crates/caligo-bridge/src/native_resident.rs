@@ -337,7 +337,12 @@ impl HostAdapter for NativeHostAdapter {
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 let body = match caligo_model::qq_wire::send::encode_group_text(
-                    group_code, &text, 0, 1, ts,
+                    group_code,
+                    &text,
+                    0,
+                    // random 每消息新鲜(服务器 (uin, random) 近窗去重,N3R28 实证)。
+                    caligo_model::qq_wire::send::fresh_random(),
+                    ts,
                 ) {
                     Ok(b) => b,
                     Err(_) => {

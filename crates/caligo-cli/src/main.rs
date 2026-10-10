@@ -954,7 +954,8 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut g3_send_seq_auto = false;
     let mut g3_send_at: Option<String> = None;
     let mut g3_send_at_uin: u32 = 0;
-    let mut g3_send_rand: u32 = 42;
+    // 0 = bridge 侧 rdtsc 现场生成(服务器 (uin, random) 近窗去重,常量即撞)。
+    let mut g3_send_rand: u32 = 0;
     let mut g3_send_ch: u32 = 0;
     let mut env_report: Option<PathBuf> = None;
     let mut register_entry = false;

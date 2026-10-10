@@ -109,6 +109,28 @@ pub fn encode_friend_text(
     Ok(w)
 }
 
+/// 每消息新鲜随机数(field-5 random 语义 = 消息级随机;**服务器对
+/// (uin, random) 近窗去重** —— N3R28 现场实证:rand=1 首发过验、窗口内
+/// 重发静默丢弃(无响应/无回声)、新鲜 rand 过验;窗口 ~1-3h)。真实
+/// 客户端每消息生成新值;任何常量/派生自文本长度的值都会在第二次发送时
+/// 撞上自己的去重缓存 —— 这就是 2026-10-10 "发送漂移" 的根因。
+pub fn fresh_random() -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: rdtsc 非特权指令;仅作熵源,不承担安全语义。
+        let mut t = unsafe { core::arch::x86_64::_rdtsc() };
+        t ^= t >> 32;
+        (t as u32) | 1
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        ((d.subsec_nanos() as u32) ^ (d.as_secs() as u32).rotate_left(16)) | 1
+    }
+}
+
 /// 普通群文本(field-proven r18 形状;`group_code` 为 0 无意义,调用方保证)。
 pub fn encode_group_text(
     group_code: u64,

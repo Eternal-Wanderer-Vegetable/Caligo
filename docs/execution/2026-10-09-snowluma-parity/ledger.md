@@ -742,3 +742,39 @@ RoutingHead 附加键、cmd 头部的会话协商态),或按 ticket 级能力位
 ### 本轮探针清单(全部既定测试通道)
 N3R27-LEGACY / N3R26-PRIMER(API)/ N3R26-PRIMED / N3R26-TRUESEQ /
 N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。
+## 2026-10-11(二十四):发送漂移根因破案 —— 服务器 (uin, random) 近窗去重
+
+### 破案链(00:40–01:00 三步)
+1. **N3R28-POOL(rand=1)exit 0** → 疑似"恢复";**N3R28-CONFIRM(rand=1,2 分钟后)fail** → 闪断,排除"恢复"。
+2. **N3R28-UNIQ(rand=449568253 新鲜,seq=0)→ 服务器历史实证送达(seq 399986)**;
+   同窗 N3R28-CONFIRM(rand=1)**不在服务器历史**(count=60 全范围核对)。
+3. 时间线全面吻合**(uin, random) 去重、窗口 ~1-3h**:
+   - 21:45 N3R23(rand=1)首发过验 → 22:16–00:10 全部 rand=1 重发静默丢弃
+     (撞 21:45 的缓存)→ "漂移开始";
+   - 00:43 POOL(rand=1)距上次 rand=1 过验 ~3h,窗口过期 → 过验 → "恢复假象";
+   - 00:45 CONFIRM(rand=1)撞 POOL 缓存 → 灭;
+   - 00:48 UNIQ(新鲜 rand)→ 过验。
+   - N3R26-TRUESEQ 败因:rand=116416255 是从日志抄的**旧值**(撞别的消息);
+   - CH1/CH82 败因:--g3-send-rand 默认 42(历史实验用过)。
+   - "客户端态/服务端会话态/预热"三假设全被"rand 常量"一行解释。
+
+### 关键更正与教训
+- **r18 结论修正**:服务器不校验会话 seq(client_seq=0 仍成立)——但
+  **random 是去重键**,"服务器不校验"的概括漏掉了它。每次发送必须
+  **每消息新鲜 random**。
+- **@ 元素 r20–r28b 八轮"静默拒"存在混淆**:那些轮次的 random 同样复用
+  (@ 形状结论存疑,需用新鲜 random 重测后才能定案;response-consumer-scope
+  的实现仍必要 —— @ 的真实业务 retCode 依然不可见)。
+- **NapCat 历史查询有缓存滞后**:窄 count 查询的"NONE"判两次误(POOL/
+  UNIQ 都被误判过);验证必须用宽 count + 打印实际覆盖范围。
+- 昨天的"服务器形状策略翻转"(§二十二 H-A)与今天的三假设排除表依然
+  成立 —— 只是全部被 rand 复用这一个变量笼罩。
+
+### 修复(field-proven)
+- `caligo_model::qq_wire::send::fresh_random()`(rdtsc 熵源,|1 保奇);
+- 四处换用:g3_session.rs encode_group / native_resident.rs / 
+  native_send_sink.rs(旧 text.len()|1 同长度即撞)/ CLI --g3-send-rand
+  默认 0(= bridge rdtsc 现场生成);
+- **验证:N3R28-FIX1/FIX2 连续两条原生发送,服务器历史 seq 400048/400050,
+  uid/time 与 CPB 记录逐位一致** —— client_seq=0 + fresh random 为定案形状。
+- 工作树:bridge 56+ lib 测试全绿;n3res3 DLL。

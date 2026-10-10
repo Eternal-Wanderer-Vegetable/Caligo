@@ -39,13 +39,20 @@ fn stage(path: *const u16, stage_name: &str, ok: bool, detail: &str) {
 }
 
 /// 发送一条群消息(已证形状)并返回 wire body。
+/// random 必须每消息新鲜(服务器 (uin, random) 近窗去重,N3R28 实证)。
 fn encode_group(text: &str, group_code: u64) -> Result<Vec<u8>, String> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    caligo_model::qq_wire::send::encode_group_text(group_code, text, 0, 1, ts)
-        .map_err(|e| e.to_string())
+    caligo_model::qq_wire::send::encode_group_text(
+        group_code,
+        text,
+        0,
+        caligo_model::qq_wire::send::fresh_random(),
+        ts,
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// ctx 布局(N3 现场验证):
