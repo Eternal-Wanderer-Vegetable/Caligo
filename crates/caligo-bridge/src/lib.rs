@@ -66,6 +66,8 @@ pub mod qq_v8;
 pub mod g1;
 pub mod g2;
 pub mod g3;
+pub mod g3_ops;
+pub mod g3_session;
 pub mod register;
 pub mod resident;
 
@@ -385,6 +387,21 @@ pub unsafe extern "system" fn caligo_g2_listen_run(ctx: *const g2::G2Ctx) -> u32
     }
     // SAFETY: ctx 由 loader 写入且位于本进程。
     unsafe { g2::g2_listen_run(ctx) }
+}
+
+/// N3 会话现场验证入口(research 构建;注入纪律与 g2 同)。
+///
+/// `ctx` 必须指向本进程内有效的 [`g3_session::G3SessionCtx`]。
+#[no_mangle]
+pub unsafe extern "system" fn caligo_g3_session_run(ctx: *const g3_session::G3SessionCtx) -> u32 {
+    if let Some(code) = gate::reject_legacy() {
+        return code;
+    }
+    if ctx.is_null() {
+        return probe_code::ERR_NULL_PATH;
+    }
+    // SAFETY: ctx 由 loader 写入且位于本进程。
+    unsafe { g3_session::g3_session_run(ctx) }
 }
 
 /// G3 发送探测 P1(P7;`g3.rs`):transport vtable slot7 捕获交换,

@@ -922,6 +922,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut native_run_ms: u32 = 10_000;
     let mut g2_run_report: Option<PathBuf> = None;
     let mut g2_run_ms: u32 = 10_000;
+    let mut g3_session: Option<(u64, String, u64, String, u32)> = None;
     let mut g3_run_report: Option<PathBuf> = None;
     let mut g3_run_ms: u32 = 120_000;
     let mut g3_send_report: Option<PathBuf> = None;

@@ -542,3 +542,14 @@ native_receive.rs 的落地不再需要更多逆向:
   ① N3 宿主合法初始化(合法注入替代路线,需设计审查);
   ② sink/store 接线上述组件到活实例;
   ③ 事件从接收链到 fanout 的贯通。
+## 2026-10-10(十九):N3 现场验证代码交付(g3_ops + g3_session)
+
+- **g3_ops.rs**:G3NativeOps 实现 NativeOps trait —— 完整 g3 FFI 序列
+  (getter 租约→锚点→transport→QQ new→self str→SendSSORequestInternal)
+  封装为 probe_ready + submit;研究构建专用。
+- **g3_session.rs**:N3 会话现场验证入口 `caligo_g3_session_run` ——
+  probe_ready → NativeSession.attach → CPB 基线(进程内 88ms)→
+  enqueue_send(已证形状)→ 等待 → fresh 差分 → 全字段 JSONL 报告。
+- lib.rs 导出 `caligo_g3_session_run`;bridge 53 lib 全绿。
+- **待完成**:CLI inject 命令需 --g3-session flag 以调用新导出(目前
+  只支持 --g2-run-report);下一步即加此 flag 并注入活实例验证。
