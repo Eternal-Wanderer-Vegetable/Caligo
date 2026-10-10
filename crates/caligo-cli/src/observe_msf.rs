@@ -38,6 +38,44 @@ const SLOT_COUNT: usize = 16; // 覆盖 vtable+0x38(slot7,发送路径调用点)
 const CAL_MAGIC: u64 = 0x0B5C_A11A_5EED_0001;
 
 pub fn cmd_observe_msf(args: &[String]) -> Result<(), String> {
+    // record-scan 模式(N1 接收映射;外部只读):枚举提交区扫 CPBMessageOpti
+    // 实例(vptr = wrapper+0x42615c8),按已解码布局(entries=[obj+8],
+    // count u32=[obj+0x10],条目 12B {key u32, tagged qword})输出条目表;
+    // --seq/--time 提供真值时对命中打标。
+    if args.iter().any(|a| a == "--record-scan") {
+        let mut pid = 0u32;
+        let mut out = String::new();
+        let mut seq: Option<u64> = None;
+        let mut time: Option<u64> = None;
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--pid" => {
+                    i += 1;
+                    pid = args.get(i).and_then(|s| s.parse().ok()).ok_or("--pid 需要 PID")?;
+                }
+                "--out" => {
+                    i += 1;
+                    out = args.get(i).cloned().ok_or("--out 需要路径")?;
+                }
+                "--seq" => {
+                    i += 1;
+                    seq = args.get(i).and_then(|s| s.parse().ok());
+                }
+                "--time" => {
+                    i += 1;
+                    time = args.get(i).and_then(|s| s.parse().ok());
+                }
+                "--record-scan" => {}
+                other => return Err(format!("record-scan 未知参数 {other}")),
+            }
+            i += 1;
+        }
+        if pid == 0 {
+            return Err("record-scan 需要 --pid".into());
+        }
+        return record_scan(pid, &out, seq, time);
+    }
     let mut pid: u32 = 0;
     let mut out: Option<String> = None;
     let mut self_test = false;
@@ -1054,6 +1092,144 @@ fn now_unix_ms() -> u64 {
 
 const MANAGER_VTBL_RVA: u64 = 0x413F7A8;
 const SC_VTBL_RVA: u64 = 0x3FD3E28;
+
+/// CPBMessageOpti vtable RVA(N1;phaseAE2/21856d0 构造器族,2026-10-10 解码)。
+const CPB_VTBL_RVA: u64 = 0x42615C8;
+/// CPB 实例布局:{vptr@0, entries@+8, count u32@+0x10};条目 12B
+/// {key u32, tagged qword}(访问器 0x1821878c0 capstone 实证)。
+const CPB_ENTRIES_OFF: u64 = 0x8;
+const CPB_COUNT_OFF: u64 = 0x10;
+const CPB_MAX_COUNT: u32 = 80;
+/// tagged qword 的堆指针形态检查(低 48 位;堆段 0x1d70–0x1d80 亿段实证)。
+fn cpb_payload_is_heap_ptr(tagged: u64) -> bool {
+    let p = tagged & 0x0000_FFFF_FFFF_FFFF;
+    (0x1_0000..0x7FFF_FFFE_FFFF).contains(&p) && p & 7 == 0
+}
+
+/// record-scan:外部只读枚举提交区 → CPB 实例 → 条目表 JSONL。
+fn record_scan(pid: u32, out: &str, seq: Option<u64>, time: Option<u64>) -> Result<(), String> {
+    use core::ffi::c_void;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, VirtualQueryEx,
+    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+    // SAFETY: 只读句柄。
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid) };
+    if handle.is_null() {
+        return Err(format!("OpenProcess({pid}) 失败"));
+    }
+    let modules = crate::winutil::modules_in(pid)?;
+    let wrapper = modules
+        .iter()
+        .find(|m| m.name.eq_ignore_ascii_case("wrapper.node"))
+        .ok_or("目标进程未加载 wrapper.node")?;
+    let base = wrapper.base as u64;
+    let needle = (base + CPB_VTBL_RVA).to_le_bytes();
+    println!("[record-scan] pid={pid} wrapper={base:#x} CPB vptr RVA={CPB_VTBL_RVA:#x}");
+
+    let mut report = std::io::BufWriter::new(
+        std::fs::File::create(out).map_err(|e| format!("创建 {out}: {e}"))?,
+    );
+    use std::io::Write;
+    let mut instances = 0usize;
+    let mut matched = 0usize;
+    let t0 = std::time::Instant::now();
+    let read = |handle: windows_sys::Win32::Foundation::HANDLE, addr: u64, buf: &mut [u8]| -> bool {
+        let mut got = 0usize;
+        // SAFETY: 只读 RPM。
+        unsafe {
+            ReadProcessMemory(handle, addr as *const c_void, buf.as_mut_ptr().cast(), buf.len(), &mut got) != 0
+                && got == buf.len()
+        }
+    };
+    // SAFETY: 只读遍历目标地址空间。
+    unsafe {
+        let mut qaddr = 0x10000u64;
+        let max = 0x7FFFFFFEFFFFu64;
+        while qaddr < max {
+            let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+            if VirtualQueryEx(handle, qaddr as *const c_void, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) == 0 {
+                break;
+            }
+            let region = mbi.RegionSize;
+            let base_addr = mbi.BaseAddress as u64;
+            if mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE && region >= 0x1000 && region < 0x4000_0000 {
+                let mut buf = vec![0u8; region as usize];
+                let mut got = 0usize;
+                if ReadProcessMemory(handle, base_addr as *const c_void, buf.as_mut_ptr().cast(), region as usize, &mut got) != 0 {
+                    buf.truncate(got);
+                    let mut i = 0;
+                    while i + 8 <= buf.len() {
+                        if &buf[i..i + 8] == &needle {
+                            let obj = base_addr + i as u64;
+                            instances += 1;
+                            let mut hdr = [0u8; 0x18];
+                            if !read(handle, obj + CPB_ENTRIES_OFF, &mut hdr[0..8]) || !read(handle, obj + CPB_COUNT_OFF, &mut hdr[8..12]) {
+                                i += 8;
+                                continue;
+                            }
+                            let entries = u64::from_le_bytes(hdr[0..8].try_into().unwrap());
+                            let count = u32::from_le_bytes(hdr[8..12].try_into().unwrap());
+                            if count == 0 || count > CPB_MAX_COUNT || !(0x1_0000..0x7FFF_FFFE_FFFF).contains(&entries) || entries & 7 != 0 {
+                                i += 8;
+                                continue;
+                            }
+                            let mut eb = vec![0u8; count as usize * 12];
+                            if !read(handle, entries, &mut eb) {
+                                i += 8;
+                                continue;
+                            }
+                            let mut line = format!("{{\"obj\":{obj:#x},\"count\":{count},\"entries\":[");
+                            let mut hit = false;
+                            for k in 0..count as usize {
+                                let key = u32::from_le_bytes(eb[k*12..k*12+4].try_into().unwrap());
+                                let tagged = u64::from_le_bytes(eb[k*12+4..k*12+12].try_into().unwrap());
+                                let typ = (tagged >> 58) & 0xF;
+                                let payload = tagged & 0x0000_FFFF_FFFF_FFFF;
+                                if let Some(s) = seq {
+                                    if payload == s { hit = true; }
+                                }
+                                if let Some(t) = time {
+                                    if payload == t { hit = true; }
+                                }
+                                if k > 0 { line.push(','); }
+                                line.push_str(&format!("{{\"k\":{key:#x},\"t\":{typ},\"v\":{payload:#x}"));
+                                if cpb_payload_is_heap_ptr(tagged) {
+                                    // 指针型:抓 40B 原始(串预览由离线分析做)。
+                                    let mut raw = [0u8; 40];
+                                    if read(handle, payload, &mut raw) {
+                                        let hexs: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+                                        line.push_str(&format!(",\"raw\":\"{hexs}\""));
+                                    }
+                                }
+                                line.push('}');
+                            }
+                            line.push_str("]}");
+                            if hit {
+                                matched += 1;
+                                line = line.replace("{\"", "{\"hit\":true,\"");
+                                println!("[record-scan] ★ 命中 {obj:#x}(count={count})");
+                            }
+                            let _ = writeln!(report, "{line}");
+                        }
+                        i += 8;
+                    }
+                }
+            }
+            qaddr = base_addr + region as u64;
+        }
+    }
+    report.flush().ok();
+    unsafe { CloseHandle(handle) };
+    println!(
+        "[record-scan] 完成:实例 {instances},命中 {matched},用时 {:.1}s → {out}",
+        t0.elapsed().as_secs_f32()
+    );
+    Ok(())
+}
+
 
 /// 堆扫 needle:MEM_PRIVATE 提交区逐区 RPM,找 qword == needle 的地址;
 /// delta != 0 时候选 owner = hit - delta,并验证 owner vptr 落在 wrapper。
