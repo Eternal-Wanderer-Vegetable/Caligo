@@ -124,6 +124,180 @@ pub fn normalize(head: &CapturedRecordHead) -> NormalizedNotice {
     }
 }
 
+
+
+// ---------------------------------------------------------------------------
+// N1(2026-10-10):消息记录 CPB 读取器(键表来源:实例 27108 活体差分,
+// 台账 2026-10-10 八/九;访问器 0x1821878c0 capstone 实证)。
+//
+// CPB 实例:{vptr@0, entries@+8, count u32@+0x10};条目 12B
+// {key u32, tagged qword(bit58–61 = 类型;bit60=2 → 低 48 位堆指针)}。
+//
+// 已证键(0x9c 族 = 消息记录;斜率语义为**会话内局部序数**,绝对值
+// 需一条关联消息标定基座 —— 台账 2026-10-10 九的交叉验证):
+// - 0x9c54 = senderUid(指针 → ASCII 缓冲)
+// - 0x9c55 = peerUid(指针 → TLV {0x0a, len, bytes}:群码/uin 串)
+// - 0x9c43 = seq 序数 ×2(斜率 2/条)
+// - 0x9c72 = time 序数 ×2(斜率 2/秒)
+// - 0x9c5b = 会话标识(恒定)
+// 正文 = 元素 blob(blob 起始 {0x08, len, utf8};键按 0xb02d/0xa2e4/0xa2e5
+// 顺序探测 —— 记录形态随消息类型差异,探测序列见 [TEXT_KEY_CANDIDATES])。
+
+/// 消息记录键(实例 27108 / 9.9.33-52230 差分实证;版本漂移按 N5 重验)。
+pub mod record_keys {
+    pub const SENDER_UID: u32 = 0x9c54;
+    pub const PEER_UID: u32 = 0x9c55;
+    pub const SEQ_ORDINAL2: u32 = 0x9c43; // 值 = 2×seq 序数
+    pub const TIME_ORDINAL2: u32 = 0x9c72; // 值 = 2×time 序数
+    pub const SESSION_ID: u32 = 0x9c5b;
+    /// 正文 blob 键探测序(首个命中 {0x08, len} 形态者胜)。
+    pub const TEXT_KEY_CANDIDATES: [u32; 3] = [0xb02d, 0xa2e4, 0xa2e5];
+}
+
+/// 内存读取抽象(常驻路径接 RPM-self;测试接合成内存)。
+pub trait MemoryReader {
+    fn read(&self, addr: u64, buf: &mut [u8]) -> bool;
+}
+
+/// 一条消息记录的可证字段(None = 该键缺失/形态不符,不猜)。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RecordFields {
+    pub sender_uid: Option<String>,
+    pub peer_uid: Option<String>,
+    pub text: Option<String>,
+    pub seq_ordinal: Option<u64>,
+    pub time_ordinal: Option<u64>,
+    pub session_id: Option<u64>,
+}
+
+/// CPB 条目集(从内存读出的 {key, tagged} 对)。
+pub struct CpbEntries<'a> {
+    pub raw: &'a [u8],
+}
+
+impl<'a> CpbEntries<'a> {
+    /// 从 12B×count 条目缓冲构造(调用方保证长度)。
+    pub fn new(raw: &'a [u8]) -> Self {
+        Self { raw }
+    }
+
+    pub fn iter_keys(&self) -> impl Iterator<Item = (u32, u64)> + '_ {
+        self.raw.chunks_exact(12).map(|c| {
+            (u32::from_le_bytes(c[0..4].try_into().unwrap()), u64::from_le_bytes(c[4..12].try_into().unwrap()))
+        })
+    }
+
+    pub fn find(&self, key: u32) -> Option<u64> {
+        self.iter_keys().find(|(k, _)| *k == key).map(|(_, v)| v)
+    }
+}
+
+/// ASCII 缓冲读取(≤64B 可打印;NUL/非打印截断)。
+fn ascii_at(rd: &dyn MemoryReader, addr: u64) -> Option<String> {
+    let mut buf = [0u8; 64];
+    if !rd.read(addr, &mut buf) {
+        return None;
+    }
+    let end = buf.iter().take_while(|&&b| b >= 0x20 && b < 0x7f).count();
+    if end < 4 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf[..end]).into_owned())
+}
+
+/// peerUid TLV 读取({0x0a, len, bytes};非该形态退回 ASCII)。
+fn peer_at(rd: &dyn MemoryReader, addr: u64) -> Option<String> {
+    let mut buf = [0u8; 64];
+    if !rd.read(addr, &mut buf) {
+        return None;
+    }
+    if buf[0] == 0x0a && buf[1] > 0 && buf[1] as usize <= 62 {
+        let n = buf[1] as usize;
+        if buf[2..2 + n].iter().all(|&b| b.is_ascii_graphic() || b == b' ') {
+            return Some(String::from_utf8_lossy(&buf[2..2 + n]).into_owned());
+        }
+    }
+    ascii_at(rd, addr)
+}
+
+/// 正文 blob 读取({0x08, len, utf8};UTF-8 len 以字节计,可 > 127)。
+fn text_at(rd: &dyn MemoryReader, addr: u64) -> Option<String> {
+    let mut buf = [0u8; 512];
+    if !rd.read(addr, &mut buf) {
+        return None;
+    }
+    // blob 前可有少量非正文前缀;在前 8 字节内探测 {0x08, len} 形态。
+    for skip in 0..8usize {
+        if buf[skip] == 0x08 && buf[skip + 1] > 0 {
+            let n = buf[skip + 1] as usize;
+            if skip + 2 + n <= buf.len() && n >= 1 {
+                let bytes = &buf[skip + 2..skip + 2 + n];
+                if std::str::from_utf8(bytes).is_ok() {
+                    return Some(String::from_utf8_lossy(bytes).into_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 从 CPB 对象提取记录字段(经任意 [`MemoryReader`])。
+///
+/// `cpb_obj` = CPB 实例地址(vptr@0;entries@[+8];count u32@[+0x10])。
+/// 有界:count > 80 或 entries 不可读 → 全 None(不猜)。
+pub fn read_record_fields(rd: &dyn MemoryReader, cpb_obj: u64) -> RecordFields {
+    let mut f = RecordFields::default();
+    let mut hdr = [0u8; 12];
+    if !rd.read(cpb_obj + 8, &mut hdr[0..8]) || !rd.read(cpb_obj + 0x10, &mut hdr[8..12]) {
+        return f;
+    }
+    let entries = u64::from_le_bytes(hdr[0..8].try_into().unwrap());
+    let count = u32::from_le_bytes(hdr[8..12].try_into().unwrap());
+    if count == 0 || count > 80 || !(0x1_0000..0x7FFF_FFFE_FFFF).contains(&entries) || entries & 7 != 0 {
+        return f;
+    }
+    let mut eb = vec![0u8; count as usize * 12];
+    if !rd.read(entries, &mut eb) {
+        return f;
+    }
+    let table = CpbEntries::new(&eb);
+    if let Some(tagged) = table.find(record_keys::SEQ_ORDINAL2) {
+        f.seq_ordinal = Some(tagged & 0x00FF_FFFF_FFFF_FFFF);
+    }
+    if let Some(tagged) = table.find(record_keys::TIME_ORDINAL2) {
+        f.time_ordinal = Some(tagged & 0x00FF_FFFF_FFFF_FFFF);
+    }
+    if let Some(tagged) = table.find(record_keys::SESSION_ID) {
+        f.session_id = Some(tagged & 0x0000_FFFF_FFFF_FFFF);
+    }
+    if let Some(tagged) = table.find(record_keys::SENDER_UID) {
+        if cpb_payload_is_heap(tagged) {
+            f.sender_uid = ascii_at(rd, tagged & 0x0000_FFFF_FFFF_FFFF);
+        }
+    }
+    if let Some(tagged) = table.find(record_keys::PEER_UID) {
+        if cpb_payload_is_heap(tagged) {
+            f.peer_uid = peer_at(rd, tagged & 0x0000_FFFF_FFFF_FFFF);
+        }
+    }
+    for key in record_keys::TEXT_KEY_CANDIDATES {
+        if let Some(tagged) = table.find(key) {
+            if cpb_payload_is_heap(tagged) {
+                if let Some(t) = text_at(rd, tagged & 0x0000_FFFF_FFFF_FFFF) {
+                    f.text = Some(t);
+                    break;
+                }
+            }
+        }
+    }
+    f
+}
+
+fn cpb_payload_is_heap(tagged: u64) -> bool {
+    let p = tagged & 0x0000_FFFF_FFFF_FFFF;
+    (0x1_0000..0x7FFF_FFFE_FFFF).contains(&p) && p & 7 == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,3 +382,116 @@ mod tests {
         assert!(a.native_id.is_none(), "无稳定 ID 时上层不得据此合并");
     }
 }
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// 合成内存:区域表 + 读取器。
+    struct FakeMem(BTreeMap<u64, Vec<u8>>);
+    impl FakeMem {
+        fn put(&mut self, addr: u64, data: &[u8]) {
+            self.0.insert(addr, data.to_vec());
+        }
+    }
+    impl MemoryReader for FakeMem {
+        fn read(&self, addr: u64, buf: &mut [u8]) -> bool {
+            // 区域内任意偏移读取(逐字节走区域映射)。
+            for (&base, data) in &self.0 {
+                if addr >= base && addr + buf.len() as u64 <= base + data.len() as u64 {
+                    let off = (addr - base) as usize;
+                    buf.copy_from_slice(&data[off..off + buf.len()]);
+                    return true;
+                }
+            }
+            false
+        }
+    }
+
+    /// N3R17-K3 归档条目表(2026-10-10 实测,实例 0x1d772af5f28;真值
+    /// seq=397878 time=1791590677,台账 2026-10-10 九)。
+    const K3_ENTRIES: [u8; 15 * 12] = build_entries(&[
+        (0x9c41, 0x01d772855d00u64),
+        (0x9c43, 0xc24ecu64),
+        (0x9c4a, 0x4u64),
+        (0x9c54, 0x01d772ac4780u64),
+        (0x9c55, 0x01d772854b60u64),
+        (0x9c5b, 0x1f666a44u64),
+        (0x9c72, 0xd59385f2u64),
+        (0xa2e4, 0x01d772854650u64),
+        (0xa2e5, 0x01d773e38310u64),
+        (0xa2e6, 0x0u64),
+        (0xa2e7, 0x320000000000u64),
+        (0xa2e8, 0x310000000000u64),
+        (0xa2ef, 0x727b4u64),
+        (0xa2f0, 0x0u64),
+        (0xa2f1, 0x01d773f5cc00u64),
+    ]);
+
+    const fn build_entries(pairs: &[(u32, u64)]) -> [u8; 15 * 12] {
+        // 测试期常量构建(条目按 key 升序 = 实测序)。
+        let mut out = [0u8; 15 * 12];
+        let mut i = 0;
+        while i < pairs.len() {
+            let k = pairs[i].0.to_le_bytes();
+            let v = pairs[i].1.to_le_bytes();
+            let mut j = 0;
+            while j < 4 {
+                out[i * 12 + j] = k[j];
+                out[i * 12 + 4 + j] = v[j];
+                out[i * 12 + 8 + j] = v[j + 4];
+                j += 1;
+            }
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn record_fields_extracted_from_archived_entries() {
+        let mut mem = FakeMem(BTreeMap::new());
+        let cpb = 0x1d772af5f28u64;
+        let mut obj = vec![0u8; 0x40];
+        obj[0..8].copy_from_slice(&0x01d7_0000_4261_5c8u64.to_le_bytes()); // vptr(合成)
+        obj[8..16].copy_from_slice(&0x5000_0000u64.to_le_bytes()); // entries
+        obj[0x10..0x14].copy_from_slice(&15u32.to_le_bytes()); // count
+        mem.put(cpb, &obj);
+        mem.put(0x5000_0000, &K3_ENTRIES);
+        // sender:ASCII 缓冲(合成 uid)。
+        let mut snd = vec![0u8; 128];
+        snd[..24].copy_from_slice(b"u_1918755fTESTSELF00000 ");
+        mem.put(0x1d772ac4780, &snd);
+        // peer:TLV {0x0a, 9, "700000001"}(群码形态,合成)。
+        let mut peer = vec![0u8; 128];
+        peer[..11].copy_from_slice(b"
+	700000001");
+        mem.put(0x1d772854b60, &peer);
+        // 正文:元素 blob {0x08, len, utf8}。
+        let mut txt = vec![0u8; 600];
+        txt[..10].copy_from_slice(b"N3R17-K3");
+        mem.put(0x1d772854650, &txt);
+
+        let f = read_record_fields(&mem, cpb);
+        assert_eq!(f.seq_ordinal, Some(0xc24ec), "K3 seq 序数 ×2(台账九)");
+        assert_eq!(f.time_ordinal, Some(0xd59385f2), "K3 time 序数 ×2");
+        assert_eq!(f.session_id, Some(0x1f666a44));
+        assert_eq!(f.sender_uid.as_deref(), Some("u_1918755fTESTSELF00000"));
+        assert_eq!(f.peer_uid.as_deref(), Some("700000001"), "peer TLV 解码");
+        assert_eq!(f.text.as_deref(), Some("N3R17-K3"), "元素 blob 正文");
+    }
+
+    /// 有界合同:count 超界/entries 非指针 → 全 None(不猜)。
+    #[test]
+    fn record_reader_bounded() {
+        let mut mem = FakeMem(BTreeMap::new());
+        let cpb = 0x6000_0000u64;
+        let mut o = vec![0u8; 0x20];
+        o[8..16].copy_from_slice(&0x5000_1000u64.to_le_bytes());
+        o[0x10..0x14].copy_from_slice(&9999u32.to_le_bytes()); // 超界 count
+        mem.put(cpb, &o);
+        let f = read_record_fields(&mem, cpb);
+        assert_eq!(f, RecordFields::default(), "超界 count → 全 None");
+    }
+}
+

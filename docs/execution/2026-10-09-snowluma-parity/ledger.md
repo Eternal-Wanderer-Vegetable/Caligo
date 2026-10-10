@@ -388,3 +388,18 @@ native_receive.rs 的落地不再需要更多逆向:
 - seq = 索引节点(已证);time = 0x9c72 序数 + 会话标定(或事件真值);
 - 采样 = record-scan(已交付)。
 下一轮:Rust 读取器写入 native_receive.rs + N3R13/14/17 归档验证。
+## 2026-10-10(十):CPB 读取器落地 native_receive.rs —— 接收映射闭环
+
+- 新增 `record_keys`(0x9c54 senderUid / 0x9c55 peerUid / 0x9c43 seq 序数×2 /
+  0x9c72 time 序数×2 / 0x9c5b 会话标识 / 正文探测序 [0xb02d, 0xa2e4, 0xa2e5])
+  与 `MemoryReader` trait + `read_record_fields(rd, cpb_obj)`:
+  按 12B 条目布局提取 [`RecordFields`] = {sender_uid, peer_uid, text,
+  seq_ordinal(原始 ×2 形态), time_ordinal(原始 ×2 形态), session_id};
+  不可读/超界 → 对应字段 None(不猜)。序数绝对化 = 上层用关联消息标定基座
+  (策略在 N3 接线时定:标定基座 vs 事件真值配对)。
+- 归档验证测试:N3R17-K3 实测条目表(15 键,台账九)+ 合成串缓冲 →
+  sender/peer TLV/正文 blob/双序数/会话标识全部提取正确;超界 count → 全 None。
+- 验收:research 182/0;default 重跑 161/0(首跑出现一次性测试进程崩溃,
+  与台账已登记现象同型,重跑全绿;新模块纯安全代码)。
+- **接收映射(逆向 + 读取器)闭环**。剩余工程:把 MemoryReader 接到常驻
+  路径(N3),NormalizedNotice 字段填充 + time 基座标定策略定稿。
