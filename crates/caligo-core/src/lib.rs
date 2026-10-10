@@ -10,6 +10,7 @@ pub mod ipc;
 pub mod journal;
 pub mod message_store;
 pub mod onebot;
+pub mod onebot_http;
 pub mod qq_protocol;
 pub mod runtime;
 pub mod transport;

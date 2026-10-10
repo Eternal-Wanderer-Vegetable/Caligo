@@ -514,3 +514,15 @@ native_receive.rs 的落地不再需要更多逆向:
 - 验收:workspace research **193/0**,default **172/0**。
 - 剩余(N4):HTTP/WS transport(std 可实现,零新依赖)+ 事件 fanout +
   journal 持久化;N3 现场(宿主合法初始化)。
+## 2026-10-10(十七):HTTP transport(std 零依赖)
+
+- 新增 caligo-core `onebot_http.rs`:POST JSON 动作端点 —— std TcpListener
+  实现,零新依赖;请求体上限 1 MiB(超限 413);仅 POST(405);非 UTF-8
+  400;一请求一响应(Connection: close);动作处理函数注入(transport 与
+  动作层解耦);accept 循环支持 stop 条件(单线程串行,OneBot HTTP 动作
+  天然串行)。
+- 测试 2 项(真实 TCP 回环):get_version_info roundtrip(echo 透传);
+  非法 JSON 400(1440)+ GET 405。
+- 验收:workspace research **195/0**。
+- 剩余(N4):事件 fanout(WS 推送/HTTP POST 上报)、journal 持久化、
+  鉴权(access token);N3 现场(宿主合法初始化)。
