@@ -956,6 +956,8 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut g3_send_at_uin: u32 = 0;
     // 0 = bridge 侧 rdtsc 现场生成(服务器 (uin, random) 近窗去重,常量即撞)。
     let mut g3_send_rand: u32 = 0;
+    // N3R30:响应消费者 delegate 实验(0 = QQ 空回调;1 = 我们的消费者)。
+    let mut g3_send_consumer: u32 = 0;
     let mut g3_send_ch: u32 = 0;
     let mut env_report: Option<PathBuf> = None;
     let mut register_entry = false;
@@ -1138,6 +1140,13 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => g3_send_ch = v,
                 None => {
                     eprintln!("--g3-send-ch 需要数字参数(0=off;否则 = ContentHead.type)");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-send-consumer" => match next(&mut i).and_then(|v| v.parse().ok()) {
+                Some(v) => g3_send_consumer = v,
+                None => {
+                    eprintln!("--g3-send-consumer 需要数字参数(0=off;1=消费者 delegate)");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1476,7 +1485,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 g3_seq_state_path = Some(state);
                 println!("[g3-send] seq = {} (auto: state+1)", g3_send_seq);
             }
-            Some((p.as_path(), g3_send_peer, text.as_str(), g3_send_uid.as_deref(), g3_send_group, g3_send_seq, g3_send_rand, g3_seq_state_path.clone(), g3_send_at.clone().map(|u| (u, g3_send_at_uin)), g3_send_ch))
+            Some((p.as_path(), g3_send_peer, text.as_str(), g3_send_uid.as_deref(), g3_send_group, g3_send_seq, g3_send_rand, g3_seq_state_path.clone(), g3_send_at.clone().map(|u| (u, g3_send_at_uin)), g3_send_ch, g3_send_consumer))
         }
         (None, None) => None,
         _ => {
@@ -1831,7 +1840,7 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 }
             }
             // auto seq:发送链完成(g3s_done)后回写本次已用 seq。
-            if let (Some(state_path), Some((report_path, _, _, _, group, used_seq, _, _, _, _))) =
+            if let (Some(state_path), Some((report_path, _, _, _, group, used_seq, _, _, _, _, _))) =
                 (g3_seq_state_path.as_deref(), g3_send)
             {
                 if let Ok(s) = std::fs::read_to_string(report_path) {

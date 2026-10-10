@@ -385,7 +385,7 @@ pub unsafe fn inject_and_probe(
     g2_run_ms: u32,
     g3_run_report: Option<&Path>,
     g3_run_ms: u32,
-    g3_send: Option<(&Path, u64, &str, Option<&str>, u64, u32, u32, Option<std::path::PathBuf>, Option<(String, u32)>, u32)>, // (report, peer_uin, text, uid, group_code, seq, rand, seq_state, (at_uid, at_uin), use_ch)
+    g3_send: Option<(&Path, u64, &str, Option<&str>, u64, u32, u32, Option<std::path::PathBuf>, Option<(String, u32)>, u32, u32)>, // (report, peer_uin, text, uid, group_code, seq, rand, seq_state, (at_uid, at_uin), use_ch, use_consumer)
     g3_session: Option<(&Path, u64, &str, u32)>, // (report, group_code, text, observe_ms)
     native_resident: Option<&NativeResidentRequest>,
 ) -> Result<InjectOutcome, String> {
@@ -890,7 +890,7 @@ pub unsafe fn inject_and_probe(
             // 可选:G3-P2 受控发送(caligo_g3_send_run):单次调用,
             // 零插桩。同步返回(发送本身异步)。
             let mut g3_send_exit: Option<u32> = None;
-            if let Some((send_report, peer_uin, text, uid, group_code, seq, rand, _seq_state, at, ch_flag)) = g3_send {
+            if let Some((send_report, peer_uin, text, uid, group_code, seq, rand, _seq_state, at, ch_flag, consumer_flag)) = g3_send {
                 let (at_uid_s, at_uin_v) = at.clone().unwrap_or_default();
                 let send_addr =
                     match read_remote_export(proc_h, remote_base, "caligo_g3_send_run") {
@@ -946,8 +946,10 @@ pub unsafe fn inject_and_probe(
                 ctx_bytes.extend_from_slice(&rand.to_le_bytes());
                 ctx_bytes.extend_from_slice(&(remote_at_uid as usize).to_le_bytes());
                 ctx_bytes.extend_from_slice(&at_uin_v.to_le_bytes());
-                // use_ch(N3R27 形状二分;0 = legacy 无 CH)+ 尾部对齐。
+                // use_ch(N3R27 形状二分;0 = legacy 无 CH)+ use_consumer
+                // (N3R30 消费者实验)+ 尾部对齐。
                 ctx_bytes.extend_from_slice(&ch_flag.to_le_bytes());
+                ctx_bytes.extend_from_slice(&consumer_flag.to_le_bytes());
                 ctx_bytes.extend_from_slice(&[0u8; 4]);
                 let remote_send_ctx = alloc_and_write_bytes(&ctx_bytes, "alloc g3s ctx")?;
                 buf_obs = Some(remote_send_ctx);

@@ -753,6 +753,10 @@ pub struct G3SendCtx {
     /// N3R27 形状二分:0 = legacy(无 CH);非 0 = 群请求带 ContentHead
     /// {1: 该值, 2: 0, 3: 0}(调查发送漂移的服务端形状策略翻转假设)。
     pub use_ch: u32,
+    /// N3R30 消费者实验:0 = QQ 空函数 delegate(现状);非 0 = 我们的
+    /// 响应消费者 delegate(consumer_probe::{invoke,dtor} + ctx),cb 块
+    /// {ctx,flag,invoke,dtor} —— 若门开启,响应/180s 超时写入报告。
+    pub use_consumer: u32,
 }
 
 /// 读远程 NUL 结尾 ASCII(空/不可读 → None)。
@@ -1161,12 +1165,27 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
         }
     }
 
-    // cmd 串 + 空回调块(QQ 原生 empty-function 表示)。
+    // cmd 串 + 回调块(空 delegate 或我们的响应消费者 delegate)。
     let mut cmd = [0u8; 24];
     make_short_string(&mut cmd, b"MessageSvc.PbSendMsg");
     let mut cb = [0u64; 4];
-    cb[2] = (wrapper_base + EMPTY_FN_CALLABLE_RVA) as u64;
-    cb[3] = (wrapper_base + EMPTY_FN_DTOR_RVA) as u64;
+    if (*ctx).use_consumer != 0 {
+        // N3R30:响应消费者 delegate —— cb = {ctx, flag, invoke, dtor}。
+        // invoke 由 QQ dispatcher 线程在响应到达(或 180s 超时 -1)时调用,
+        // 防御式实现(consumer_probe;RPM-self 安全读,布局误判不崩)。
+        crate::consumer_probe::set_fallback(report_path);
+        let c = crate::consumer_probe::leak_ctx(report_path);
+        cb = crate::consumer_probe::build_cb(c);
+        stage(
+            report_path,
+            "g3s_consumer",
+            true,
+            &format!("ctx={:p} invoke={:x}", c as *const _, cb[2]),
+        );
+    } else {
+        cb[2] = (wrapper_base + EMPTY_FN_CALLABLE_RVA) as u64;
+        cb[3] = (wrapper_base + EMPTY_FN_DTOR_RVA) as u64;
+    }
 
     // 单次调用(本线程;发送经全局 dispatcher 异步执行)。
     let send: SendSsoFn = unsafe { core::mem::transmute(wrapper_base + SEND_SSO_RVA) };

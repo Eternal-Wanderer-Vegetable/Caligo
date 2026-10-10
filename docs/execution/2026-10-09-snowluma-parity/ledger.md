@@ -870,3 +870,37 @@ N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。
 - 账号功能正常,未见限制提示(用户侧如有踢出原因文案,后续补充);
 - 下一块(纯离线,零账号风险):25757ea 族 cbCfg 构造静态爬升 → 消费者
   注册设计 → 一次性定向实验。
+## 2026-10-11(二十八):消费者注册静态闭合 + 现场阻塞(提权实例)
+
+### 静态闭合(纯离线;73bd6c 全逻辑 + 构造链)
+- **73bd6c 全逻辑定案**(phaseAE2 反编译):param_1 = dispatch 对象
+  {+8 logger, +0x18 inner(delegate 起点), +0x30 invoke, +0x38 ...};
+  errCode 层级(transport 参数 → resp 空 = -1 → resp+0x40 → +0x60 →
+  +0x64 → 0)无条件记日志(level 1/2)后,**门 3fbab2(inner+0x10 非空)
+  → `(**(dispatch+0x30))(dispatch+0x18, 0x10, errCode, errStr, msgUid)`**。
+- **dispatch 对象在 732A80 内部构造**(0x732e2e → 73bbf8):{fnA, dispfn}
+  函数对写入 + 4d3588 池分配(分支仅池/堆,非消费者语义)+ 73c3a6 三
+  qword 拷贝。**内嵌 delegate 即我们传入的 cb 块**:+0x18=cb 起点、
+  +0x30=cb[2](invoke)——我们传 {0,0,空fn,空dtor},inner+0x10 空 →
+  门永远关闭。**结论:传入真实 delegate 即可让响应回调到我们**。
+- 25757ea 反编译补证:cbCfg 配置 {180000,1,180000,1,2,1} = **180s 超时**
+  (解释 90s 扫描抓不到超时哨兵);cookie = 发送上下文 +0x20。
+- 工具:PE 感知 xref 扫描 + .pdata 函数边界(52.5 万函数)+ LEA 函数地址
+  扫描 —— 构造点 0x73bc1f/0x73bc3c 即由此定位。
+
+### 实现(consumer_probe.rs;n3res5 DLL 就绪)
+- ConsumerCtx(leaked 报告路径)+ consumer_invoke(RPM-self 安全读两侧
+  libc++ 串;魔数自检 + delegate 多布局解析;布局误判不崩)+ dtor(no-op);
+- CLI --g3-send-consumer 1 → cb = {ctx, flag, invoke, dtor};全测试绿。
+
+### 现场阻塞(如实)
+- 昨夜事故后 bot 由 **自动重启机制拉起(00:40:51 组)**——该 QQ(8112,
+  wrapper@0x7FFDA4000000,msf IPv6 连接在位)**带提权令牌**:非提权
+  Toolhelp 枚举失效(observe-msf 误报"无 wrapper",PowerShell 枚举可见)
+  且 RPM 失败(err 299)→ 注入不可达。
+- 另发现:QQ 更新包 9.9.35-52892 已下载未应用(版本适配注意);
+  早上 7:08/7:14 手动重启组无 wrapper 无 msf 连接(非宿主)。
+- **解锁条件(需用户操作)**:停止当前 bot(SnowLuma stop)→ 以非提权
+  方式重启 bot(桌面正常启动)→ 新实例可注入后,单探针验证消费者通道
+  (成功发送 → err_code=0 + msgUid;纪律 v2:不做故意重放,-1 超时路径
+  不主动触发)。
