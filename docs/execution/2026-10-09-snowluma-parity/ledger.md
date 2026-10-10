@@ -302,3 +302,22 @@ read_resp_consumer_strings.py、record_snowluma_events.py)。
   dword@+0xC = capacity(活内存 0x1000000001 = {1, 16} 吻合);
 - 下一跳:对 0x21856d0 做一次 Ghidra 反编译(或续读后续字节)即得
   entries 插入逻辑与 key 语义 —— 接收映射最后一个缺口。
+## 2026-10-10(六):属性访问器完全解码(capstone 反汇编)
+
+### 访问器算法(0x1821878c0,slot2/6/7 thunk 的公共实现)
+- thunk 形态:`add rcx,-8; mov r8b,<字段偏移>; jmp 公共`(key 从 edx 直通);
+- **条目布局 = 12 字节 {key u32 @+0, tagged qword @+4}**(与台账 12B 一致,
+  capstone 实证:`r11d = mid*4; r11d *= 3` = mid×12;二分查找按 key);
+- entries_ptr = [this+0x10],count = [this+0x18](u32;this = 槽对象 − 8);
+- tagged qword:高位为类型/字段 tag(读侧检查 bit58–61 ∈ 1–8 ∪ 10–11),
+  值取 [entry+4] qword,写回语义 = 清 58–61 位 | (字段偏移 << 58);
+- 活内存验证:CPB 实例 {vptr@0, entries@+8, count@+0x10 u32, 内联 UTF-8
+  文本@+0x18..}(0x1d76e8bad28 含 CJK 消息文本);条目键族实测:
+  **0xfa03–0xfa23(消息属性族)、0x108f6–0x108fd、0x3e8/0x3ea/0xea61**;
+  类型实测:ptr 型(bit60=2,低 48 位堆指针)、empty(0x0C<<56)、值型。
+
+### 待收口(单点)
+- 已知消息(seq/time 真值在手)的 CPB 定位:文本串指针形态与假设不符
+  (非 SSO 直指),改走 **索引链表节点 → 记录对象 → 对象内 props 指针** 路径
+  (全部结构已解,只差最后一跳);key→字段语义表随后即可写死进
+  native_receive.rs。
