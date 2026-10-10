@@ -498,3 +498,19 @@ native_receive.rs 的落地不再需要更多逆向:
 - 验收:workspace research **189/0**。
 - 剩余(N4 后续):sink 接 N3 NativeSession 真实现、store 接消息存储、
   transport(HTTP/WS)与事件 fanout。
+## 2026-10-10(十六):N4 组装三件套(离线)
+
+- **message_store.rs**(caligo-core):账号域消息存储 —— 持久本地整数
+  message_id(单调分配,不由 hash/request_id 冒充)、(peer, seq) 幂等去重、
+  同 seq 跨 peer 各自成条;StoreReader 实现(get_msg 服务 OneBot);
+  journal 持久化挂接在 N4 后续。
+- **native_send_sink.rs**(caligo-bridge):`SessionSendSink` —— SendPayload
+  → qq_wire::send 已证形状 → NativeSession::enqueue_send;cookie = rdtsc
+  派生新鲜 16B(零值由 register 拒绝);client_seq=0(服务器不校验,r18
+  实证)、platform_ts = 本机秒;受理分类原样映射(async/未就绪/拒绝);
+  私聊发送显式拒绝(uin→uid 解析属 N3 接线)。
+- **SendSink/StoreReader/SendPayload/extract_text 下沉 caligo-model**
+  (onebot_traits;core 与 bridge 共用,消解 core→bridge 依赖环)。
+- 验收:workspace research **193/0**,default **172/0**。
+- 剩余(N4):HTTP/WS transport(std 可实现,零新依赖)+ 事件 fanout +
+  journal 持久化;N3 现场(宿主合法初始化)。

@@ -51,6 +51,7 @@ pub mod native_handle;
 pub mod native_msf;
 pub mod native_receive;
 pub mod native_response;
+pub mod native_send_sink;
 pub mod native_session;
 pub mod envrun;
 pub mod exec;
