@@ -137,8 +137,9 @@ pub fn normalize(head: &CapturedRecordHead) -> NormalizedNotice {
 // 需一条关联消息标定基座 —— 台账 2026-10-10 九的交叉验证):
 // - 0x9c54 = senderUid(指针 → ASCII 缓冲)
 // - 0x9c55 = peerUid(指针 → TLV {0x0a, len, bytes}:群码/uin 串)
-// - 0x9c43 = seq 序数 ×2(斜率 2/条)
-// - 0x9c72 = time 序数 ×2(斜率 2/秒)
+// - 0x9c43 = 2×seq(实测 /2 = 绝对 seq,N3R18 真值精确吻合;2026-10-10
+//   早前"局部基座/偏移漂移"结论系算术误读,已更正)
+// - 0x9c72 = 2×platform_time(/2 = 绝对 Unix 秒,同上)
 // - 0x9c5b = 会话标识(恒定)
 // 正文 = 元素 blob(blob 起始 {0x08, len, utf8};键按 0xb02d/0xa2e4/0xa2e5
 // 顺序探测 —— 记录形态随消息类型差异,探测序列见 [TEXT_KEY_CANDIDATES])。
@@ -147,8 +148,8 @@ pub fn normalize(head: &CapturedRecordHead) -> NormalizedNotice {
 pub mod record_keys {
     pub const SENDER_UID: u32 = 0x9c54;
     pub const PEER_UID: u32 = 0x9c55;
-    pub const SEQ_ORDINAL2: u32 = 0x9c43; // 值 = 2×seq 序数
-    pub const TIME_ORDINAL2: u32 = 0x9c72; // 值 = 2×time 序数
+    pub const SEQ_x2: u32 = 0x9c43; // 值 = 2×seq(/2 = 绝对 seq)
+    pub const TIME_x2: u32 = 0x9c72; // 值 = 2×platform_time(/2 = Unix 秒)
     pub const SESSION_ID: u32 = 0x9c5b;
     /// 正文 blob 键探测序(首个命中 {0x08, len} 形态者胜)。
     pub const TEXT_KEY_CANDIDATES: [u32; 3] = [0xb02d, 0xa2e4, 0xa2e5];
@@ -165,8 +166,10 @@ pub struct RecordFields {
     pub sender_uid: Option<String>,
     pub peer_uid: Option<String>,
     pub text: Option<String>,
-    pub seq_ordinal: Option<u64>,
-    pub time_ordinal: Option<u64>,
+    /// 绝对消息 seq(0x9c43 / 2;N3R18 真值精确吻合)。
+    pub seq: Option<u64>,
+    /// 平台时间(Unix 秒;0x9c72 / 2)。
+    pub platform_time: Option<u64>,
     pub session_id: Option<u64>,
 }
 
@@ -261,11 +264,12 @@ pub fn read_record_fields(rd: &dyn MemoryReader, cpb_obj: u64) -> RecordFields {
         return f;
     }
     let table = CpbEntries::new(&eb);
-    if let Some(tagged) = table.find(record_keys::SEQ_ORDINAL2) {
-        f.seq_ordinal = Some(tagged & 0x00FF_FFFF_FFFF_FFFF);
+    // 0x9c43/0x9c72 = 2×值(低位 0);/2 还原绝对 seq / 平台时间。
+    if let Some(tagged) = table.find(record_keys::SEQ_x2) {
+        f.seq = Some((tagged & 0x00FF_FFFF_FFFF_FFFF) / 2);
     }
-    if let Some(tagged) = table.find(record_keys::TIME_ORDINAL2) {
-        f.time_ordinal = Some(tagged & 0x00FF_FFFF_FFFF_FFFF);
+    if let Some(tagged) = table.find(record_keys::TIME_x2) {
+        f.platform_time = Some((tagged & 0x00FF_FFFF_FFFF_FFFF) / 2);
     }
     if let Some(tagged) = table.find(record_keys::SESSION_ID) {
         f.session_id = Some(tagged & 0x0000_FFFF_FFFF_FFFF);
@@ -410,7 +414,7 @@ mod record_tests {
     }
 
     /// N3R17-K3 归档条目表(2026-10-10 实测,实例 0x1d772af5f28;真值
-    /// seq=397878 time=1791590677,台账 2026-10-10 九)。
+    /// seq=397942 time=1791607545,r17-gt.json)。
     const K3_ENTRIES: [u8; 15 * 12] = build_entries(&[
         (0x9c41, 0x01d772855d00u64),
         (0x9c43, 0xc24ecu64),
@@ -473,8 +477,8 @@ mod record_tests {
         mem.put(0x1d772854650, &txt);
 
         let f = read_record_fields(&mem, cpb);
-        assert_eq!(f.seq_ordinal, Some(0xc24ec), "K3 seq 序数 ×2(台账九)");
-        assert_eq!(f.time_ordinal, Some(0xd59385f2), "K3 time 序数 ×2");
+        assert_eq!(f.seq, Some(397942), "K3 seq 绝对值(0xc24ec/2;台账九数据,算术已更正)");
+        assert_eq!(f.platform_time, Some(1791607545), "K3 平台时间(0xd59385f2/2;精确吻合 r17 真值)");
         assert_eq!(f.session_id, Some(0x1f666a44));
         assert_eq!(f.sender_uid.as_deref(), Some("u_1918755fTESTSELF00000"));
         assert_eq!(f.peer_uid.as_deref(), Some("700000001"), "peer TLV 解码");
@@ -532,12 +536,9 @@ mod record_tests {
 // ---------------------------------------------------------------------------
 // N3 接线预备(2026-10-10):进程内读取与 CPB 收集。
 //
-// time 标定策略(成文;N3 接线时执行):
-// - 0x9c72/0x9c43 是会话内局部基座序数(斜率 2;台账 2026-10-10 九),
-//   绝对 time/seq = 附加时用**第一条关联消息**标定基座
-//   (base = 真值 − 序数;之后 t = 序数 + base),或与事件真值逐条配对;
-// - 平台时间不确定期间,MsgEvent.platform_time 如实 None,
-//   序数随 native_id 通道携带 —— 不以本地时钟冒充平台时间。
+// time/seq 语义(2026-10-10 修正):0x9c43/0x9c72 直接携带绝对
+// seq/平台时间(×2 形态;/2 还原,N3R18 真值精确吻合)—— 无需基座标定。
+// 早前"局部基座/漂移"结论系算术误读,已在台账更正。
 
 /// 进程内 RPM-self 读取器(g2 同款内核校验读;坏页返回 false 不抛异常)。
 pub struct RpmSelfReader;
