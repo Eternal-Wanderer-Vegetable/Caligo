@@ -650,3 +650,47 @@ N3 常驻化剩余:宿主合法初始化 + IPC 事件交付 + SeenRecords 移入
 ③ daemon Target Unknown 变体;④ 宿主合法初始化路线(设计审查)。
 证据:`E:/stella/_reference/caligo-n3res-20261010/`(r1/r2 capture、
 g3probe/g3send 探针、caligod 日志、journal)。
+## 2026-10-10(二十二):发送服务漂移调查 —— 排除表定案,双假设待决
+
+零注入为主(外部 RPM/observe/静态反汇编;探针发送均为既定测试通道)。
+
+### 排除表(全部实证)
+| 假设 | 证据 | 结论 |
+|---|---|---|
+| transport 轮换 | +0x60=0x1d76e84da30 与 t1 冻结逐位同;vptr 0x41403B8/slot7 0x1B4E4EC ✓ | 排除 |
+| service 对象更换 | obj=0x1d76eb68000 同址,锚点 vptr ✓ | 排除 |
+| MSFCoreService 相关 | t1(正常时)/t4/t5 三时点均"未构造" | 排除 |
+| TCP 重连/会话轮换 | msf 连接 20:45:55 建立,**横跨**成功(21:45)与失败(22:16)窗口 | 排除 |
+| 账号被限流 | API 发送全程秒达(N3R24-API-PROBE seq 399386;N3R25-API-CAL seq 399582 get_msg 实证) | 排除 |
+| 本轮代码回归 | g3_ops 自 N3R23 成功后零改动(逐字节同) | 排除 |
+| 客户端滞留队列(可观测) | 请求体拷贝成功/失败**都**滞留(成功者含 store 记录拷贝,失败者仅请求体);cb 引用两者均已清理 | 排除 |
+| transport/service/subobj/metrics 现场状态 | 原生发送窗与对照窗 0 差分;**API 发送亦 0 差分** → 这些对象不承载活发送态 | 方法到顶 |
+
+### 确立的正面事实
+- 732A80 唯一早期门 = `cmp [rcx+60h],0`(transport 非空;我们通过);错误路径为
+  软日志(类别对象 0x3F6DEA8,紧邻锚点 vtable)→ **写入加密 qqxlog**(无 key
+  不可解;wrapper 模块日志不进内存日志环)。
+- 内存签名:成功 = 请求体拷贝 + store 记录拷贝(peer/sender uid 长度前缀 TLV 区);
+  失败 = 仅请求体拷贝。请求被"正常消费"但从未物化为消息。
+- 发送队列日志串已定位:"OnSendMsgComplete, queue is empty, erase key:{}"
+  (wrapper 0x4604C6D 邻域);key 模板 `{} {}'{}` @0x4CD284D(与响应消费者
+  scope 的 0x3faa680 记录并存,两份拷贝)。
+- **strong 计数泄漏**:MSFService ctrl_strong t1=84 → t4(14:42)=13529 →
+  t5(22:47)=43494(~30/min,QQ 内部租约为主,我们份额小)——卫生问题,
+  未证明与发送失效因果相关;getter 租约不释放是本路线已知债。
+
+### 剩余双假设(按优先序)
+- **H-A(服务端)**:21:45–22:16 间会话/票据 epoch 轮换,服务器开始静默丢弃
+  legacy 形状 PbSendMsg(client_seq=0/rand=1/无 CH)——NapCat 全字段请求不受影响。
+  判别:实例恢复重启后立即原生重试(成功 → 会话龄依赖确认);受控单变量
+  现场(真实 client seq 取自 store/每消息 rand)。
+- **H-B(客户端)**:732A80 提交路径 consult 仅由 JS 管线刷新的状态(路由表
+  重建/令牌对象原位换),legacy 调用读到陈旧态静默 no-op。判别:732A80 →
+  75CEC0(cmd 路由查找)→ 提交路径全程静态追踪,定位静默丢弃门后 RPM 实读。
+
+### 工具/证据
+- `sendtrace.py`(全堆模式扫描,4MB 步进/部分读容错)、`dumpmem.py`(定点
+  qword 转储)入 `E:/stella/_reference/caligo-n3res-20261010/`;
+  observe-27108-t5.json、tw-*/s*-t*/m* 差分快照、trace-probe capture 同目录。
+- 现场纪律:本调查新增注入仅 4 次既定探针(N3R25-TRACE/TRACE2 + 2 次 API 校准),
+  QQ 全程存活。
