@@ -48,7 +48,7 @@ pub fn handle_http_body(
 }
 
 /// 解析 HTTP 请求头,返回 (method, path, content_length)。
-fn parse_request_head(buf: &[u8]) -> Option<(String, String, usize)> {
+fn parse_request_head(buf: &[u8]) -> Option<(String, String, usize, Option<String>)> {
     let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
     let head = std::str::from_utf8(&buf[..header_end]).ok()?;
     let mut lines = head.lines();
@@ -57,13 +57,35 @@ fn parse_request_head(buf: &[u8]) -> Option<(String, String, usize)> {
     let method = parts.next()?.to_string();
     let path = parts.next()?.to_string();
     let mut content_length = 0usize;
+    let mut authorization: Option<String> = None;
     for l in lines {
         let lower = l.to_ascii_lowercase();
         if let Some(v) = lower.strip_prefix("content-length:") {
             content_length = v.trim().parse().ok()?;
         }
+        if let Some(v) = lower.strip_prefix("authorization:") {
+            authorization = Some(l[14..].trim().to_string());
+        }
     }
-    Some((method, path, content_length))
+    Some((method, path, content_length, authorization))
+}
+
+/// access token 校验(Authorization: Bearer <token> 或 ?access_token=;
+/// token 为 None = 未启用鉴权,放行)。
+fn token_ok(authorization: &Option<String>, path: &str, token: Option<&str>) -> bool {
+    let Some(expect) = token else { return true };
+    if let Some(auth) = authorization {
+        let bare = auth.strip_prefix("Bearer ").unwrap_or(auth);
+        if bare == expect {
+            return true;
+        }
+    }
+    if let Some(q) = path.split("access_token=").nth(1) {
+        if q.split('&').next() == Some(expect) {
+            return true;
+        }
+    }
+    false
 }
 
 /// 处理一条已连接的 HTTP 会话(一请求一响应;Connection: close)。
@@ -71,18 +93,23 @@ fn parse_request_head(buf: &[u8]) -> Option<(String, String, usize)> {
 pub fn serve_one(
     mut stream: TcpStream,
     max_body: usize,
+    access_token: Option<&str>,
     handler: impl FnOnce(&str, &Value, Option<Value>) -> ActionResponse,
-) -> (String, String, Vec<u8>) {
+) -> (String, String, Option<String>, Vec<u8>) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
+    let mut authorization: Option<String> = None;
+    let mut auth_store: Option<String> = None;
     let (method, path, content_length) = loop {
         match stream.read(&mut tmp) {
-            Ok(0) | Err(_) => return ("GET".into(), "/".into(), Vec::new()),
+            Ok(0) | Err(_) => return ("GET".into(), "/".into(), None, Vec::new()),
             Ok(n) => {
                 buf.extend_from_slice(&tmp[..n]);
-                if let Some((m, p, cl)) = parse_request_head(&buf) {
+                if let Some((m, p, cl, auth)) = parse_request_head(&buf) {
+                    auth_store = auth;
                     if buf.len() >= cl.min(max_body) + (buf.len() - cl).max(0) || buf.len() >= 4 + cl {
+                        authorization = auth_store;
                         break (m, p, cl);
                     }
                     if cl > max_body {
@@ -90,17 +117,25 @@ pub fn serve_one(
                             r#"{{"status":"failed","retcode":1413,"wording":"请求体超限 {cl}"}}"#
                         );
                         respond(&mut stream, 413, &body);
-                        return (m, p, Vec::new());
+                        return (m, p, Some(String::new()), Vec::new());
                     }
                 } else if buf.len() > 64 * 1024 {
-                    return ("GET".into(), "/".into(), Vec::new());
+                    return ("GET".into(), "/".into(), None, Vec::new());
                 }
             }
         }
     };
+    if !token_ok(&authorization, &path, access_token) {
+        respond(
+            &mut stream,
+            403,
+            r#"{"status":"failed","retcode":1403,"wording":"access token 无效"}"#,
+        );
+        return (method, path.to_string(), authorization, Vec::new());
+    }
     if method != "POST" {
         respond(&mut stream, 405, r#"{"status":"failed","retcode":1405,"wording":"仅 POST"}"#);
-        return (method, path, Vec::new());
+        return (method, path.to_string(), authorization, Vec::new());
     }
     // 定位 body:headers 之后的 content_length 字节。
     let header_end = buf
@@ -111,7 +146,7 @@ pub fn serve_one(
     let body = buf[header_end..].to_vec();
     let (code, resp) = handle_http_body(&body, max_body, handler);
     respond(&mut stream, code, &resp);
-    (method, path, body)
+    (method, path.to_string(), authorization, body)
 }
 
 fn respond(stream: &mut TcpStream, code: u16, body: &str) {
@@ -135,6 +170,7 @@ fn respond(stream: &mut TcpStream, code: u16, body: &str) {
 pub fn serve_loop(
     listener: &TcpListener,
     max_body: usize,
+    access_token: Option<&str>,
     stop: impl Fn() -> bool,
     handler: &mut dyn FnMut(&str, &Value, Option<Value>) -> ActionResponse,
 ) -> usize {
@@ -146,7 +182,7 @@ pub fn serve_loop(
         }
         match listener.accept() {
             Ok((stream, _)) => {
-                serve_one(stream, max_body, |a, p, e| handler(a, p, e));
+                serve_one(stream, max_body, access_token, |a, p, e| handler(a, p, e));
                 served += 1;
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -204,7 +240,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
-            serve_loop(&listener, DEFAULT_MAX_BODY, || false, &mut handler);
+            serve_loop(&listener, DEFAULT_MAX_BODY, None, || false, &mut |a, p, e| handler(a, p, e));
         });
         std::thread::sleep(std::time::Duration::from_millis(100));
         let (code, body) = http_post(port, r#"{"action":"get_version_info","echo":"x"}"#);
@@ -219,7 +255,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         std::thread::spawn(move || {
-            serve_loop(&listener, DEFAULT_MAX_BODY, || false, &mut handler);
+            serve_loop(&listener, DEFAULT_MAX_BODY, None, || false, &mut |a, p, e| handler(a, p, e));
         });
         std::thread::sleep(std::time::Duration::from_millis(100));
         let (code, body) = http_post(port, "not json");

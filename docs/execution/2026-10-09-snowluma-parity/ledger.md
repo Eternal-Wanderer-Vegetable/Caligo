@@ -526,3 +526,19 @@ native_receive.rs 的落地不再需要更多逆向:
 - 验收:workspace research **195/0**。
 - 剩余(N4):事件 fanout(WS 推送/HTTP POST 上报)、journal 持久化、
   鉴权(access token);N3 现场(宿主合法初始化)。
+## 2026-10-10(十八):事件 fanout + access token 鉴权
+
+- 新增 caligo-core `onebot_events.rs`:**EventBus** 事件 fanout —— 每订阅者
+  有界 sync_channel(256 条,独立背压);发布 try_send,满则该订阅者丢弃
+  本条并计数(不阻塞发布者/不阻塞 QQ 线程);断开订阅者自动注销;
+  丢弃数累计对诊断可见。WS 推送与 HTTP POST 上报共用同一 fanout。
+- onebot_http.rs:**access token 鉴权**(Authorization: Bearer <token> 或
+  ?access_token=;token=None = 未启用放行;无效 403/retcode 1403)。
+  serve_one/serve_loop 签名相应扩展。
+- 测试 +3(全订阅送达/慢订阅者丢弃计数/断开自动注销;token 通过与 403)。
+- 验收:workspace research **197/0**,default **176/0**。
+- **N4 离线可交付部分至此完成**:动作层 + 消息存储 + 发送适配器 +
+  HTTP transport + 事件 fanout + 鉴权。剩余均需现场:
+  ① N3 宿主合法初始化(合法注入替代路线,需设计审查);
+  ② sink/store 接线上述组件到活实例;
+  ③ 事件从接收链到 fanout 的贯通。
