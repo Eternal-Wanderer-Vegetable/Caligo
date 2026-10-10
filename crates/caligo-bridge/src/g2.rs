@@ -301,7 +301,7 @@ fn safe_read_qword(addr: usize) -> Option<u64> {
 }
 
 /// RPM-self 区块读取(4MB 分块,坏块截断不臆测)。
-fn read_region_chunked(base: usize, size: usize) -> Vec<u8> {
+pub(crate) fn read_region_chunked(base: usize, size: usize) -> Vec<u8> {
     use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     const CHUNK: usize = 4 * 1024 * 1024;
@@ -540,6 +540,23 @@ pub unsafe fn g2_listen_run(ctx: *const G2Ctx) -> u32 {
         true,
         &format!("b0={} end={end_node:#x} root={root:#x} size={size}", hex64(b0)),
     );
+    // N3 接收链:swap 前收集 CPB 基线(absorb 首批评见;进程内 RPM-self)。
+    let mut seen_records = crate::native_receive::SeenRecords::new();
+    let baseline_t0 = std::time::Instant::now();
+    let baseline_objs = crate::native_receive::scan_cpb_objects_inproc(wrapper_base as u64);
+    let baseline = crate::native_receive::collect_record_fields(
+        &crate::native_receive::RpmSelfReader,
+        &baseline_objs,
+        8192,
+    );
+    let _ = seen_records.absorb(&baseline);
+    stage(
+        report_path,
+        "g2_baseline",
+        true,
+        &format!("cpb={} records={} ms={}", baseline_objs.len(), baseline.len(), baseline_t0.elapsed().as_millis()),
+    );
+
     let (ours_obj, our_node) = init_object_and_node();
     // SAFETY: our_node 指向 OUR_NODE(5 qword);仅初始化线程写。
     unsafe {
@@ -577,6 +594,22 @@ pub unsafe fn g2_listen_run(ctx: *const G2Ctx) -> u32 {
         );
     }
 
+    // N3 接收链:restore 后收集 fresh(absorb 差分 = 窗口内新消息)。
+    let fresh_t0 = std::time::Instant::now();
+    let after_objs = crate::native_receive::scan_cpb_objects_inproc(wrapper_base as u64);
+    let after = crate::native_receive::collect_record_fields(
+        &crate::native_receive::RpmSelfReader,
+        &after_objs,
+        8192,
+    );
+    let fresh = seen_records.absorb(&after);
+    stage(
+        report_path,
+        "g2_records",
+        true,
+        &format!("cpb={} fresh={} ms={}", after_objs.len(), fresh.len(), fresh_t0.elapsed().as_millis()),
+    );
+
     // drain 环 → captured fixture(r5 格式:head200 + pool 快照)。
     let r = ring();
     use std::io::Write;
@@ -608,6 +641,23 @@ pub unsafe fn g2_listen_run(ctx: *const G2Ctx) -> u32 {
             );
         }
         drop(pools);
+        for (obj, rf) in &fresh {
+            let esc = |x: &Option<String>| {
+                x.as_deref()
+                    .map(|t| t.replace('\\', "\\\\").replace('"', "'"))
+                    .unwrap_or_default()
+            };
+            let _ = writeln!(
+                f,
+                "{{\"kind\":\"record\",\"obj\":{:#x},\"sender\":\"{}\",\"peer\":\"{}\",\"text\":\"{}\",\"seq\":{},\"time\":{}}}",
+                obj,
+                esc(&rf.sender_uid),
+                esc(&rf.peer_uid),
+                esc(&rf.text),
+                rf.seq.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                rf.platform_time.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+            );
+        }
         let _ = writeln!(
             f,
             "{{\"kind\":\"summary\",\"pushed_heads\":{},\"dropped_heads\":{},\"pushed_pools\":{},\"dropped_pools\":{},\"unreadable\":{}}}",

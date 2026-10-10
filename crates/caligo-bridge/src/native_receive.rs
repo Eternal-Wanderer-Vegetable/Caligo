@@ -195,17 +195,37 @@ impl<'a> CpbEntries<'a> {
     }
 }
 
-/// ASCII 缓冲读取(≤64B 可打印;NUL/非打印截断)。
+/// senderUid 读取(双形态;实证 0x9c54 目标 = {X u8, len u8, chars}:
+/// 19 18 "u_89Q8…" —— len 在 buf[1];亦兼容 {len u8, chars} 单字节头)。
 fn ascii_at(rd: &dyn MemoryReader, addr: u64) -> Option<String> {
-    let mut buf = [0u8; 64];
+    let mut buf = [0u8; 80];
     if !rd.read(addr, &mut buf) {
         return None;
     }
-    let end = buf.iter().take_while(|&&b| b >= 0x20 && b < 0x7f).count();
-    if end < 4 {
-        return None;
+    let ok_str = |s: &[u8]| -> Option<String> {
+        if s.len() < 4
+            || s.len() > 63
+            || !s.iter().all(|&b| b >= 0x20 && b < 0x7f)
+        {
+            return None;
+        }
+        Some(String::from_utf8_lossy(s).into_owned())
+    };
+    // 形态 B:{X u8, len u8, chars}(len = buf[1])。
+    let nb = buf[1] as usize;
+    if nb >= 4 && nb <= 63 && 2 + nb <= buf.len() {
+        if let Some(s) = ok_str(&buf[2..2 + nb]) {
+            return Some(s);
+        }
     }
-    Some(String::from_utf8_lossy(&buf[..end]).into_owned())
+    // 形态 A:{len u8, chars}(len = buf[0])。
+    let na = buf[0] as usize;
+    if na >= 4 && na <= 63 && 1 + na <= buf.len() {
+        if let Some(s) = ok_str(&buf[1..1 + na]) {
+            return Some(s);
+        }
+    }
+    None
 }
 
 /// peerUid TLV 读取({0x0a, len, bytes};非该形态退回 ASCII)。
@@ -223,25 +243,22 @@ fn peer_at(rd: &dyn MemoryReader, addr: u64) -> Option<String> {
     ascii_at(rd, addr)
 }
 
-/// 正文 blob 读取({0x08, len, utf8};UTF-8 len 以字节计,可 > 127)。
+/// 正文 blob 读取:{type u8, len u8, utf8}(实证 0xa2e5:09 08 "N3R17-K2";
+/// 0xb02d:08 07 "N3R16-R" —— len 恒在 buf[1],正文在 buf[2..])。
 fn text_at(rd: &dyn MemoryReader, addr: u64) -> Option<String> {
     let mut buf = [0u8; 512];
     if !rd.read(addr, &mut buf) {
         return None;
     }
-    // blob 前可有少量非正文前缀;在前 8 字节内探测 {0x08, len} 形态。
-    for skip in 0..8usize {
-        if buf[skip] == 0x08 && buf[skip + 1] > 0 {
-            let n = buf[skip + 1] as usize;
-            if skip + 2 + n <= buf.len() && n >= 1 {
-                let bytes = &buf[skip + 2..skip + 2 + n];
-                if std::str::from_utf8(bytes).is_ok() {
-                    return Some(String::from_utf8_lossy(bytes).into_owned());
-                }
-            }
-        }
+    let n = buf[1] as usize;
+    if n == 0 || n > 500 {
+        return None;
     }
-    None
+    let bytes = &buf[2..2 + n];
+    std::str::from_utf8(bytes)
+        .ok()
+        .map(|t| t.to_owned())
+        .filter(|t| !t.is_empty())
 }
 
 /// 从 CPB 对象提取记录字段(经任意 [`MemoryReader`])。
@@ -510,7 +527,10 @@ mod record_tests {
         mem.put(0x5000_0000, &K3_ENTRIES);
         // sender:ASCII 缓冲(合成 uid)。
         let mut snd = vec![0u8; 128];
-        snd[..24].copy_from_slice(b"u_1918755fTESTSELF00000 ");
+        snd[0] = 24; // len u8
+        snd[0] = 23; // X u8(len+1)
+        snd[1] = 22; // len u8
+        snd[2..24].copy_from_slice(b"u_1918755fTESTSELF0000");
         mem.put(0x1d772ac4780, &snd);
         // peer:TLV {0x0a, 9, "700000001"}(群码形态,合成)。
         let mut peer = vec![0u8; 128];
@@ -519,14 +539,16 @@ mod record_tests {
         mem.put(0x1d772854b60, &peer);
         // 正文:元素 blob {0x08, len, utf8}。
         let mut txt = vec![0u8; 600];
-        txt[..10].copy_from_slice(b"N3R17-K3");
+        txt[0] = 9;  // type u8
+        txt[1] = 8;  // len u8
+        txt[2..10].copy_from_slice(b"N3R17-K3");
         mem.put(0x1d772854650, &txt);
 
         let f = read_record_fields(&mem, cpb);
         assert_eq!(f.seq, Some(397942), "K3 seq 绝对值(0xc24ec/2;台账九数据,算术已更正)");
         assert_eq!(f.platform_time, Some(1791607545), "K3 平台时间(0xd59385f2/2;精确吻合 r17 真值)");
         assert_eq!(f.session_id, Some(0x1f666a44));
-        assert_eq!(f.sender_uid.as_deref(), Some("u_1918755fTESTSELF00000"));
+        assert_eq!(f.sender_uid.as_deref(), Some("u_1918755fTESTSELF0000"));
         assert_eq!(f.peer_uid.as_deref(), Some("700000001"), "peer TLV 解码");
         assert_eq!(f.text.as_deref(), Some("N3R17-K3"), "元素 blob 正文");
     }
@@ -568,8 +590,10 @@ mod record_tests {
         eb[0..4].copy_from_slice(&0x9c54u32.to_le_bytes());
         eb[4..12].copy_from_slice(&0x7001_0000u64.to_le_bytes());
         mem.put(0x7000_0000, &eb);
-        let mut snd = vec![0u8; 64];
-        snd[..10].copy_from_slice(b"u_TESTSEND");
+        let mut snd = vec![0u8; 128];
+        snd[0] = 11; // X u8(len+1)
+        snd[1] = 10; // len u8
+        snd[2..12].copy_from_slice(b"u_TESTSEND");
         mem.put(0x7001_0000, &snd);
 
         let got = collect_record_fields(&mem, &cpbs, 10);
@@ -661,3 +685,38 @@ pub fn collect_record_fields(
     }
     out
 }
+
+/// 进程内 CPB 实例枚举(VirtualQuery 自进程提交区遍历;g2 locate_manager
+/// 同过滤模式:MEM_COMMIT|MEM_PRIVATE,4KB≤region<1GB,无 GUARD/NOACCESS)。
+pub fn scan_cpb_objects_inproc(wrapper_base: u64) -> Vec<u64> {
+    use windows_sys::Win32::System::Memory::{
+        MEM_COMMIT, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
+    };
+    let mut out = Vec::new();
+    // SAFETY: 自进程只读查询与读取。
+    unsafe {
+        let mut addr = 0x10000usize;
+        let max = 0x7FFF_FFFE_FFFFusize;
+        while addr < max {
+            let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
+            if VirtualQuery(addr as *const core::ffi::c_void, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) == 0 {
+                break;
+            }
+            let region = mbi.RegionSize;
+            let base_addr = mbi.BaseAddress as usize;
+            if mbi.State == MEM_COMMIT
+                && mbi.Type == MEM_PRIVATE
+                && region >= 0x1000
+                && region < 0x4000_0000
+                && mbi.Protect & PAGE_GUARD == 0
+                && mbi.Protect & PAGE_NOACCESS == 0
+            {
+                let buf = crate::g2::read_region_chunked(base_addr, region);
+                scan_cpb_in_region(&buf, base_addr as u64, wrapper_base, &mut out);
+            }
+            addr = base_addr + region;
+        }
+    }
+    out
+}
+

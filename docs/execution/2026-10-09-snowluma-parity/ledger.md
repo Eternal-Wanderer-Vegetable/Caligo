@@ -454,3 +454,29 @@ native_receive.rs 的落地不再需要更多逆向:
 - 验收:bridge 53 lib 全绿。
 - 剩余(N3 现场单窗):捕获处理器接线 + time 基座确认(零标定已定)+
   事件走 IPC → 之后 N4。
+## 2026-10-10(终章):接收链现场端到端贯通 —— 全字段提取成功
+
+### 接线实现(g2_listen_run 扩展)
+- swap 前 CPB 基线收集(进程内枚举 + RpmSelfReader,4325 实例/53 记录/**88ms**)
+  → SeenRecords 首批评见;restore 后 fresh 差分(4815 实例/**77ms**);
+- 新记录全字段写入报告(kind=record 行)。
+
+### 串格式修正(r8/r9/r10 三轮现场迭代)
+- **senderUid 目标 = {X u8, len u8, ascii}**(19 18 "u_89Q8…",len 在 buf[1];
+  兼容 {len u8, chars} 单字节头)——r8 空 sender 的根因;
+- **正文 blob = {type u8, len u8, utf8}**(0xa2e5:09 08 "N3R17-K2";
+  0xb02d:08 07 "N3R16-R" —— len 恒在 buf[1])——r8 空 text 的根因;
+- fixture 同步(合成串带长度头)。
+
+### r10 现场终验(零人工;SnowLuma API 单发)
+```
+{"sender":"u_89Q8KaNHHFMPj7o967xJGg","peer":"263402786",
+ "text":"N3R21-DONE","seq":398263,"time":1791621805}
+```
+与 get_msg 真值**逐项精确一致**(sender=自发 bot uid ✓ peer=群码 ✓
+正文 ✓ seq ✓ 平台时间秒级 ✓)。ambient 消息(私聊 peer=950238216 等)
+同步正确提取。restore 对称、零不可读、QQ 存活。
+
+### 状态
+**接收路径现场端到端贯通。** 剩余:N3 常驻化(宿主合法初始化 + IPC 事件)
+与 N4 OneBot 动作层 —— 均为已验证部件的组装,不再有未知结构。
