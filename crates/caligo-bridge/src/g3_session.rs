@@ -95,19 +95,28 @@ pub unsafe fn g3_session_run(ctx: *const G3SessionCtx) -> u32 {
     stage(report_path, "n3_attach", true, "probe_ready PASS");
 
     // ② 会话 + CPB 基线。
+    // 服务对象地址 = getter 租约 + 锚点核对的真实产物(probe_service);
+    // ops.submit 每次调用自行重新租约,此地址仅作 proof 证据登记。
+    let service_addr = match ops.probe_service() {
+        Ok(a) => a,
+        Err(e) => {
+            stage(report_path, "n3_service", false, &format!("{e:?}"));
+            return 2;
+        }
+    };
     let mut session: NativeSession<SeqAllocator<Box<dyn FnMut(u64) -> Result<(), std::io::Error>>>> =
         NativeSession::new(SeqAllocator::new(1, Box::new(|_| Ok(()))));
     if let Err(e) = session.attach(&mut ops, crate::native_session::AttachProof {
         module_baseline: "qq-9.9.33-52230".into(),
         anchor_candidates: 1,
-        service_addr: 0, // submit 不使用(G3NativeOps 内部自带 svc)
+        service_addr,
         host_generation: 1,
         session_generation: 1,
     }) {
         stage(report_path, "n3_session_attach", false, &format!("{e:?}"));
         return 2;
     }
-    stage(report_path, "n3_session_attach", true, "Ready");
+    stage(report_path, "n3_session_attach", true, &format!("Ready svc={service_addr:#x}"));
 
     // CPB 基线。
     let rd = crate::native_receive::RpmSelfReader;

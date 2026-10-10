@@ -40,6 +40,28 @@ impl G3NativeOps {
         Self { wrapper_base }
     }
 
+    /// 就绪探针(零副作用):getter 租约 + 锚点核对;成功返回**真实服务
+    /// 对象地址**(诚实证据,供 `AttachProof.service_addr` 登记;ops.submit
+    /// 每次调用自行重新租约,本地址不用于派发)。
+    pub fn probe_service(&mut self) -> Result<usize, OpsError> {
+        let wb = self.wrapper_base;
+        // SAFETY: 同 submit ①②;只读,零写入。
+        unsafe {
+            let getter: GetterFn = core::mem::transmute(wb + rva::GETTER);
+            let mut pair = ServicePair { obj: core::ptr::null_mut(), ctrl: core::ptr::null_mut() };
+            let ret = getter(&mut pair as *mut ServicePair);
+            if ret as usize != &mut pair as *mut ServicePair as usize || pair.obj.is_null() {
+                return Err(OpsError::NotReady("probe: getter failed".into()));
+            }
+            let svc = pair.obj as usize;
+            let vptr = core::ptr::read_volatile(svc as *const u64);
+            if (vptr as usize).wrapping_sub(wb) != rva::ANCHOR_SVC_VTBL {
+                return Err(OpsError::NotReady("probe: anchor mismatch".into()));
+            }
+            Ok(svc)
+        }
+    }
+
     /// 完整 g3 发送序列:adopt → transport → alloc → self str → send。
     /// 返回 Ok = 已提交(异步;结果需经 CPB 差分确认)。
     fn native_submit(&self, body: &[u8]) -> Result<(), OpsError> {
@@ -109,22 +131,7 @@ impl G3NativeOps {
 impl NativeOps for G3NativeOps {
     fn probe_ready(&mut self, _service_addr: usize) -> Result<(), OpsError> {
         // 最小就绪探针:getter 租约 + 锚点核对(零副作用)。
-        let wb = self.wrapper_base;
-        // SAFETY: 同 submit ①②;零写入。
-        unsafe {
-            let getter: GetterFn = core::mem::transmute(wb + rva::GETTER);
-            let mut pair = ServicePair { obj: core::ptr::null_mut(), ctrl: core::ptr::null_mut() };
-            let ret = getter(&mut pair as *mut ServicePair);
-            if ret as usize != &mut pair as *mut ServicePair as usize || pair.obj.is_null() {
-                return Err(OpsError::NotReady("probe: getter failed".into()));
-            }
-            let svc = pair.obj as usize;
-            let vptr = core::ptr::read_volatile(svc as *const u64);
-            if (vptr as usize).wrapping_sub(wb) != rva::ANCHOR_SVC_VTBL {
-                return Err(OpsError::NotReady("probe: anchor mismatch".into()));
-            }
-        }
-        Ok(())
+        self.probe_service().map(|_| ())
     }
 
     fn submit(&mut self, _service_addr: usize, _cookie: &Cookie, body: &[u8]) -> Result<(), OpsError> {

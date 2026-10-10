@@ -53,6 +53,8 @@ caligo-cli <K1 probe>
                      --g3-send-text <text> [--g3-send-uid <u_xxx>]
                      [--g3-send-group <group_code>]
                      [--g3-send-seq <n>] [--g3-send-rand <n>]]
+                    [--g3-session-report <g3sess.jsonl> --g3-session-group <code>
+                     --g3-session-text <text> [--g3-session-ms <ms>]]
                     [--register-entry] [--wait-ms <ms>]
                     [--intr-report <intr.jsonl> --intr-env <ptr-hex>]
                     [--intr-vftable <va-hex>] [--intr-wait-ms <ms>]
@@ -922,7 +924,10 @@ fn cmd_inject(args: &[String]) -> ExitCode {
     let mut native_run_ms: u32 = 10_000;
     let mut g2_run_report: Option<PathBuf> = None;
     let mut g2_run_ms: u32 = 10_000;
-    let mut g3_session: Option<(u64, String, u64, String, u32)> = None;
+    let mut g3_session_report: Option<PathBuf> = None;
+    let mut g3_session_group: u64 = 0;
+    let mut g3_session_text: Option<String> = None;
+    let mut g3_session_ms: u32 = 30_000;
     let mut g3_run_report: Option<PathBuf> = None;
     let mut g3_run_ms: u32 = 120_000;
     let mut g3_send_report: Option<PathBuf> = None;
@@ -1109,6 +1114,34 @@ fn cmd_inject(args: &[String]) -> ExitCode {
                 Some(v) => g3_send_rand = v,
                 None => {
                     eprintln!("--g3-send-rand 需要数字参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-session-report" => match next(&mut i) {
+                Some(v) => g3_session_report = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("--g3-session-report 需要路径参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-session-group" => match next(&mut i).and_then(|v| v.parse().ok()) {
+                Some(v) => g3_session_group = v,
+                None => {
+                    eprintln!("--g3-session-group 需要数字群号参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-session-text" => match next(&mut i) {
+                Some(v) => g3_session_text = Some(v.to_string()),
+                None => {
+                    eprintln!("--g3-session-text 需要文本参数");
+                    return ExitCode::FAILURE;
+                }
+            },
+            "--g3-session-ms" => match next(&mut i).and_then(|v| v.parse().ok()) {
+                Some(v) => g3_session_ms = v,
+                None => {
+                    eprintln!("--g3-session-ms 需要数字参数");
                     return ExitCode::FAILURE;
                 }
             },
@@ -1357,6 +1390,28 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let g3_session_report = g3_session_report.map(|p| {
+        std::fs::OpenOptions::new().create(true).append(true).open(&p).ok();
+        p
+    });
+    let g3_session = match (&g3_session_report, &g3_session_text) {
+        (Some(p), Some(text)) => {
+            if g3_session_group == 0 {
+                eprintln!("--g3-session-text 需要配对 --g3-session-group");
+                return ExitCode::FAILURE;
+            }
+            println!(
+                "[g3-session] group={} text={:?} observe_ms={}",
+                g3_session_group, text, g3_session_ms
+            );
+            Some((p.as_path(), g3_session_group, text.as_str(), g3_session_ms))
+        }
+        (None, None) => None,
+        _ => {
+            eprintln!("--g3-session-report/--g3-session-text 需成对提供");
+            return ExitCode::FAILURE;
+        }
+    };
     let obs_report = match obs_report {
         Some(p) => {
             let abs = match to_absolute(&p) {
@@ -1593,10 +1648,35 @@ fn cmd_inject(args: &[String]) -> ExitCode {
             g3_run_report.as_deref(),
             g3_run_ms,
             g3_send.clone(),
+            g3_session.clone(),
         )
     };
     match outcome {
         Ok(o) => {
+            if let Some(gs_code) = o.g3_session_exit_code {
+                println!(
+                    "[g3-session] caligo_g3_session_run:exit_code={} ({})",
+                    gs_code,
+                    match gs_code {
+                        0 => "OK(发送文本在 fresh 差分中全字段命中)",
+                        1 => "attach 失败(probe_ready)",
+                        2 => "session attach 失败",
+                        3 => "encode 失败",
+                        4 => "dispatch 失败",
+                        5 => "fresh 差分未见发送文本",
+                        _ => "UNKNOWN",
+                    }
+                );
+                if let Some(rp) = g3_session_report.as_deref() {
+                    match std::fs::read_to_string(rp) {
+                        Ok(content) => {
+                            println!("=== g3-session report ({}) ===", rp.display());
+                            println!("{content}");
+                        }
+                        Err(e) => eprintln!("g3-session 报告读取失败 {}: {e}", rp.display()),
+                    }
+                }
+            }
             // auto seq:发送链完成(g3s_done)后回写本次已用 seq。
             if let (Some(state_path), Some((report_path, _, _, _, group, used_seq, _, _, _))) =
                 (g3_seq_state_path.as_deref(), g3_send)

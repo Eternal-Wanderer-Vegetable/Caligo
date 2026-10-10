@@ -267,6 +267,8 @@ pub struct InjectOutcome {
     pub g3_exit_code: Option<u32>,
     /// `caligo_g3_send_run` 的返回码(仅在 g3_send_report 提供时)。
     pub g3_send_exit_code: Option<u32>,
+    /// `caligo_g3_session_run` 的返回码(仅在 g3_session_report 提供时)。
+    pub g3_session_exit_code: Option<u32>,
     /// `caligo_env_start` 的返回码(仅在 env_report 提供时;链路线程异步执行)。
     pub env_exit_code: Option<u32>,
     /// `caligo_interrupt_run` 的返回码(仅在 intr 提供时;同步执行)。
@@ -357,6 +359,7 @@ pub unsafe fn inject_and_probe(
     g3_run_report: Option<&Path>,
     g3_run_ms: u32,
     g3_send: Option<(&Path, u64, &str, Option<&str>, u64, u32, u32, Option<std::path::PathBuf>, Option<(String, u32)>)>, // (report, peer_uin, text, uid, group_code, seq, rand, seq_state, (at_uid, at_uin))
+    g3_session: Option<(&Path, u64, &str, u32)>, // (report, group_code, text, observe_ms)
 ) -> Result<InjectOutcome, String> {
     use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
@@ -943,6 +946,81 @@ pub unsafe fn inject_and_probe(
                 g3_send_exit = Some(code);
             }
 
+            // 可选:N3 会话现场验证(caligo_g3_session_run):attach → CPB 基线 →
+            // 单条发送(已证形状)→ 等待 → fresh 差分 → 全字段报告。有界同步。
+            let mut g3_session_exit: Option<u32> = None;
+            if let Some((sess_report, group_code, sess_text, observe_ms)) = g3_session {
+                let sess_addr =
+                    match read_remote_export(proc_h, remote_base, "caligo_g3_session_run") {
+                        Ok(Some(a)) => a,
+                        Ok(None) => return Err("caligo_g3_session_run not found in remote".into()),
+                        Err(e) => return Err(format!("remote export lookup (g3-session): {e}")),
+                    };
+                let wrapper_base = *module_bases_in(pid)?.get("wrapper.node").unwrap_or(&0);
+                if wrapper_base == 0 {
+                    return Err("wrapper.node base unresolved in target (g3-session)".into());
+                }
+                // 绝对化:远程线程按目标进程 CWD 解析相对路径,必须传全路径。
+                let sess_abs = if sess_report.is_absolute() {
+                    sess_report.to_path_buf()
+                } else {
+                    std::env::current_dir()
+                        .map_err(|e| format!("current_dir: {e}"))?
+                        .join(sess_report)
+                };
+                let sess_wide = to_wide(&sess_abs.to_string_lossy());
+                let remote_sess_path = alloc_and_write(&sess_wide, "alloc g3-session report path")?;
+                buf_obs = Some(remote_sess_path);
+                let mut text_u16: Vec<u16> = sess_text.encode_utf16().collect();
+                text_u16.push(0);
+                let remote_sess_text = alloc_and_write(&text_u16, "alloc g3-session text")?;
+                buf_report = Some(remote_sess_text);
+                // G3SessionCtx:wrapper_base u64 / report_path / group_code u64 /
+                // text_ptr / observe_ms u32(+尾部对齐填充)。
+                let mut ctx_bytes = Vec::with_capacity(40);
+                ctx_bytes.extend_from_slice(&wrapper_base.to_le_bytes());
+                ctx_bytes.extend_from_slice(&(remote_sess_path as usize).to_le_bytes());
+                ctx_bytes.extend_from_slice(&group_code.to_le_bytes());
+                ctx_bytes.extend_from_slice(&(remote_sess_text as usize).to_le_bytes());
+                ctx_bytes.extend_from_slice(&observe_ms.to_le_bytes());
+                ctx_bytes.extend_from_slice(&[0u8; 4]);
+                let remote_sess_ctx = alloc_and_write_bytes(&ctx_bytes, "alloc g3-session ctx")?;
+                buf_obs = Some(remote_sess_ctx);
+                let sess_fn: unsafe extern "system" fn(*const core::ffi::c_void) -> u32 =
+                    std::mem::transmute::<usize, unsafe extern "system" fn(*const core::ffi::c_void) -> u32>(sess_addr);
+                let start_sess: RemoteThreadFn =
+                    std::mem::transmute::<usize, RemoteThreadFn>(sess_fn as usize);
+                let sess_thread = CreateRemoteThread(
+                    proc_h,
+                    std::ptr::null(),
+                    0,
+                    Some(start_sess),
+                    remote_sess_ctx,
+                    0,
+                    std::ptr::null_mut(),
+                );
+                if sess_thread.is_null() {
+                    return Err(format!(
+                        "CreateRemoteThread(g3-session): Win32 error {}",
+                        GetLastError()
+                    ));
+                }
+                // 宽限 60s:CPB 基线/差分扫描在繁忙实例上可达数十秒(g2 同款)。
+                let wait_sess = WaitForSingleObject(
+                    sess_thread,
+                    observe_ms.saturating_add(60_000).max(65_000),
+                );
+                let mut code: u32 = u32::MAX;
+                GetExitCodeThread(sess_thread, &mut code);
+                CloseHandle(sess_thread);
+                if wait_sess != 0 {
+                    return Err(format!(
+                        "g3-session remote thread wait failed: code {wait_sess:#x}"
+                    ));
+                }
+                g3_session_exit = Some(code);
+            }
+
             // 可选:只读运行时观测 v2(caligo_obs_run2;基址由本加载器进程解析,
             // 远程线程不再调用 GetModuleHandleW/Toolhelp —— EXP-F1-R4 缺陷修复)。
             let mut obs_exit: Option<u32> = None;
@@ -1422,6 +1500,7 @@ pub unsafe fn inject_and_probe(
                 g2_exit_code: g2_exit,
                 g3_exit_code: g3_exit,
                 g3_send_exit_code: g3_send_exit,
+                g3_session_exit_code: g3_session_exit,
                 env_exit_code: env_exit,
                 intr_exit_code: intr_exit,
                 async_exit_code: async_exit,

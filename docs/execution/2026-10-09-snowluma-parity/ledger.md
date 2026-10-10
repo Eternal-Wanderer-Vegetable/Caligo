@@ -553,3 +553,46 @@ native_receive.rs 的落地不再需要更多逆向:
 - lib.rs 导出 `caligo_g3_session_run`;bridge 53 lib 全绿。
 - **待完成**:CLI inject 命令需 --g3-session flag 以调用新导出(目前
   只支持 --g2-run-report);下一步即加此 flag 并注入活实例验证。
+## 2026-10-10(二十):N3 会话现场端到端贯通 —— CLI --g3-session + 全字段验证通过
+
+### CLI 接线(本轮代码)
+- inject 新增 `--g3-session-report/--g3-session-group/--g3-session-text/
+  --g3-session-ms`(成对校验 + 群号必填);winutil 远线程块镜像 g3_send
+  (G3SessionCtx 40B = wrapper_base/report_path/group_code/text_ptr/observe_ms;
+  等待 = observe_ms + 60s 宽限);`InjectOutcome.g3_session_exit_code`;
+  CLI 注入完成后打印退出码解码并直接 dump JSONL 报告;qqentry 三处调用点补参。
+
+### 现场 r1 → r2(一轮合同修正)
+- **r1**:g3_session 传 `service_addr: 0`,被 `AttachProof::validate` 拒
+  (NullService)——离线合同(空服务=未就绪,拒绝附加)与 g3 路线错配:
+  g3 submit 每次自行 getter 租约,无独立 service 指针可传。
+- **修正(诚实证据原则,零合同改动)**:G3NativeOps 新增 `probe_service()`
+  —— 把 probe_ready 的 getter 租约 + 锚点核对产物(**真实服务对象地址**)
+  返回给调用方,作为 AttachProof.service_addr 登记;submit 仍每次自行租约,
+  该地址仅作证据。bridge 81 测试全绿;workspace research **197/0**。
+- **r2**:svc=**0x1d76eb68000**(与 2026-10-09 t1 observe 报告的 MSFService
+  对象地址逐位一致);attach → CPB 基线(cpb=7497/records=217,~465ms)→
+  enqueue_send 派发(seq=1,body=165B,"N3R23-NATIVE")。
+
+### r2 现场终验(30s 窗;原生 + API 双发对照;零人工)
+| 字段 | N3R23-NATIVE(g3 原生发送) | N3R23-SEND(SnowLuma API 发送) |
+|---|---|---|
+| seq | 399017 ✓ | 399018 ✓ |
+| time | 1791639117 ✓ | 1791639122 ✓ |
+| sender | u_89Q8…(bot uid)✓ | 同 ✓ |
+| peer | 263402786(群码)✓ | 同 ✓ |
+| text | ✓ | ✓ |
+
+与 get_msg / get_group_msg_history 真值**逐项精确一致**;fresh=28(含狼人杀
+群 1124196924、私聊 950238216 ambient 全字段正确;部分半成品 CPB 对象按
+既有形状作噪声记录,seq 键控完整记录为权威)。`n3_done ok=true`,
+exit_code=0,QQ 存活(27108 起始时间不变)。
+**服务器分配 seq 399017/399018 连号** —— N4 wire 形状(client_seq=0)现场
+实证:发送真实到达服务器并回流 CPB。
+
+### 状态
+**N3 会话现场验证入口闭环**(attach→send→差分→全字段);CLI 注入 →
+`caligo_g3_session_run` 链路可用。证据:`E:/stella/_reference/
+caligo-n3-session-20261010/`(r1/r2 capture+report,g3s1/g3s2 DLL)。
+N3 常驻化剩余:宿主合法初始化 + IPC 事件交付 + SeenRecords 移入 worker
+(均为已验证部件组装,无未知结构)。
