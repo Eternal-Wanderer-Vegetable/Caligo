@@ -297,6 +297,52 @@ pub fn read_record_fields(rd: &dyn MemoryReader, cpb_obj: u64) -> RecordFields {
     f
 }
 
+
+
+// ---------------------------------------------------------------------------
+// N3(2026-10-10 续):diff 式接收原语。
+//
+// 接线形态:通知处理器只做轻量信号(head 入环 + 置位),worker 线程收到
+// 触发后跑 CPB 收集并经 [`SeenRecords::absorb`] 差分 —— 新出现/seq 前进的
+// 记录 = 新消息事件。回调纪律不破(回调内零重活)。
+
+/// 已见记录账本(键 = CPB 对象地址,值 = 最近 seq)。
+#[derive(Default)]
+pub struct SeenRecords {
+    seen: std::collections::HashMap<u64, u64>,
+}
+
+impl SeenRecords {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+
+    /// 吸收本批收集结果,返回新出现或 seq 前进的记录(即新消息)。
+    /// seq 回退视为已见(不回滚 —— 排序以 monotonic 前进为准)。
+    pub fn absorb(&mut self, current: &[(u64, RecordFields)]) -> Vec<(u64, RecordFields)> {
+        let mut fresh = Vec::new();
+        for (obj, f) in current {
+            let seq = f.seq.unwrap_or(0);
+            match self.seen.get(obj) {
+                Some(&old) if old >= seq => {}
+                _ => {
+                    self.seen.insert(*obj, seq);
+                    fresh.push((*obj, f.clone()));
+                }
+            }
+        }
+        fresh
+    }
+}
+
 fn cpb_payload_is_heap(tagged: u64) -> bool {
     let p = tagged & 0x0000_FFFF_FFFF_FFFF;
     (0x1_0000..0x7FFF_FFFE_FFFF).contains(&p) && p & 7 == 0
@@ -530,6 +576,27 @@ mod record_tests {
         assert_eq!(got.len(), 1, "无 sender 的实例跳过");
         assert_eq!(got[0].1.sender_uid.as_deref(), Some("u_TESTSEND"));
     }
+
+    #[test]
+    fn seen_records_absorb_yields_only_fresh() {
+        let mut seen = SeenRecords::new();
+        let mk = |obj: u64, seq: Option<u64>| (obj, RecordFields { seq, ..Default::default() });
+        // 首批:两条新 + 一条无 seq(记为 0)。
+        let b1 = vec![mk(1, Some(100)), mk(2, Some(101)), mk(3, None)];
+        let fresh = seen.absorb(&b1);
+        assert_eq!(fresh.len(), 3, "首批评见");
+        // 第二批:已见(不变)+ seq 前进 + 全新。
+        let b2 = vec![mk(1, Some(100)), mk(2, Some(103)), mk(4, Some(7))];
+        let fresh = seen.absorb(&b2);
+        assert_eq!(fresh.len(), 2);
+        assert_eq!(fresh[0].0, 2, "seq 前进 = 新消息");
+        assert_eq!(fresh[1].0, 4);
+        // 第三批:seq 回退 → 不产出(不回滚)。
+        let b3 = vec![mk(2, Some(102))];
+        assert!(seen.absorb(&b3).is_empty(), "seq 回退不回滚");
+        assert_eq!(seen.len(), 4);
+    }
+
 }
 
 

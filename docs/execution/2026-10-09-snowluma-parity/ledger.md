@@ -443,3 +443,14 @@ native_receive.rs 的落地不再需要更多逆向:
 通知(捕获)→ 索引链/CPB 枚举 → 12B 条目(0x9c54 sender / 0x9c55 peer /
 0x9c43 seq / 0x9c72 platform_time / 元素 blob 正文)→ NormalizedNotice/事件。
 全部字段绝对值、零标定、零猜测。剩余 = N3 现场接线(捕获处理器行走)+ N4。
+## 2026-10-10(十三):diff 式接收原语
+
+- native_receive.rs 新增 **`SeenRecords::absorb`**:已见账本(键 = CPB 对象
+  地址,值 = 最近 seq);吸收每批收集结果,产出新出现/seq 前进的记录 =
+  新消息事件;seq 回退不回滚。测试:首批评见/前进产出/回退抑制 三合同。
+- **常驻接收接线形态定稿**:通知处理器只做轻量信号(head 入环 + 置位;
+  回调纪律不破),worker 线程触发 CPB 收集 → absorb 差分 → 新记录 →
+  NormalizedNotice(platform_time = 0x9c72/2 绝对值)→ IPC 事件。
+- 验收:bridge 53 lib 全绿。
+- 剩余(N3 现场单窗):捕获处理器接线 + time 基座确认(零标定已定)+
+  事件走 IPC → 之后 N4。
