@@ -480,3 +480,21 @@ native_receive.rs 的落地不再需要更多逆向:
 ### 状态
 **接收路径现场端到端贯通。** 剩余:N3 常驻化(宿主合法初始化 + IPC 事件)
 与 N4 OneBot 动作层 —— 均为已验证部件的组装,不再有未知结构。
+## 2026-10-10(十四):N4 OneBot V11 动作层第一批落地
+
+- 新增 caligo-core `onebot.rs`:动作解析(`parse_action`)+ 响应框架
+  (`ActionResponse`:status/retcode/data/echo;echo 任意 JSON 原样返回)+
+  第一批动作 **send_group_msg / send_private_msg / get_msg / get_login_info /
+  get_version_info / get_status**;
+- 语义边界按计划 N4:未支持动作 retcode 1404 显式失败;message 段(字符串/
+  标准数组)解析,未支持段(image 等)显式拒绝不静默;**受理 ≠ 送达 ——
+  发送受理返回 status=async,不伪造 ok/message_id**;get_status 不固定
+  online=true(分解字段随 N3 接线交付);
+- 解耦:`SendSink` trait(N3 NativeSession 实现,内部走 qq_wire 已证形状)
+  与 `StoreReader` trait(消息存储实现)—— transport(HTTP/WS)外层共用,
+  不复制 native 逻辑;
+- 测试 6 项:async 受理 + echo 透传 + 载荷校验;段数组解析 + image 拒绝;
+  get_msg 命中/缺失;未支持/缺参/未就绪三分类;login/version 形状。
+- 验收:workspace research **189/0**。
+- 剩余(N4 后续):sink 接 N3 NativeSession 真实现、store 接消息存储、
+  transport(HTTP/WS)与事件 fanout。
