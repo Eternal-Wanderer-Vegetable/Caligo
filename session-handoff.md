@@ -2,21 +2,21 @@
 
 ## Current Objective
 
-- 日期：2026-10-12（Asia/Shanghai）；计划源基线 `0f5b483`，本次从 `b2b16cf` 继续。
+- 日期：2026-10-12（Asia/Shanghai）；计划源基线 `0f5b483`，本次从 `57e7190` 继续。
 - 用户请求执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)。
-- R3 follow-up 新增 callback nonzero→unknown 诊断保留、core→bridge 剩余 timeout 传播、bridge deadline 收口与有界迟到强身份更正；本轮 R5 将普通 caligod HTTP 动作服务接到 Daemon，并增加并发慢读隔离。此前 R1/R2 离线子块、R3 sequence 子块与 R5 core MessageStore 接线证据见 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。
+- 当前 R6 已接入 HTTP POST event、正向 WS 与反向 WS；三者复用动作层/Daemon，HTTP POST quick operation 结束后再向 WS 扇出，caligod 等 POST 订阅就绪才启动 bridge 接收。离线协议合同通过；native receive projection 与真实应用矩阵尚未验收。此前 R1–R5 离线子块及详证见 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。
 - 产品仍 **NOT READY**；feat-005/006 仍 `blocked`。R2/R3 native 与 identity 门未闭合，因此 R4 不准入；没有启动 QQ/注入/现场发送，也没有改变 SnowLuma 连接。
 
 ## Changed Areas
 
-- Rust：bridge 回执期限与 unknown 诊断语义、response ledger timeout/tombstone 和迟到更正；普通 caligod OneBot HTTP 动作服务、受限并发 reader 与 slow-header 隔离测试。
+- Rust：bridge 回执期限与 unknown 诊断语义、response ledger timeout/tombstone 和迟到更正；OneBot HTTP/HTTP POST/正反向 WS transport、统一动作层、bounded event queues 与 POST→WS 顺序合同。
 - 文档：执行记录、wire sequence [ADR](docs/decisions/2026-10-11-wire-sequence-authority.md)、progress/feature/index/architecture 状态。
 - 测试 harness：`resident_lifecycle` 的资源快照从进程级并行污染源改为当前测试线程 opt-in 计数，L17 assertions 保留。
 - 既有 README/AGENTS/guides/skills/verification harness 等未提交改动继续保留，勿回滚或重写。
 
 ## Verification
 
-- 本次 follow-up `.\init.ps1 -Mode all` PASS：docs 9 live docs / 163 local links；默认与 research 两种构建的全部 test binaries 均成功退出。具体限制：只属离线测试，不替代 native/QQ 回执验收。
+- `cargo test -p caligo-core --locked --offline --target-dir target-harness` 与 R6 transport 定向测试通过；本次完整文档/工作区验证结果见 progress 与 N4 执行记录。具体限制：只属离线测试，不替代 native/QQ 回执或真实 OneBot 应用验收。
 - `cargo fmt --all` 后审阅并撤销了本范围外的纯格式化变更；保留修改仅涉及 R3 timeout/result path 与对应测试。
 - 既有完整 R1/R2/R3 sequence/R5 离线证据仍见下方历史记录；不将本次验证写成当前 callback manager ABI、线程/排空或 R4 现场通过。
 
@@ -37,7 +37,7 @@
 
 - 固定-hash `1DB2(pair*)` 已确认并接入未提交 pair 清理；成功提交后的 service pair 继续 resident/quarantined。`732A80` body 深复制后由 `B75029` 释放输入，未使用的 self-string clone 已删除。bridge callback image 已在共用 `leak_ctx` 门中 PIN 到 QQ 进程退出；resident generation stop 时本地关闭 callback 准入并等在途 callback 退出。QQ manager 完整 copy/move/destroy、回调/owner thread、QQ dispatcher stop/cancel/drain/quiescence 与既往 AV 仍未证。
 - CPB 相似消息没有强身份桥接，`stable_identity unsupported`；标准同步 send 不得返回 `ok`，AcceptedUnconfirmed/unknown 不重发。
-- R5 core/store 已装配到 AccountActor 事件接收与 Daemon `StoreReader`；普通 caligod loopback HTTP listener 已接动作层，标准群 send 等强回执及持久消息 ID，私聊目标明确 unsupported。native bridge 当前 projection 是 `None`，实际 CPB 接收仍不产生该索引；HTTP POST events、正/反向 WS 与实际应用互通尚未完成。
+- R5 core/store 已装配到 AccountActor 事件接收与 Daemon `StoreReader`；普通 caligod HTTP、HTTP POST event、正向/反向 WS 已接动作层，群 send 等强回执及持久消息 ID，私聊目标明确 unsupported。HTTP POST 快速操作结束后才向 WS 扇出；transport 队列有界。native bridge 当前 projection 是 `None`，实际 CPB 接收仍不产生该索引；真实应用互通、私聊映射与消息身份仍未完成。
 - R4 只有在 R1–R3 全门完成、当次合同与新现场准入明确后才可开始；当前不满足。
 
 ## Next Restartable Steps
@@ -47,5 +47,5 @@
 3. R3 强 native identity 仍 unsupported；重复/相同 CPB 行歧义 fixture 已确认不会消费 pending sends，缺稳定 ID/发送者映射的 CPB 记录现在不会伪造事件，不通过真实 QQ 实验绕过。
 4. R2 callback manager/owner-thread/dispatcher quiescence 和历史 AV 根因继续未闭合；若 AV 再现，先保留 dump、异常地址和线程栈。
 5. 从固定-hash CPB/native record 继续研究稳定 native ID 与 sender UID→UIN 的证据来源；当前 decoder 缺这两项，不能靠序号或文本补身份。
-6. R5 core/store 和普通 HTTP 动作 listener 有离线验证。下一块 R6 按官方 OneBot 合同实现 HTTP POST event 与正/反向 WS，再跑协议测试；实际应用矩阵仍依赖 native 稳定身份和 R4 现场准入。
+6. R6 HTTP POST event、正向 WS、反向 WS 的离线合同已实现并测试；剩余是 native projection/私聊身份、真实 OneBot 应用收发/get_msg/慢连接矩阵。先完成 R2/R3 准入缺口；不以合成投影替代现场数据，也不绕过 R4 前置条件。
 7. `git diff --check`、文档检查和本次适用的离线验证；R2/R3 ABI/身份准入门完成前不开始 R4，不恢复旧 PID/旧 hook。

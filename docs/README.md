@@ -19,7 +19,7 @@
 ## 计划与执行（按阶段选择）
 
 - N4 当前解阻入口：[2026-10-11 响应恢复计划](plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)；先离线修请求关联与结果语义，现场仍硬停。
-- N4 执行现状：[响应恢复执行记录](execution/2026-10-11-n4-response-recovery.md)；序号 authority 决策见 [ADR](decisions/2026-10-11-wire-sequence-authority.md)。R1 离线合同通过，但 R2 native 寿命、R3 强身份和 R4–R6 产品/现场完成门仍开放。
+- N4 执行现状：[响应恢复执行记录](execution/2026-10-11-n4-response-recovery.md)；序号 authority 决策见 [ADR](decisions/2026-10-11-wire-sequence-authority.md)。R1 离线合同通过，R5/R6 OneBot transports 有离线接线与协议合同；R2 native 寿命、R3 强身份、R4 现场和 R6 真实应用完成门仍开放。
 
 - 当前 N0–N8 目标：[2026-10-09 能力对齐计划](plans/2026-10-09-gitnexus-plan-caligo-snowluma-capability-parity.md)，
   [N 阶段执行台账](execution/2026-10-09-snowluma-parity/ledger.md)；台账已经续写至 10 月 11 日。

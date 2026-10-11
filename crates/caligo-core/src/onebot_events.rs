@@ -9,6 +9,9 @@
 use std::collections::HashMap;
 use std::sync::mpsc;
 
+use caligo_model::{Direction, EventSource, MsgEvent, OneBotMessageProjection, SessionKind};
+use serde_json::{json, Map, Value};
+
 /// 单订阅者队列上限(条)。
 pub const SUBSCRIBER_QUEUE_CAP: usize = 256;
 
@@ -66,9 +69,56 @@ impl EventBus {
     }
 }
 
+/// Build a OneBot V11 message event only when every required standard field
+/// has an explicit source. In particular, do not infer subtype/font or
+/// identities from the local sequence, text, or opaque sender UID.
+pub fn message_event_json(self_id: u64, message_id: i32, event: &MsgEvent) -> Option<String> {
+    if self_id == 0
+        || message_id <= 0
+        || event.direction != Direction::Incoming
+        || event.source != EventSource::Recv
+    {
+        return None;
+    }
+    let projection: &OneBotMessageProjection = event.onebot_projection.as_ref()?;
+    if projection.peer_id == 0 || projection.sender_user_id == 0 || event.text.is_empty() {
+        return None;
+    }
+    let (message_type, sub_type) = match (event.session.kind, projection.sub_type.as_deref()?) {
+        (SessionKind::Private, "friend") => ("private", "friend"),
+        (SessionKind::Group, "normal") => ("group", "normal"),
+        _ => return None,
+    };
+    let font = projection.font?;
+    let mut sender = Map::new();
+    sender.insert("user_id".into(), Value::from(projection.sender_user_id));
+    if let Some(nickname) = projection.sender_nickname.as_ref() {
+        sender.insert("nickname".into(), Value::String(nickname.clone()));
+    }
+    let mut body = json!({
+        "time": projection.time,
+        "self_id": self_id,
+        "post_type": "message",
+        "message_type": message_type,
+        "sub_type": sub_type,
+        "message_id": message_id,
+        "user_id": projection.sender_user_id,
+        "message": [{"type":"text", "data":{"text": event.text.as_str()}}],
+        "raw_message": event.text.as_str(),
+        "font": font,
+        "sender": Value::Object(sender),
+    });
+    if event.session.kind == SessionKind::Group {
+        body["group_id"] = Value::from(projection.peer_id);
+        body["anonymous"] = Value::Null;
+    }
+    serde_json::to_string(&body).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use caligo_model::{Direction, EventSource, NativeMessageId, SessionKey};
 
     #[test]
     fn publish_reaches_all_subscribers_with_echo_of_payload() {
@@ -104,5 +154,59 @@ mod tests {
         let (d, _) = bus.publish(r#"{"i":x}"#);
         assert_eq!(d, 1, "仅 fast 收到");
         assert_eq!(bus.subscriber_count(), 1);
+    }
+
+    fn incoming_event(kind: SessionKind) -> MsgEvent {
+        MsgEvent {
+            event_seq: 1,
+            session_generation: 1,
+            session: SessionKey::new("10001", kind, "20002"),
+            direction: Direction::Incoming,
+            sender: "opaque uid".into(),
+            native_id: NativeMessageId("native-1".into()),
+            text: "hello [CQ:at,qq=1]".into(),
+            platform_time: None,
+            onebot_projection: Some(OneBotMessageProjection {
+                peer_id: 20002,
+                sender_user_id: 30003,
+                real_id: 4,
+                time: 123,
+                sender_nickname: None,
+                sub_type: Some(
+                    if kind == SessionKind::Group {
+                        "normal"
+                    } else {
+                        "friend"
+                    }
+                    .into(),
+                ),
+                font: Some(0),
+            }),
+            observed_at_unix_ms: 999,
+            source: EventSource::Recv,
+        }
+    }
+
+    #[test]
+    fn message_event_requires_complete_explicit_v11_fields_and_keeps_text_literal() {
+        let event = incoming_event(SessionKind::Group);
+        let value: Value =
+            serde_json::from_str(&message_event_json(10001, 9, &event).unwrap()).unwrap();
+        assert_eq!(value["post_type"], "message");
+        assert_eq!(value["message_type"], "group");
+        assert_eq!(value["sub_type"], "normal");
+        assert_eq!(value["message_id"], 9);
+        assert_eq!(value["message"][0]["type"], "text");
+        assert_eq!(value["message"][0]["data"]["text"], "hello [CQ:at,qq=1]");
+        assert_eq!(value["raw_message"], "hello [CQ:at,qq=1]");
+        assert_eq!(value["anonymous"], Value::Null);
+        assert!(value["sender"].get("nickname").is_none());
+
+        let mut incomplete = event;
+        incomplete.onebot_projection.as_mut().unwrap().font = None;
+        assert!(message_event_json(10001, 9, &incomplete).is_none());
+        incomplete.onebot_projection.as_mut().unwrap().font = Some(0);
+        incomplete.onebot_projection.as_mut().unwrap().sub_type = None;
+        assert!(message_event_json(10001, 9, &incomplete).is_none());
     }
 }

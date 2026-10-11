@@ -63,12 +63,12 @@
     {
       "id": "feat-006",
       "name": "N4 OneBot V11 文本 MVP",
-      "description": "动作解析、事件转换、HTTP 和消息索引组件已有代码；完整 transport 与真实下游互通待验收。",
+      "description": "动作解析、事件转换、HTTP/HTTP POST/正向与反向 WS transports 已共用动作层并完成离线合同；真实下游互通与 native 投影待验收。",
       "plan_steps": ["N4"],
       "dependencies": ["feat-005"],
       "status": "blocked",
-      "evidence": "N4-R5 typed target、拒绝假成功动作层、有界分片 HTTP parser 与 durable MessageStore 已实现；core 将 MessageStore 装配进数值 account 的 Daemon/AccountActor，显式 projection 在 journal 与 ACK 之间落盘、恢复幂等重建，pipe 集成测试经 Daemon StoreReader 验证 OneBot get_msg 完整字段。普通 caligod 已启动 loopback-only 并发 HTTP listener，共用动作层与 Daemon；群 send 只有强 native 回执且匹配的持久 OneBot ID 可读时才返回成功，未证私聊 UID 映射明确 unsupported。HTTP→actor→fake bridge strong receipt→projection→get_msg 集成测试及慢头隔离测试通过。真实 daemon_client projection 当前仍是 None；HTTP POST event、正/反向 WS、真实应用互通与私聊映射未验收，继续 blocked。",
-      "evidence_paths": ["docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md", "docs/execution/2026-10-11-n4-response-recovery.md", "crates/caligo-core/tests/onebot_http_lab.rs", "crates/caligo-core/tests/daemon_chain.rs", "crates/caligo-core/tests/recovery_contract.rs", "crates/caligo-core/src/bin/caligod.rs", "crates/caligo-core/src/onebot_server.rs", "crates/caligo-core/src/daemon.rs", "crates/caligo-core/src/runtime.rs", "crates/caligo-core/src/onebot.rs", "crates/caligo-core/src/onebot_http.rs", "crates/caligo-core/src/message_store.rs", "docs/plans/2026-10-09-gitnexus-plan-caligo-snowluma-capability-parity.md"],
+      "evidence": "N4-R5 typed target、拒绝假成功动作层、有界分片 HTTP parser 与 durable MessageStore 已实现；core 将 MessageStore 装配进数值 account 的 Daemon/AccountActor，显式 projection 在 journal 与 ACK 之间落盘、恢复幂等重建，pipe 集成测试经 Daemon StoreReader 验证 OneBot get_msg 完整字段。普通 caligod 的 HTTP、HTTP POST、正向 WS、反向 WS 共用动作层；POST quick operation 结束后才扇出 WebSocket 事件。群 send 只有强 native 回执且匹配的持久 OneBot ID 可读时才返回成功，未证私聊 UID 映射明确 unsupported。HTTP→actor→fake bridge strong receipt→projection→get_msg 集成测试、慢头隔离及三类事件 transport 协议合同通过。真实 daemon_client projection 当前仍是 None；真实应用互通、私聊映射与 native receive/query 未验收，继续 blocked。",
+      "evidence_paths": ["docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md", "docs/execution/2026-10-11-n4-response-recovery.md", "crates/caligo-core/tests/onebot_http_lab.rs", "crates/caligo-core/tests/daemon_chain.rs", "crates/caligo-core/tests/recovery_contract.rs", "crates/caligo-core/src/bin/caligod.rs", "crates/caligo-core/src/onebot_server.rs", "crates/caligo-core/src/onebot_transport.rs", "crates/caligo-core/src/onebot_events.rs", "crates/caligo-core/src/daemon.rs", "crates/caligo-core/src/runtime.rs", "crates/caligo-core/src/onebot.rs", "crates/caligo-core/src/onebot_http.rs", "crates/caligo-core/src/message_store.rs", "docs/plans/2026-10-09-gitnexus-plan-caligo-snowluma-capability-parity.md"],
       "done_criteria": ["身份与持久 OneBot ID 查询一致", "目标 HTTP/WS transport 有标准协议测试", "真实应用普通文本收发/get_msg 及慢连接有同链证据"]
     },
     {

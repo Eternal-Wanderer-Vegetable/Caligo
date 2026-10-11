@@ -21,6 +21,7 @@ use crate::ipc::{
 };
 use crate::message_store::MessageStore;
 use crate::onebot::{StoreReader, StoredMessageView};
+use crate::onebot_events::EventBus;
 use crate::runtime::{host_identity, AccountActor, NativeResult, RuntimeConfig};
 use crate::transport::{
     connect_client, generate_token, token_hex, PipeConnection, PipeServer, TransportError,
@@ -140,6 +141,9 @@ pub struct Daemon {
     auth_hex: std::sync::Mutex<String>,
     core_nonce: u64,
     pub(crate) actor: Mutex<AccountActor>,
+    onebot_events: Mutex<EventBus>,
+    onebot_http_post_events: Mutex<EventBus>,
+    onebot_http_post_ordered: AtomicBool,
     pub(crate) stop: Arc<AtomicBool>,
     pub(crate) epoch: AtomicU64,
     /// 待派发队列(control 受理后经此转 bridge)。
@@ -184,6 +188,9 @@ impl Daemon {
             auth_hex: std::sync::Mutex::new(token_hex(&token)),
             core_nonce: u64::from_le_bytes(token[0..8].try_into().unwrap()),
             actor: Mutex::new(actor),
+            onebot_events: Mutex::new(EventBus::new()),
+            onebot_http_post_events: Mutex::new(EventBus::new()),
+            onebot_http_post_ordered: AtomicBool::new(false),
             stop: Arc::new(AtomicBool::new(false)),
             epoch: AtomicU64::new(1),
             dispatch_out: Mutex::new(Vec::new()),
@@ -309,6 +316,66 @@ impl Daemon {
             _ => None,
         };
         Some((state, message_id))
+    }
+
+    /// Subscribe one independent bounded transport queue to accepted OneBot
+    /// message events. Transports never drain the actor's durable IPC cursor.
+    pub fn subscribe_onebot_events(&self, name: &str) -> (u64, std::sync::mpsc::Receiver<String>) {
+        self.onebot_events.lock().unwrap().subscribe(name)
+    }
+
+    /// Enable the OneBot V11 ordering rule: finish HTTP POST event handling
+    /// before forwarding that event to WebSocket event subscribers.
+    pub fn enable_onebot_http_post_ordering(&self) {
+        self.onebot_http_post_ordered.store(true, Ordering::Relaxed);
+    }
+
+    pub fn subscribe_onebot_http_post_events(
+        &self,
+        name: &str,
+    ) -> (u64, std::sync::mpsc::Receiver<String>) {
+        self.onebot_http_post_events.lock().unwrap().subscribe(name)
+    }
+
+    pub fn unsubscribe_onebot_http_post_events(&self, id: u64) -> bool {
+        self.onebot_http_post_events.lock().unwrap().unsubscribe(id)
+    }
+
+    pub fn unsubscribe_onebot_events(&self, id: u64) -> bool {
+        self.onebot_events.lock().unwrap().unsubscribe(id)
+    }
+
+    pub(crate) fn publish_onebot_event_json(&self, event_json: &str) {
+        if self.onebot_http_post_ordered.load(Ordering::Relaxed) {
+            let _ = self
+                .onebot_http_post_events
+                .lock()
+                .unwrap()
+                .publish(event_json);
+        } else {
+            self.publish_onebot_ws_event_json(event_json);
+        }
+    }
+
+    pub(crate) fn publish_onebot_ws_event_json(&self, event_json: &str) {
+        let _ = self.onebot_events.lock().unwrap().publish(event_json);
+    }
+
+    fn publish_onebot_message(&self, event: &MsgEvent) {
+        let message_id = self
+            .actor
+            .lock()
+            .unwrap()
+            .onebot_message_id(&event.session, &event.native_id.0);
+        let Some(message_id) = message_id else {
+            return;
+        };
+        let Some(json) = self.config.account.parse::<u64>().ok().and_then(|self_id| {
+            crate::onebot_events::message_event_json(self_id, message_id, event)
+        }) else {
+            return;
+        };
+        self.publish_onebot_event_json(&json);
     }
 
     /// 阻塞运行:双 accept 循环;停止后收尾 actor(stop→close)。
@@ -628,8 +695,13 @@ impl Daemon {
                         // wire seq = worker 本地序号(EventAck 的回显键;窗口
                         // 前移以此为准 —— 抑制回显 0 曾致重放风暴,D8 现场)。
                         let wire_seq = event.event_seq;
-                        let mut actor = self.actor.lock().unwrap();
-                        let receipt = actor.on_event(self.to_event(event));
+                        let accepted_event = self.to_event(event);
+                        let receipt = self.actor.lock().unwrap().on_event(accepted_event.clone());
+                        if matches!(&receipt, Ok(crate::runtime::EventReceipt::Published { .. })) {
+                            // The actor journal and MessageStore append have both
+                            // succeeded before any network transport sees it.
+                            self.publish_onebot_message(&accepted_event);
+                        }
                         let (seq, suppressed) = match receipt {
                             Ok(r) => match r {
                                 crate::runtime::EventReceipt::Published { .. } => (wire_seq, false),

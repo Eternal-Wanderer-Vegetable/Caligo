@@ -197,6 +197,13 @@ pub struct OneBotMessageProjection {
     /// Best-effort sender nickname, omitted when unavailable.
     #[serde(default)]
     pub sender_nickname: Option<String>,
+    /// OneBot V11 message subtype observed from the native event. Event fanout
+    /// stays disabled when this is unknown (for example, anonymous group msg).
+    #[serde(default)]
+    pub sub_type: Option<String>,
+    /// Native OneBot font field. Missing values are not replaced with a guess.
+    #[serde(default)]
+    pub font: Option<i32>,
 }
 
 /// 常驻接收事件(计划 §6.5 字段集)。`event_seq` 由 core 在持久化时分配。

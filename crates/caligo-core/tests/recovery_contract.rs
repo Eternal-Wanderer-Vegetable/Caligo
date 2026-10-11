@@ -171,6 +171,8 @@ fn received_projection_is_indexed_and_get_msg_id_survives_actor_reopen() {
         real_id: 7007,
         time: 1_791_641_234,
         sender_nickname: Some("sender".into()),
+        sub_type: Some("friend".into()),
+        font: Some(0),
     });
     assert!(matches!(
         actor.on_event(incoming.clone()).unwrap(),

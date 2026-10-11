@@ -13,6 +13,7 @@ pub mod onebot;
 pub mod onebot_events;
 pub mod onebot_http;
 pub mod onebot_server;
+pub mod onebot_transport;
 pub mod qq_protocol;
 pub mod runtime;
 pub mod transport;

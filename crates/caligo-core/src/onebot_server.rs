@@ -22,6 +22,21 @@ pub struct DaemonSendSink {
     daemon: Arc<Daemon>,
 }
 
+pub type ActionHandler = Arc<
+    dyn Fn(&str, &serde_json::Value, serde_json::Value) -> crate::onebot::ActionResponse
+        + Send
+        + Sync,
+>;
+
+/// All network transports share this exact action registry and daemon sink.
+pub fn action_handler(daemon: Arc<Daemon>) -> ActionHandler {
+    let handler_daemon = Arc::clone(&daemon);
+    Arc::new(move |action, params, echo| {
+        let mut sink = DaemonSendSink::new(Arc::clone(&handler_daemon));
+        handle_action(action, params, echo, &mut sink, handler_daemon.as_ref())
+    })
+}
+
 impl DaemonSendSink {
     pub fn new(daemon: Arc<Daemon>) -> Self {
         Self { daemon }
@@ -93,15 +108,7 @@ pub fn serve_http(
     access_token: Option<&str>,
 ) -> usize {
     let stop = daemon.stop_flag();
-    let handler_daemon = Arc::clone(&daemon);
-    let handler: Arc<
-        dyn Fn(&str, &serde_json::Value, serde_json::Value) -> crate::onebot::ActionResponse
-            + Send
-            + Sync,
-    > = Arc::new(move |action, params, echo| {
-        let mut sink = DaemonSendSink::new(Arc::clone(&handler_daemon));
-        handle_action(action, params, echo, &mut sink, handler_daemon.as_ref())
-    });
+    let handler = action_handler(daemon);
     serve_parallel(
         listener,
         DEFAULT_MAX_BODY,

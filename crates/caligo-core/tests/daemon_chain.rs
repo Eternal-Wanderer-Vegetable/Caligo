@@ -23,11 +23,11 @@ use caligo_core::runtime::RuntimeConfig;
 
 // ---- 常驻链中的宿主夹具(同 resident_lifecycle 的最小版) ----
 
-struct ChainHost;
+struct ChainHost {
+    send_ids: Arc<std::sync::atomic::AtomicU64>,
+}
 
 const CHAIN_OWNER: u64 = 77;
-
-static CHAIN_SENDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl HostAdapter for ChainHost {
     fn owner_thread_id(&self) -> u64 {
@@ -48,7 +48,7 @@ impl HostAdapter for ChainHost {
             HostOp::ListenerRemove { .. } => HostOpResult::ListenerRemoved,
             HostOp::Probe => HostOpResult::ProbeDone,
             HostOp::SendText { .. } => {
-                let n = CHAIN_SENDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let n = self.send_ids.fetch_add(1, Ordering::Relaxed) + 1;
                 HostOpResult::Sent {
                     native_id: Some(format!("NM-{n}")),
                 }
@@ -134,7 +134,12 @@ fn connect_control(daemon: &Arc<Daemon>) -> ControlClient {
 /// → NativeStarted/SendResult 回执;独立线程)。
 fn spawn_bridge_agent(daemon: Arc<Daemon>, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<u64> {
     std::thread::spawn(move || {
-        let resident = Arc::new(Resident::new(ChainHost, ResidentLimits::default()));
+        let resident = Arc::new(Resident::new(
+            ChainHost {
+                send_ids: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            },
+            ResidentLimits::default(),
+        ));
         resident.bootstrap().unwrap();
         let mut native_sends = 0u64;
         let mut bridge = connect_bridge(&daemon);
@@ -216,6 +221,8 @@ fn spawn_bridge_agent(daemon: Arc<Daemon>, stop: Arc<AtomicBool>) -> std::thread
                                                 real_id: native_sends as i32,
                                                 time: 1_791_621_805,
                                                 sender_nickname: Some("Caligo test".into()),
+                                                sub_type: Some("normal".into()),
+                                                font: Some(0),
                                             },
                                         ),
                                         observed_at_unix_ms: 1_791_621_805_000,
@@ -375,6 +382,7 @@ fn full_chain_send_event_and_stop() {
 #[test]
 fn event_roundtrip_through_pipe_and_journal() {
     let (daemon, runner, journal) = start_daemon("event");
+    let (_subscription, onebot_events) = daemon.subscribe_onebot_events("daemon-chain-event-test");
     // bridge 连接后推送事件 → EventAck(持久化依据)→ control DrainEvents。
     let mut bridge = connect_bridge(&daemon);
     let mut control = connect_control(&daemon);
@@ -394,6 +402,8 @@ fn event_roundtrip_through_pipe_and_journal() {
             real_id: 77,
             time: 1234,
             sender_nickname: Some("friend-b".into()),
+            sub_type: Some("friend".into()),
+            font: Some(0),
         }),
         observed_at_unix_ms: 5678,
         source: "recv".into(),
@@ -413,6 +423,19 @@ fn event_roundtrip_through_pipe_and_journal() {
         }
         other => panic!("EventAck expected, got {other:?}"),
     }
+
+    let event_json = onebot_events
+        .recv_timeout(Duration::from_secs(1))
+        .expect("durably projected message should reach the OneBot event fanout");
+    let event_json: serde_json::Value = serde_json::from_str(&event_json).unwrap();
+    assert_eq!(event_json["post_type"], "message");
+    assert_eq!(event_json["message_type"], "private");
+    assert_eq!(event_json["sub_type"], "friend");
+    assert_eq!(
+        event_json["message_id"], 1,
+        "fanout uses the durable OneBot ID"
+    );
+    assert_eq!(event_json["raw_message"], "CALIGO-K5-EVT");
 
     // 重复推送同 native_id → 抑制(去重跨管道),ACK 回显同一 wire seq。
     bridge.send(&BridgeMsg::Event { event: ev }).unwrap();
