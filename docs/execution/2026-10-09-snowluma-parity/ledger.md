@@ -1178,3 +1178,30 @@ N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。
 - v5 候选:extra/msgUid 精化(box+0x38 语义)、writer 字段解析(capture+8
   sp 对)、SendMsgResult 完整字段;以及把该消费者路径接入 N3 常驻
   native_session 的 SendAcceptance 判定。
+## 2026-10-11(三十六):v5 双发 —— extra=span 解码;@ 拒因破案:1006501"网络连接异常!"(30.5s 无 ack)
+
+### N3R35 基线(n3res11,普通群发;err_code=0 复现)
+- consumer_result{tag:16, err_code:0, err_str:"", **extra_hex:""**} +417ms;
+- extra 定案:0x32c4 = **span 构造器**([box+0x38] = {begin,end} 指针对,
+  0x38aa 分配 + 0x38e6 拷贝 → {begin,end,cap_end} 0x20B 对象)——v4 的
+  "乱码" = 旧 __qq-string 布局误读;成功路径 span 空(len 0)合法;
+- 送达 seq 401115;v5 探针增量:span 解读 + 原始 qword 诊断位。
+
+### N3R36 @ 重测(n3res12;@=u_KxYzu_qQPbCC-Ca8mLteVA/uin 3089665724;八轮归档后首次 retCode 可见)
+- **完整生命周期与普通消息无异**:4×op=0 克隆 → 提交 → 等待;
+- **+30.5s(30511ms)op=4 → consumer_result{tag:16, err_code:1006501,
+  err_str:"网络连接异常!"} → op=3**;消息未送达(群历史无 N3R36);
+- errStr 中文 UTF-8 经 read_qq_string + JSON 转义完整解码(串读取器现场验证);
+- **"静默拒"真相**:客户端把 @ 消息正常提交进响应等待,30.5s 无服务器
+  ack → 本地超时分类 1006501("网络连接异常!")。不是客户端丢弃
+  (克隆/提交全走),不是即时服务端拒码 —— 服务器(或 transport)对
+  该消息**不 ack**;
+- 超时常量实测 ~30s(旧静态分析猜 180s 不符);
+- 实例 25072 全程存活,OneBot 正常(两次注入后)。
+
+### 下一步(@ 破案续)
+- 对照实验:SnowLuma(同进程原生后端)发 @ 是否送达 —— 若送达,抓其
+  wire body 与我们 r20 形状逐字节比对(at1 时代 body_len 306 vs 本次 300,
+  差异在文本长度;@ elem 本体待对照);
+- 或 hook/捕获真实客户端 @ 发送的 body(g2 族工具);retCode 消费者已就位,
+  任何形状修正的验证成本 = 一次单发。

@@ -87,6 +87,21 @@ fn safe_read_qword(addr: usize) -> Option<u64> {
     if got == 8 { Some(out) } else { None }
 }
 
+/// RPM-self 连续字节读(qword 步进;任一失败 → None)。
+fn read_bytes(addr: usize, len: usize) -> Option<Vec<u8>> {
+    if addr < 0x10000 || len > 4096 {
+        return None;
+    }
+    let nq = (len + 7) / 8;
+    let mut buf = Vec::with_capacity(nq * 8);
+    for i in 0..nq {
+        let q = safe_read_qword(addr + i * 8)?;
+        buf.extend_from_slice(&q.to_le_bytes());
+    }
+    buf.truncate(len);
+    Some(buf)
+}
+
 /// __qq string 读取(短形态 data@+1 内联 / 长形态 {cap|1,size,data*};
 /// 只读不持)。地址不可读 → None;size=0 → 空串。
 fn read_qq_string(ptr: usize) -> Option<String> {
@@ -358,7 +373,62 @@ pub unsafe extern "system" fn consumer_invoke(
             None => return,
         };
         let err_str = read_qq_string(err_str as usize).unwrap_or_default();
-        let extra = read_qq_string(extra as usize).unwrap_or_default();
+        // extra(73bd6c arg6)= 0x32c4 构造的 span {begin,end,cap_end}
+        // (0x38aa 分配 + 0x38e6 拷贝;box 空时 0x20 全零 = 空 span)。
+        // 原始 qword 一并记录(诊断;疑似 16B msgUid cookie)。
+        let (extra_hex, extra_txt) = {
+            let mut q = [0u64; 3];
+            let mut ok = true;
+            for (i, slot) in q.iter_mut().enumerate() {
+                match safe_read_qword(extra as usize + i * 8) {
+                    Some(v) => *slot = v,
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok {
+                (String::from("<unreadable>"), String::new())
+            } else {
+                let begin = q[0] as usize;
+                let end = q[1] as usize;
+                let len = end.saturating_sub(begin);
+                let bytes = if len == 0 {
+                    Some(Vec::new())
+                } else if len <= 512 && begin > 0x10000 {
+                    read_bytes(begin, len)
+                } else {
+                    None
+                };
+                let mut hb = FixedBuf::new();
+                match bytes.as_deref() {
+                    None => hb.push_str(if len == 0 { "" } else { "<bad-span>" }),
+                    Some(bs) => {
+                        if bs.is_empty() {
+                            hb.push_str("");
+                        } else {
+                            for (i, byte) in bs.iter().take(64).enumerate() {
+                                if i > 0 {
+                                    hb.push_str(" ");
+                                }
+                                hb.push_hex(*byte as u64);
+                            }
+                        }
+                    }
+                }
+                let hexs = core::str::from_utf8(hb.as_slice())
+                    .unwrap_or("")
+                    .to_string();
+                let txt = match bytes.as_deref() {
+                    Some(bs) if !bs.is_empty() => {
+                        String::from_utf8_lossy(bs).into_owned()
+                    }
+                    _ => String::new(),
+                };
+                (hexs, txt)
+            }
+        };
         let mut b = FixedBuf::new();
         b.push_str("{\"kind\":\"consumer_result\",\"ts\":");
         b.push_dec(now_ms());
@@ -372,8 +442,10 @@ pub unsafe extern "system" fn consumer_invoke(
         b.push_json_escaped(&err_str, 200);
         b.push_str("\",\"writer\":\"");
         b.push_hex(writer as usize as u64);
-        b.push_str("\",\"extra\":\"");
-        b.push_json_escaped(&extra, 120);
+        b.push_str("\",\"extra_hex\":\"");
+        b.push_json_escaped(&extra_hex, 220);
+        b.push_str("\",\"extra_txt\":\"");
+        b.push_json_escaped(&extra_txt, 100);
         b.push_str("\"}");
         append_line(ctx, b.as_slice());
     }
