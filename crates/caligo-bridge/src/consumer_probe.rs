@@ -125,15 +125,17 @@ pub unsafe extern "system" fn consumer_dtor(_ctx: *mut c_void) {}
 /// - op=4(门查询,3fce5e:dest/src/size 全零,arg5=&out16):向 out 写
 ///   非零({invoker, manager})—— 门 = out[0] != 0;
 /// - 其他 op(含销毁):no-op(storage 为 leaked)。
-/// 定长写,零读零分配。
+/// v3:每次调用在契约完成后向 ctx 报告追加一行 mgr_call(op/args)——
+/// 用于观测 QQ 对 delegate 的完整操作序列(含响应时是否到达门查询)。
+/// 定长写,零读零分配(日志行固定格式,无 serde)。
 ///
 /// # Safety
 /// QQ 线程调用;dest/out 为 QQ 提供缓冲;不得 unwind。
 pub unsafe extern "system" fn consumer_manager(
     dest: *mut c_void,
     op: u32,
-    _src: *mut c_void,
-    _size: usize,
+    src: *mut c_void,
+    size: usize,
     out: *mut c_void,
 ) {
     // SAFETY: dest/out 为 QQ 提供的 delegate/查询缓冲(空管理器同类操作
@@ -156,10 +158,111 @@ pub unsafe extern "system" fn consumer_manager(
             }
             _ => {}
         }
+        // v3 观测:契约完成后追加调用日志(定长栈格式化,零分配)。
+        let ctx = match resolve_ctx_static() {
+            Some(c) => c,
+            None => return,
+        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut b = FixedBuf::new();
+        b.push_str("{\"kind\":\"mgr_call\",\"ts\":");
+        b.push_dec(ts);
+        b.push_str(",\"op\":");
+        b.push_dec(op as u64);
+        b.push_str(",\"dest\":\"");
+        b.push_hex(dest as usize as u64);
+        b.push_str("\",\"src\":\"");
+        b.push_hex(src as usize as u64);
+        b.push_str("\",\"size\":");
+        b.push_hex(size as u64);
+        b.push_str(",\"out\":\"");
+        b.push_hex(out as usize as u64);
+        b.push_str("\"}");
+        append_line_raw(ctx, b.as_slice());
     }
 }
 
-static STORAGE_CTX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 栈上定长格式化缓冲(零堆分配;回调纪律)。
+struct FixedBuf {
+    data: [u8; 224],
+    len: usize,
+}
+
+impl FixedBuf {
+    fn new() -> Self {
+        Self { data: [0; 224], len: 0 }
+    }
+    fn push_str(&mut self, s: &str) {
+        let b = s.as_bytes();
+        let n = b.len().min(self.data.len() - self.len);
+        self.data[self.len..self.len + n].copy_from_slice(&b[..n]);
+        self.len += n;
+    }
+    fn push_dec(&mut self, v: u64) {
+        if v == 0 {
+            self.push_str("0");
+            return;
+        }
+        let mut tmp = [0u8; 20];
+        let mut i = 20;
+        let mut v = v;
+        while v > 0 {
+            i -= 1;
+            tmp[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+        }
+        // SAFETY: tmp[i..] 全为 ASCII 数字。
+        self.push_str(unsafe { core::str::from_utf8_unchecked(&tmp[i..]) });
+    }
+    fn push_hex(&mut self, v: u64) {
+        self.push_str("0x");
+        if v == 0 {
+            self.push_str("0");
+            return;
+        }
+        let mut tmp = [0u8; 16];
+        let mut i = 16;
+        let mut v = v;
+        while v > 0 {
+            i -= 1;
+            tmp[i] = b"0123456789abcdef"[(v & 0xf) as usize];
+            v >>= 4;
+        }
+        // SAFETY: tmp[i..] 全为 hex ASCII。
+        self.push_str(unsafe { core::str::from_utf8_unchecked(&tmp[i..]) });
+    }
+    fn as_slice(&self) -> &[u8] {
+        &self.data[..self.len]
+    }
+}
+
+/// 进程级静态 ctx(v3:manager 无 this 可依,用注册时的全局)。
+static STATIC_CTX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+fn resolve_ctx_static() -> Option<&'static ConsumerCtx> {
+    let p = *STATIC_CTX.get_or_init(|| 0);
+    if p > 0x10000 {
+        // SAFETY: p 来自 leak_ctx(进程生存期)。
+        Some(unsafe { &*(p as *const ConsumerCtx) })
+    } else {
+        None
+    }
+}
+
+/// 定长原始行追加(无格式化依赖;回调纪律)。
+fn append_line_raw(ctx: &ConsumerCtx, line: &[u8]) {
+    use std::os::windows::ffi::OsStringExt;
+    let end = ctx.report.iter().position(|c| *c == 0).unwrap_or(180);
+    let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(&ctx.report[..end]));
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line);
+        let _ = f.write_all(b"\n");
+    }
+}
 
 /// 消费者回调(响应时被 QQ 调用;契约 = cb[3](delegate 起点, 0x10,
 /// errCode, errStr*, msgUid*)。防御式:ctx 从 this+0 取,字符串 RPM-self 读。
@@ -265,13 +368,12 @@ fn leak_ctx_fallback() -> &'static ConsumerCtx {
 
 /// delegate 构造(布局 L1):{storage0=ctx, storage1=1, manager, invoker}。
 /// storage0 非空 = 门开启;manager 正确克隆;invoker = 消费者。
+/// 同时登记进程级 STATIC_CTX(manager 的 v3 日志用;OnceLock 首次生效)。
 pub fn build_cb(ctx: &ConsumerCtx) -> [u64; 4] {
-    STORAGE_CTX.store(
-        ctx as *const ConsumerCtx as usize as u64,
-        std::sync::atomic::Ordering::Release,
-    );
+    let p = ctx as *const ConsumerCtx as usize;
+    STATIC_CTX.get_or_init(|| p);
     [
-        ctx as *const ConsumerCtx as usize as u64,
+        p as u64,
         1,
         consumer_manager as usize as u64,
         consumer_invoke as usize as u64,

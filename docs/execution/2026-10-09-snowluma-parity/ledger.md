@@ -970,3 +970,35 @@ N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。
   (cookie + 我们的 delegate)→ 响应路由闭环。
 - 当前状态:25072 存活,OneBot 正常;n3res7 驻留其内(仅持 leaked ctx,
   无活动线程)。
+## 2026-10-11(三十一):管理器调用序列完整观测 —— 门开、路由缺、实例存活
+
+### v3 观测(N3R32/N3R33,n3res8/9,零崩溃)
+- **N3R32/N3R33/N3R31 全部送达**(400714/400716/400717),实例 25072 存活
+  (两次"死亡"均为瞬时查询误判——已修正验证方法:双查 + SnowLuma 日志);
+- **管理器完整调用序列(首次实测)**:
+  1. submit 时刻 **4 连 op=0 克隆**:栈上 3 跳(dest←src 链)+ 最终堆分配
+     0x21ba1255a68 = 请求持久 delegate(每次写 {manager, invoker} 对);
+  2. **+584ms op=4 门查询**(NULL,4,NULL,0,&out16,0 —— 与 3fce5e 签名
+     逐位吻合):我们的 manager 写非零 → **门开**;
+  3. 紧接 op=3(dest=堆 delegate,src=dest-0x10,size=0x10)—— 销毁/搬移,
+     no-op 安全;
+  4. **invoker 未被调用**(cb[3] 未触发)。
+- 工具缺陷修复:v3 日志曾因 STATIC_CTX/STORAGE_CTX 双静态笔误失效
+  (build_cb 存错静态)——n3res9 修复;线程交错写导致的 JSON 半行
+  (append 无锁)——已知,后续加文件锁。
+
+### 路由缺口的精确化
+- 门(3fbab2)共 **6 个调用方**:[3fb914]/[54cdef]/[6a7d0c]/[739c66]/
+  [73bd6c]/0x73ce0c —— op=4 查询来自其中之一,但 73bd6c 的门若跑过会有
+  第二次 op=4 + invoker 调用(均无)→ **响应仍未到达 73bd6c**;
+- op=4 的来源层待定位(六个门调用方逐个反汇编,看哪个操作 send-result
+  上下文对象);73bd6c 的响应分发 = 需要 upstream 注册(cookie → 消费者,
+  BaseMsgMgr token registry)——结论不变,证据更实。
+
+### 状态
+- 25072 存活、OneBot 正常;n3res7/8/9 三份 DLL 驻留(均无活动线程,
+  leaked ctx 无害);三轮探针全部送达(修复版 delegate 完全安全);
+- retCode 通道进展:delegate 契约 ✓(克隆/查询/销毁全安全)→ 门开 ✓ →
+  剩:响应路由到 73bd6c 的 upstream 注册。
+- 下一步:①六个门调用方反汇编定位 op=4 来源层;②182578e18 反编译找
+  registry insert;③v4 = 手动注册 + 裸发(待布局确认后)。
