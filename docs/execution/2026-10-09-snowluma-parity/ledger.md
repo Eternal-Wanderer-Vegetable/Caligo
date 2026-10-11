@@ -1134,3 +1134,47 @@ N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。
 - 纯离线轮:零注入零发送;实例 25072 未触碰;全部结论有反汇编地址锚点;
 - 下一步:consumer_probe.rs 改造(invoker = 6 参消费版 + arg5 注入路径),
   现场 v4 实验(待用户批准注入)。
+## 2026-10-11(三十五):v4 现场闭环 —— retCode 通道打通;根因 = 门极性反转
+
+### 根因定案(离线反汇编 + mgrlog2 几何)
+- **门语义反转**:0x3fbab2 = `3fce5e(rcx+0x10)` + `xor al,1`;0x3fce5e = 
+  `manager(NULL,4,NULL,0,&out16,0)` 返回 out[0]!=0。0x72D596(原生空管理器)
+  op>=4 臂 = `out[0]=1` —— **"1" = 我是空的**;0 = 非空可调用。
+  r1 时代"out[0] 非零 = 门开"解读为**极性反转** —— r2/r3 我们的 manager
+  答"非零(自称空)" → 73bd6c 在 +584ms 跳过 invoke 直接销毁。
+  **路由全程通畅,从未缺上游注册;r2 的 token-registry 结论作废**。
+- mgrlog2 克隆几何复核:manager 约定 = `(dest=&new.manager, op, src=旧块,
+  0x10, out=新块)`;0x31C5F8 移动器**不复制 storage**(只重置源为空对
+  {0x2338,0x236a})→ op=0 须复制 4 qword(r1 教训再证实)。
+
+### v4 修复(consumer_probe.rs,commit 本轮)
+1. op=4 → 写 out[0]=0(非空);
+2. op=0 → 复制 src storage0/1 → out[0..2] + 写对(RPM-self 读,坏地址写 0);
+3. op=1/3 → 重置为 wrapper 空对 {base+0x2338, base+0x236a}(ctx 新增
+   wrapper_base 字段);
+4. invoker → 6 参 (this, 0x10, errCode, errStr*, writer*, extra*);
+5. __qq string 短形态 data@+1 修正(make_short_string 同款);
+6. 回调零堆分配(FixedBuf 768B + JSON 转义)+ 进程级文件锁(半行 JSON 修复);
+7. g3.rs 消费者分支补 cfg(research)门 —— **default 构建 E0433 自 r2 起预存,
+   本提交修复**(全仓默认+research 测试绿 53+14+10+4+38 / 56+7+7+14)。
+
+### N3R34 现场结果(单发;实例 25072 全程存活,OneBot 正常)
+- 注入 n3res10(research CLI;首跑误用 default CLI 被 K4-D0 拒,重推
+  `--features caligo-bridge/research` 后握手 PASS);
+- 序列逐项命中预测:4×op=0 克隆(submit)→ **+417ms op=4 门查询(答 0)→
+  consumer_result{tag:16, err_code:0, err_str:""} → op=3 销毁**;
+- tag=16 = 0x10 精确匹配 73bd6c 约定;err_code=0 = 服务器受理(成功);
+  err_str 空 = 成功无错文(符合预期);
+- **送达验证**:群 263402786 seq 401041"time 1791688411 bot uid 文本
+  'N3R34 v4 consumer probe'"(OneBot get_group_msg_history);
+- 序号:--g3-send-seq auto 计至 3(g3-seq-state.txt 复用);
+- 遗留(非阻塞):extra(73bd6c arg6,&rbp-0x40)读到乱码(疑似 [box+0x38]
+  非 string 或 0x32c4 非 string ctor —— msgUid 提取待下一轮精化;
+  err_code/err_str 主通道已够 retCode 判定)。
+
+### 意义与下一步
+- **retCode 通道闭环**:裸调 732A80 + arg5 自带 delegate = 完整响应消费者
+  路径;N3 发送受理判定(errCode)现场可用;@ 重测的前提达成;
+- v5 候选:extra/msgUid 精化(box+0x38 语义)、writer 字段解析(capture+8
+  sp 对)、SendMsgResult 完整字段;以及把该消费者路径接入 N3 常驻
+  native_session 的 SendAcceptance 判定。

@@ -754,8 +754,9 @@ pub struct G3SendCtx {
     /// {1: 该值, 2: 0, 3: 0}(调查发送漂移的服务端形状策略翻转假设)。
     pub use_ch: u32,
     /// N3R30 消费者实验:0 = QQ 空函数 delegate(现状);非 0 = 我们的
-    /// 响应消费者 delegate(consumer_probe::{invoke,dtor} + ctx),cb 块
-    /// {ctx,flag,invoke,dtor} —— 若门开启,响应/180s 超时写入报告。
+    /// 响应消费者 delegate(v4 = consumer_probe L1 {ctx,1,manager,invoke},
+    /// manager op=4 答 0 = 非空可调用)—— 响应经 73bd6c 门后以 6 参 invoke
+    /// (errCode/errStr/writer/extra)到达,写入报告。
     pub use_consumer: u32,
 }
 
@@ -1169,20 +1170,24 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     let mut cmd = [0u8; 24];
     make_short_string(&mut cmd, b"MessageSvc.PbSendMsg");
     let mut cb = [0u64; 4];
+    // 消费者分支 = research 专属(default 构建 E0433 自 r2 起预存,本提交
+    // 补门;default 下 use_consumer 落回空 delegate,行为与 0 无异)。
+    #[cfg(feature = "research")]
     if (*ctx).use_consumer != 0 {
-        // N3R30:响应消费者 delegate —— cb = {ctx, flag, invoke, dtor}。
-        // invoke 由 QQ dispatcher 线程在响应到达(或 180s 超时 -1)时调用,
+        // v4(N3R34):响应消费者 delegate —— cb = L1 {ctx, 1, manager, invoker}。
+        // 732A80 把 arg5 内层 delegate 移入捕获块,响应经 0x73C34C → 73bd6c
+        // 门(manager op=4 答 0 = 非空)→ invoke(6 参:errCode/errStr/…)。
         // 防御式实现(consumer_probe;RPM-self 安全读,布局误判不崩)。
-        crate::consumer_probe::set_fallback(report_path);
-        let c = crate::consumer_probe::leak_ctx(report_path);
-        cb = crate::consumer_probe::build_cb(c);
+        let c = crate::consumer_probe::leak_ctx(wrapper_base, report_path);
+        cb = crate::consumer_probe::build_cb(wrapper_base, c);
         stage(
             report_path,
             "g3s_consumer",
             true,
-            &format!("ctx={:p} invoke={:x}", c as *const _, cb[2]),
+            &format!("ctx={:p} manager={:x} invoke={:x}", c as *const _, cb[2], cb[3]),
         );
-    } else {
+    }
+    if (*ctx).use_consumer == 0 || !cfg!(feature = "research") {
         cb[2] = (wrapper_base + EMPTY_FN_CALLABLE_RVA) as u64;
         cb[3] = (wrapper_base + EMPTY_FN_DTOR_RVA) as u64;
     }
