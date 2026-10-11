@@ -125,11 +125,11 @@ pub unsafe extern "system" fn wirecap_capture(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        b.push_str(&ts.to_string());
+        push_dec(&mut b, ts);
         b.push_str(",\"svc\":\"");
         push_hex_addr(&mut b, svc as usize);
         b.push_str("\",\"flag\":");
-        b.push_str(&(flag as usize & 0xff).to_string());
+        push_dec(&mut b, (flag as usize & 0xff) as u64);
         // cmd = __qq string(短形态 byte0=len<<1, data@+1;长形态 {cap|1,size,ptr})。
         b.push_str(",\"cmd\":\"");
         let mut hdr = [0u8; 24];
@@ -141,19 +141,15 @@ pub unsafe extern "system" fn wirecap_capture(
                     push_json_byte(&mut b, c);
                 }
             } else {
-                let mut lh = [0u8; 16];
-                if rpm_read(cmd as usize, &mut lh) {
-                    let size = u64::from_le_bytes(lh[8..16].try_into().unwrap()) as usize;
-                    let dptr = usize::from_le_bytes(lh[8..16].try_into().unwrap());
-                    let _ = size;
-                    let mut big = [0u8; 64];
-                    let d = u64::from_le_bytes(lh[16..24].try_into().unwrap()) as usize;
-                    let _ = dptr;
-                    if d > 0x10000 && rpm_read(d, &mut big) {
-                        let n = (size as usize).min(63);
-                        for &c in &big[..n] {
-                            push_json_byte(&mut b, c);
-                        }
+                // N3R49 教训:此处曾读 16B 头再切 lh[16..24] → panic → abort
+                // → 进程死亡(732A80 = 通用 SSO 通道,长 cmd 一发即触)。
+                // 修正:头统一读 24B;size 上限校验后再读 data。
+                let size = u64::from_le_bytes(hdr[8..16].try_into().unwrap()) as usize;
+                let d = u64::from_le_bytes(hdr[16..24].try_into().unwrap()) as usize;
+                let mut big = [0u8; 64];
+                if d > 0x10000 && size > 0 && size <= 63 && rpm_read(d, &mut big[..size]) {
+                    for &c in &big[..size] {
+                        push_json_byte(&mut b, c);
                     }
                 }
             }
@@ -169,7 +165,7 @@ pub unsafe extern "system" fn wirecap_capture(
             bbegin = begin;
             blen = end.saturating_sub(begin);
         }
-        b.push_str(&blen.to_string());
+        push_dec(&mut b, blen as u64);
         b.push_str(",\"body_hex\":\"");
         if blen > 0 && blen <= 512 && bbegin > 0x10000 {
             let n = blen.min(512);
@@ -186,6 +182,24 @@ pub unsafe extern "system" fn wirecap_capture(
         b.push_str("\"}");
         append_line(ctx, b.as_slice());
     }
+}
+
+/// 无分配十进制格式化(回调纪律;to_string 族在 QQ 发送线程上禁用)。
+fn push_dec(b: &mut CapBuf, v: u64) {
+    if v == 0 {
+        b.push_str("0");
+        return;
+    }
+    let mut tmp = [0u8; 20];
+    let mut i = 20;
+    let mut v = v;
+    while v > 0 {
+        i -= 1;
+        tmp[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    // SAFETY: tmp[i..] 全为 ASCII 数字。
+    b.push_str(unsafe { core::str::from_utf8_unchecked(&tmp[i..]) });
 }
 
 fn push_hex_addr(b: &mut CapBuf, v: usize) {
@@ -282,6 +296,59 @@ pub fn install(wrapper_base: usize, report_path: *const u16) {
         Ok(n) => stage(&path, "install", true, &format!("patched={n}")),
         Err(e) => stage(&path, "install", false, &e),
     }
+}
+
+/// 卸载钩子(N3R50 教训后停用 wirecap):把两个调用点写回原始
+/// E8 rel32→732A80。幂等:已是原始字节则跳过。无 trampoline 依赖。
+pub fn uninstall(wrapper_base: usize, report_path: *const u16) {
+    use windows_sys::Win32::System::Memory::VirtualProtect;
+    let mut ctx_report = [0u16; 180];
+    // SAFETY: loader 写入的 NUL 结尾 UTF-16。
+    unsafe {
+        let mut i = 0usize;
+        while i < 179 && *report_path.add(i) != 0 {
+            ctx_report[i] = *report_path.add(i);
+            i += 1;
+        }
+    }
+    let path = {
+        use std::os::windows::ffi::OsStringExt;
+        let end = ctx_report.iter().position(|c| *c == 0).unwrap_or(180);
+        std::ffi::OsString::from_wide(&ctx_report[..end]).to_string_lossy().into_owned()
+    };
+    let mut restored = 0usize;
+    for site in CALL_SITES {
+        let addr = wrapper_base + site;
+        let orig_rel = (SEND_SSO_RVA as i64) - (site as i64) - 5;
+        let want = {
+            let mut v = vec![0xE8u8];
+            v.extend_from_slice(&orig_rel.to_le_bytes());
+            v
+        };
+        let mut cur = [0u8; 5];
+        if !rpm_read(addr, &mut cur) {
+            stage(&path, "uninstall", false, &format!("site {site:#x} unreadable"));
+            continue;
+        }
+        if cur == want[..] {
+            stage(&path, "uninstall", true, &format!("site {site:#x} already original"));
+            continue;
+        }
+        let mut old_prot = 0u32;
+        let mut back = 0u32;
+        // SAFETY: 5B 写回已知原始字节(非 trampoline 目标已核实)。
+        unsafe {
+            if VirtualProtect(addr as *const c_void, 5, 0x40, &mut old_prot) == 0 {
+                stage(&path, "uninstall", false, &format!("site {site:#x} VP fail"));
+                continue;
+            }
+            core::ptr::copy_nonoverlapping(want.as_ptr(), addr as *mut u8, 5);
+            let _ = VirtualProtect(addr as *const c_void, 5, old_prot, &mut back);
+        }
+        restored += 1;
+        stage(&path, "uninstall", true, &format!("site {site:#x} restored"));
+    }
+    stage(&path, "uninstall_done", true, &format!("restored={restored}"));
 }
 
 fn install_inner(wrapper_base: usize, path: &str) -> Result<usize, String> {

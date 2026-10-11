@@ -1254,3 +1254,29 @@ N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。
   剩余假设:①真实 732A80-wire 与存储记录存在未复制差异(需主账号 GUI
   @ + heap 扫描);②服务器对 legacy-path @ 静默弃(风控类,可能无解);
 - qqxlog 解码器(NTQQ 日志)可作下一离线工具(需独立格式研究)。
+## 2026-10-11(三十八):wirecap 触发两次实例损失,钩子路线放弃;转主账号 heap 扫描
+
+### 崩溃链(诚实定案)
+- 崩溃 #1(实例 10324,n3res20 + OOB 版 wirecap):用户 GUI 操作时死亡。
+  根因 = **我的代码缺陷**:cmd 长形态分支对 16B 头切 lh[16..24] → panic →
+  extern "system" abort。732A80 为通用 SSO 通道,GUI 流量长 cmd 即触。
+- 崩溃 #2(实例 40432,n3res21 修复版):**窗口最大化即崩**。OOB 已修、
+  capture 全路径审计无 panic、无分配格式化 —— 主嫌疑 = **trampoline 首次
+  穿越本身**(g3::trampoline_bytes 的 call capture + jmp original 模式;
+  该设计此前只在我们自己进程单测过,QQ 的 CFG/CET 缓解下 call→jmp
+  shadow-stack 失配可即时终止;两次崩溃均为 GUI 触发包装器首次执行)。
+  裸调直调不经调用点 → 我们的发送 8 次全存活 —— 完全吻合。
+- **定案:调用点补丁类钩子在 QQ 现场不可用(纪律 v4:补丁类插桩 =
+  slot7 级风险,整体否决)**。uninstall 例程已实现(--g3-send-ch 93 模式,
+  写回原始 5B,幂等)。
+
+### 复盘:40432 注入的卸载尝试
+- 对 40432 的 n3res22 卸载注入落空 —— 进程已死(OpenProcess 失败,
+  handshake 未完成)。当前仅 33736(主账号,昨日 23:33 起)存活。
+
+### 转路线:零注入主账号 heap 扫描(工具 wirebody_scan.py 已备)
+- 原理:主账号 GUI @ 发送走标准 732A80 管线,wire body 缓冲在应答后
+  释放但字节通常残留于空闲块(r16 时代 capture-main-group-body 同法成功);
+- 流程:用户在主账号 GUI 发 @ 哨兵消息(CAPWIRE47)→ 扫 33736 →
+  按 protobuf 顶层形状分类各命中 → 取 wire body 与我们 v9 形状比对;
+- 前置:bot 实例重启(OneBot 恢复),重注前先 plain 基线;**不再装钩子**。

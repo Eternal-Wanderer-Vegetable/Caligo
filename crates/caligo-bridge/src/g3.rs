@@ -1041,7 +1041,12 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     // 两个调用点,转储所有 732A80 调用的 (cmd, body)。用于抓原生路径
     // (SnowLuma)的真实 @ wire body 与裸调形状逐字节对照。
     #[cfg(feature = "research")]
-    crate::wirecap::install(wrapper_base, report_path);
+    if (*ctx).use_ch == 93 {
+        // use_ch=93 = 卸载模式(N3R50 后停用 wirecap;还原调用点原始字节)。
+        crate::wirecap::uninstall(wrapper_base, report_path);
+    } else {
+        crate::wirecap::install(wrapper_base, report_path);
+    }
     // random = 0 时现场生成(每消息新鲜值;真实客户端同语义,服务器不校验来源)。
     let random = if random == 0 {
         let mut t = unsafe { core::arch::x86_64::_rdtsc() };
