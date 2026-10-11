@@ -1315,3 +1315,32 @@ N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。
   4 次(2 次定案为 wirecap 缺陷/机制,1 次风控踢,1 次r1契约错位);
 - 新工具:wirebody_scan.py(主账号 heap 扫描)、wirecap(uninstall 模式)、
   protobuf 遍历器、pb-walker 分类器。
+## 2026-10-11(四十):N4 接线 —— retCode 消费者闭环进常驻会话层
+
+### 消费者 → 账本全链(纯进程内测试全绿;待 resident 现场跑)
+1. **native_response**:新增 `ResponseOutcome::BusinessAccepted`(第 4 类;
+   版本门理由:计划 §178"ACK 不能变成业务成功"要求 ack-without-msgUid 与
+   BusinessSuccess 严格分立;field v4–v13 实证通道交付此形态);
+2. **consumer_probe v6**:per-send cookie delegate(storage0/1 = cookie 16B
+   原样;manager op=0 克隆已复制 storage → QQ 侧堆块携带 cookie 原路归还)+
+   进程级响应槽 RESPONSE_SLOT + drain_responses();invoke 从克隆块 RPM 读回
+   cookie 入槽(零 cookie = 诊断流只留 JSONL);init(report,wrapper) 登记;
+3. **g3_ops**:submit 按 cookie 构建消费 delegate(research 分支;default =
+   空回调)—— 发送即注册响应消费者,不再依赖独立探针流;
+4. **native_resident**:adapter 启动时 consumer init;`drain_send_responses()`
+   = 槽 → session.on_response → take_terminal;映射 code==0 → BusinessAccepted
+   → SendOutcome::Success{native_id:None}(上层按"未关联"处理),code!=0 →
+   BusinessRejected → Failure{retCode/errStr};
+5. **resident**:泵线程每拍 `drain_send_responses()`(锁序 adapter→core);
+   request 状态 SendPending → Done;结果经既有 take_results → IPC 上行。
+
+### 测试
+- cookie_delegate_roundtrip_via_slot:克隆合同(storage 复制 + 对写入)+
+  门极性(op=4 答 0)+ 响应归还 cookie 原样 —— 全周期纯进程内验证;
+- zero_cookie_stays_out_of_slot:诊断流不入槽;
+- 全仓 default 23 套件 + research 58+7+7+14 全绿。
+
+### 下一步(现场)
+- resident 模式现场跑(caligod + IPC):daemon 发送 → Dispatched → QQ 响应 →
+  BusinessAccepted/BusinessRejected 上行 —— N4 发送业务结果判定闭环;
+- 前置:实例 14632 健康;注入密度纪律(今日已 16 次,建议明日执行)。

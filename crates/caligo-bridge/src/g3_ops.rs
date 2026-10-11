@@ -64,7 +64,7 @@ impl G3NativeOps {
 
     /// 完整 g3 发送序列:adopt → transport → alloc → self str → send。
     /// 返回 Ok = 已提交(异步;结果需经 CPB 差分确认)。
-    fn native_submit(&self, body: &[u8]) -> Result<(), OpsError> {
+    fn native_submit(&self, cookie: &Cookie, body: &[u8]) -> Result<(), OpsError> {
         let wb = self.wrapper_base;
         // SAFETY: 与 g3_send_run 同序列;全部地址经锚点核对。
         unsafe {
@@ -103,14 +103,23 @@ impl G3NativeOps {
                 return Err(OpsError::PreCall("g3 selfstr: unreadable"));
             }
 
-            // ⑤ cmd + 空回调。
+            // ⑤ cmd + 回调块:consumer 已武装(research)→ per-send cookie
+            // delegate(storage0/1 = cookie 16B 原样;响应经消费槽归还账本);
+            // 否则空回调(QQ 原生 inert 表示)。
             let mut cmd = [0u8; 24];
             let cmd_name = b"MessageSvc.PbSendMsg";
             cmd[0] = (cmd_name.len() as u8) << 1;
             cmd[1..1 + cmd_name.len()].copy_from_slice(cmd_name);
             let mut cb = [0u64; 4];
-            cb[2] = (wb + rva::EMPTY_FN_CALLABLE) as u64;
-            cb[3] = (wb + rva::EMPTY_FN_DTOR) as u64;
+            #[cfg(feature = "research")]
+            {
+                cb = crate::consumer_probe::build_cb_for_cookie(cookie);
+            }
+            #[cfg(not(feature = "research"))]
+            {
+                cb[2] = (wb + rva::EMPTY_FN_CALLABLE) as u64;
+                cb[3] = (wb + rva::EMPTY_FN_DTOR) as u64;
+            }
 
             // ⑥ 提交(异步;QQ dispatcher 执行)。
             let send: SendSsoFn = core::mem::transmute(wb + rva::SEND_SSO);
@@ -122,8 +131,8 @@ impl G3NativeOps {
                 cb.as_mut_ptr() as usize,
             );
         }
-        // 移转后 buf/cb 所有权归 QQ;本侧不再触碰。
-        let _ = Cookie([0u8; 16]); // cookie 语义由 NativeSession 层管理
+        // 移转后 buf/cb 所有权归 QQ;本侧不再触碰。cookie 语义由
+        // NativeSession 层管理(此处经 delegate storage 进入 QQ 侧克隆链)。
         Ok(())
     }
 }
@@ -134,8 +143,8 @@ impl NativeOps for G3NativeOps {
         self.probe_service().map(|_| ())
     }
 
-    fn submit(&mut self, _service_addr: usize, _cookie: &Cookie, body: &[u8]) -> Result<(), OpsError> {
-        self.native_submit(body)
+    fn submit(&mut self, _service_addr: usize, cookie: &Cookie, body: &[u8]) -> Result<(), OpsError> {
+        self.native_submit(cookie, body)
     }
 }
 

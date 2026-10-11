@@ -27,6 +27,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crate::daemon_client::{run_worker, DaemonClientConfig, WorkerExit};
 use crate::g3_ops::G3NativeOps;
+use crate::resident::SendOutcome;
 use crate::host_adapter::{HostAdapter, HostError, HostOp, HostOpResult};
 use crate::native_receive::{
     collect_record_fields, scan_cpb_objects_inproc, RpmSelfReader, SeenRecords,
@@ -282,6 +283,47 @@ impl NativeHostAdapter {
     }
 }
 
+impl NativeHostAdapter {
+    /// 排空消费响应槽 → 账本终局 → (request_id, SendOutcome)。
+    /// 映射:code==0 → BusinessAccepted(ack,无 native_id;计划 §178
+    /// "ACK 不能变成业务成功"的忠实表达);code!=0 → BusinessRejected
+    /// (retCode/errStr 如实)。
+    pub fn drain_send_responses(&mut self) -> Vec<(String, SendOutcome)> {
+        let mut inner = self.inner.lock().unwrap();
+        let mut out = Vec::new();
+        for (cookie, code, err) in crate::consumer_probe::drain_responses() {
+            let outcome = if code == 0 {
+                crate::native_response::ResponseOutcome::BusinessAccepted
+            } else {
+                crate::native_response::ResponseOutcome::BusinessRejected {
+                    ret_code: code,
+                    err: err.clone(),
+                }
+            };
+            let completion = inner.session.on_response(&cookie, outcome);
+            if let crate::native_response::Completion::Terminated { request_id, outcome } = completion {
+                let so = match outcome {
+                    crate::native_response::ResponseOutcome::BusinessAccepted => {
+                        SendOutcome::Success { request_id: request_id.clone(), native_id: None }
+                    }
+                    crate::native_response::ResponseOutcome::BusinessSuccess { native_id } => {
+                        SendOutcome::Success { request_id: request_id.clone(), native_id: Some(native_id) }
+                    }
+                    crate::native_response::ResponseOutcome::BusinessRejected { ret_code, err } => {
+                        SendOutcome::Failure { request_id: request_id.clone(), reason: format!("retCode={ret_code} err={err}") }
+                    }
+                    crate::native_response::ResponseOutcome::TransportFailed { reason } => {
+                        SendOutcome::Failure { request_id: request_id.clone(), reason }
+                    }
+                };
+                out.push((request_id, so));
+            }
+            // DuplicateIgnored/StaleGeneration/UnknownCookie = 审计类,不上升。
+        }
+        out
+    }
+}
+
 impl HostAdapter for NativeHostAdapter {
     fn owner_thread_id(&self) -> u64 {
         self.owner_tid.load(Ordering::Acquire)
@@ -432,6 +474,11 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
         ),
     );
 
+    // ⓪ consumer 武装(research;报告路径 + wrapper 基址)—— per-send
+    // cookie delegate 的 manager/invoke 观测与 fallback 依赖此次登记。
+    #[cfg(feature = "research")]
+    crate::consumer_probe::init(wb, (*ctx).report_path);
+
     // ① attach(真实服务对象地址 = 诚实 proof 证据;g3-session r2 同款)。
     let service_addr = {
         let mut probe = G3NativeOps::new(wb);
@@ -526,6 +573,8 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
                         let _ = cv.wait_timeout(guard, std::time::Duration::from_millis(100));
                     }
                     let _ = resident.drain();
+                    // N3 retCode 消费者排空:QQ 分发线程 → 槽 → 账本终局。
+                    resident.drain_send_responses();
                     for outcome in resident.take_results() {
                         let _ = result_tx.send(outcome);
                     }

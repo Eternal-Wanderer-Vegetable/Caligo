@@ -64,6 +64,8 @@ pub enum HostError {
 /// 实现者约定:`current_thread_id` 返回**当前执行线程**在该宿主里的标识;
 /// resident 用它与 [`HostAdapter::owner_thread_id`] 比对,先于任何
 /// `native_op`。
+use crate::resident::SendOutcome;
+
 pub trait HostAdapter {
     /// 宿主初始化时确定的 owner 线程(QQ 的 JS/loop 线程)。
     fn owner_thread_id(&self) -> u64;
@@ -76,6 +78,11 @@ pub trait HostAdapter {
     /// 执行固定语义操作。仅在 owner 线程 + env 有效 + 上下文可用时被调用;
     /// 实现内部仍应自检(防御纵深)。
     fn native_op(&mut self, op: HostOp) -> Result<HostOpResult, HostError>;
+    /// 排空异步发送响应(消费通道 → 账本终局)。默认无(纯实现/无消费者)。
+    /// 返回 (request_id, SendOutcome);Resident 负责落 core 结果通道。
+    fn drain_send_responses(&mut self) -> Vec<(String, SendOutcome)> {
+        Vec::new()
+    }
 }
 
 /// D2 结论的代码化:在 B0-FIELD 通过之前,生产路线不存在。

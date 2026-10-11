@@ -372,6 +372,17 @@ pub unsafe extern "system" fn consumer_invoke(
             Some(c) => c,
             None => return,
         };
+        // v6 会话接线:storage0/1 = per-send cookie(manager op=0 已复制)。
+        // RPM-self 读;零 cookie(两 qword 全零)只记日志不入槽。
+        let (cookie, has_cookie) = {
+            let mut c = crate::native_response::Cookie([0u8; 16]);
+            let lo = safe_read_qword(this as usize).unwrap_or(0);
+            let hi = safe_read_qword(this as usize + 8).unwrap_or(0);
+            c.0[0..8].copy_from_slice(&lo.to_le_bytes());
+            c.0[8..16].copy_from_slice(&hi.to_le_bytes());
+            let has = lo != 0 || hi != 0;
+            (c, has)
+        };
         let err_str = read_qq_string(err_str as usize).unwrap_or_default();
         // extra(73bd6c arg6)= 0x32c4 构造的 span {begin,end,cap_end}
         // (0x38aa 分配 + 0x38e6 拷贝;box 空时 0x20 全零 = 空 span)。
@@ -448,6 +459,13 @@ pub unsafe extern "system" fn consumer_invoke(
         b.push_json_escaped(&extra_txt, 100);
         b.push_str("\"}");
         append_line(ctx, b.as_slice());
+        // v6:入槽(worker 排空 → 账本)。cookie 为零 = 非会话路径(诊断流),
+        // 只留 JSONL 不入槽。
+        if has_cookie {
+            if let Ok(mut g) = RESPONSE_SLOT.lock() {
+                g.push((cookie, err_code, err_str));
+            }
+        }
     }
 }
 
@@ -509,4 +527,135 @@ pub fn build_cb(wrapper_base: usize, ctx: &ConsumerCtx) -> [u64; 4] {
         consumer_manager as usize as u64,
         consumer_invoke as usize as u64,
     ]
+}
+
+// ---------------------------------------------------------------------------
+// v6 会话接线:per-send cookie delegate + 响应槽(常驻 worker 排空)
+// ---------------------------------------------------------------------------
+
+/// 初始化(常驻 adapter 构造时一次):登记报告路径 + wrapper 基址,
+/// 供 manager/invoke 的观测日志与 fallback 使用。
+pub fn init(wrapper_base: usize, report_path: *const u16) {
+    let c = leak_ctx(wrapper_base, report_path);
+    let p = c as *const ConsumerCtx as usize;
+    STATIC_CTX.get_or_init(|| p);
+    set_fallback(wrapper_base, report_path);
+}
+
+/// per-send delegate:{storage0/1 = cookie 16B 原样, manager, invoker}。
+/// manager op=0 克隆会把 storage 复制进 QQ 侧堆块(v4 合同),响应时
+/// invoker 从克隆块读回 cookie → 归还到 [`drain_responses`] 槽。
+/// 调用前须 [`init`](fn@init)(否则日志走空 fallback,核心功能不受影响)。
+pub fn build_cb_for_cookie(cookie: &crate::native_response::Cookie) -> [u64; 4] {
+    let lo = u64::from_le_bytes(cookie.0[0..8].try_into().unwrap());
+    let hi = u64::from_le_bytes(cookie.0[8..16].try_into().unwrap());
+    [
+        lo,
+        hi,
+        consumer_manager as usize as u64,
+        consumer_invoke as usize as u64,
+    ]
+}
+
+/// 响应槽(QQ 分发线程写入;常驻 worker 排空)。
+static RESPONSE_SLOT: std::sync::Mutex<Vec<(crate::native_response::Cookie, i32, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// 排空响应槽(worker 泵每拍调用;QoS = 全量取走)。
+pub fn drain_responses() -> Vec<(crate::native_response::Cookie, i32, String)> {
+    match RESPONSE_SLOT.lock() {
+        Ok(mut g) => std::mem::take(&mut *g),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// v6 会话接线全周期(纯进程内,零 QQ):
+    /// cookie delegate → manager op=0 克隆(storage 复制)→ invoke(克隆块)
+    /// → 槽 → drain = (cookie, errCode, errStr)。
+    #[test]
+    fn cookie_delegate_roundtrip_via_slot() {
+        let dir = std::env::temp_dir().join("caligo-cp-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let report = dir.join("cp-slot.jsonl");
+        let report_wide: Vec<u16> = report.as_os_str().to_string_lossy().encode_utf16().chain([0]).collect();
+        init(0x180000000, report_wide.as_ptr());
+
+        let mut cookie = crate::native_response::Cookie([0u8; 16]);
+        cookie.0[0..8].copy_from_slice(&0x1122_3344_5566_7788u64.to_le_bytes());
+        cookie.0[8..16].copy_from_slice(&0x99AA_BBCC_DDEE_FF00u64.to_le_bytes());
+
+        // QQ 侧克隆:src = 我们的 delegate;dest = 堆块(布局 L1)。
+        let src = build_cb_for_cookie(&cookie);
+        let mut dest = [0u64; 4];
+        unsafe {
+            consumer_manager(
+                dest.as_mut_ptr().add(2) as *mut c_void, // dest = &new.manager 槽(块+0x10)
+                0,
+                src.as_ptr() as *mut c_void,             // src = 旧块起点
+                0x10,
+                dest.as_mut_ptr() as *mut c_void,        // out = 新块起点
+            );
+        }
+        // 克隆合同:storage 复制 + 对写入。
+        assert_eq!(dest[0], src[0], "storage0 = cookie lo");
+        assert_eq!(dest[1], src[1], "storage1 = cookie hi");
+        assert_eq!(dest[2], consumer_manager as usize as u64);
+        assert_eq!(dest[3], consumer_invoke as usize as u64);
+
+        // 门查询(op=4)→ 答 0 = 非空可调用(v4 极性)。
+        let mut gate = [1u64, 1u64];
+        unsafe {
+            consumer_manager(core::ptr::null_mut(), 4, core::ptr::null_mut(), 0, gate.as_mut_ptr() as *mut c_void);
+        }
+        assert_eq!(gate[0], 0, "op=4 必须答 0(非空可调用)");
+
+        // 模拟响应:invoke(克隆块, 0x10, errCode, errStr*, …)。
+        // errStr = 短形态 __qq string。
+        let mut err_buf = [0u8; 24];
+        let msg = b"ok";
+        err_buf[0] = (msg.len() as u8) << 1;
+        err_buf[1..1 + msg.len()].copy_from_slice(msg);
+        unsafe {
+            consumer_invoke(
+                dest.as_ptr() as *mut c_void,
+                0x10,
+                0,
+                err_buf.as_ptr() as *const c_void,
+                core::ptr::null(),
+                core::ptr::null(),
+            );
+        }
+        let drained = drain_responses();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].0, cookie, "cookie 经克隆块原样归还");
+        assert_eq!(drained[0].1, 0);
+        assert_eq!(drained[0].2, "ok");
+    }
+
+    /// 零 cookie(诊断流)不入槽。
+    #[test]
+    fn zero_cookie_stays_out_of_slot() {
+        let before = drain_responses().len();
+        let dest = [0u64, 0u64, consumer_manager as usize as u64, consumer_invoke as usize as u64];
+        let mut err_buf = [0u8; 24];
+        err_buf[0] = 2; // len 1
+        err_buf[1] = b'x';
+        unsafe {
+            consumer_invoke(
+                dest.as_ptr() as *mut c_void,
+                0x10,
+                -7,
+                err_buf.as_ptr() as *const c_void,
+                core::ptr::null(),
+                core::ptr::null(),
+            );
+        }
+        let after = drain_responses();
+        assert_eq!(after.len(), before, "零 cookie 不入槽");
+        // JSONL 仍应记录(诊断流)— 报告文件存在性由 init 侧保证。
+    }
 }

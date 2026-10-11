@@ -26,12 +26,19 @@ impl Cookie {
     }
 }
 
-/// 业务终局(三分类;新增类别须过计划版本门)。
+/// 业务终局(四分类;新增类别须过计划版本门 —— BusinessAccepted 于
+/// 2026-10-11 §四十 过门:field 实证 v4–v13 通道交付 ack-without-msgUid,
+/// 类型合同"ACK 不能变成业务成功"(计划 §178)要求其与 BusinessSuccess
+/// 严格分立;上层按"未关联"处理,不得伪造 id)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponseOutcome {
     /// 业务成功。**必须**携带稳定 native 身份(msgUid/消息 ID);缺失时
     /// 上层只能表达 Unconfirmed/Unknown,不得构造本变体。
     BusinessSuccess { native_id: String },
+    /// 已受理确认(消费通道 errCode = 0)但通道未提供 native 身份。
+    /// 与 [`ResponseOutcome::BusinessSuccess`] 严格分立:不冒充成功,
+    /// 上层按"未关联成功"处理(送达性已证,身份缺失)。
+    BusinessAccepted,
     /// 业务明确拒绝(可解释 retCode/errStr;T07 负例的落点)。
     BusinessRejected { ret_code: i32, err: String },
     /// 传输层失败(未达业务层;与业务拒绝严格区分,不混用错误通道)。

@@ -475,6 +475,28 @@ impl<A: HostAdapter> Resident<A> {
         c.results_out.drain(..).collect()
     }
 
+    /// 排空异步发送响应消费槽(adapter → 账本终局 → core 结果通道)。
+    /// 泵线程每拍调用;request 状态 SendPending → Done。
+    pub fn drain_send_responses(&self) -> usize {
+        // 锁序合同(adapter → core):先取 adapter 结果,再进 core。
+        let done = {
+            let mut adapter = self.adapter.lock().unwrap();
+            adapter.drain_send_responses()
+        };
+        if done.is_empty() {
+            return 0;
+        }
+        let mut c = self.core.lock().unwrap();
+        let n = done.len();
+        for (request_id, outcome) in done {
+            if let Some(rec) = c.requests.get_mut(&request_id) {
+                rec.state = ReqState::Done;
+            }
+            c.results_out.push_back(outcome);
+        }
+        n
+    }
+
     /// 宿主(pump/D8 排空)注入 owned 事件;有界窗口满 → 计数丢弃(不静默)。
     pub fn ingest_event(&self, ev: OwnedEvent) -> bool {
         let mut c = self.core.lock().unwrap();
