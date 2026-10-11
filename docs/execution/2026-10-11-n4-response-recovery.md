@@ -170,3 +170,13 @@ feat-005 / feat-006 保持 blocked，整个项目保持 NOT READY。
 - 新增/扩展测试覆盖 v3 timeout/diagnostic roundtrip、旧 business revision 拒绝、1006501 unknown 分类与诊断保留、超时 unknown、同请求迟到强身份更正、grace 清理与 resident 有界槽释放，以及 core receipt audit。
 - `.\init.ps1 -Mode all` PASS：docs 9 live docs / 163 local links；default 与 research 全套测试二进制均成功退出，且 `QQ field acceptance is separate`。运行中第一次暴露一条预期 audit 数量从 2 增至 3 的断言；断言已修正后 full run PASS。此前 `cargo fmt --all` 带来的旁支纯格式化差异已从工作树撤销。
 - 此次完成的是 R3 的 nonzero result classification 与 ordinary deadline/tombstone 子块，不是强身份闭合。稳定 native identity、sender UID→UIN、R2 callback manager 全操作 ABI、当前 owner/consumer thread、QQ dispatcher stop/cancel/drain/quiescence 与旧访问冲突根因仍开放；R4 不准入。没有启动 QQ 或改变 SnowLuma。
+
+### 2026-10-12 R5 普通 caligod HTTP listener（离线）
+
+- 普通构建的 `caligod` 现在默认监听 `127.0.0.1:5700`，允许显式配置其它 loopback 地址并拒绝非 loopback bind；listener 复用现有 OneBot parser/action registry、Daemon `StoreReader` 与 action sink，不连接旧注入 runner。HTTP 每连接独立 worker，最多 16 个；header/body 读取共享 10 秒绝对 deadline，写响应限时 5 秒，worker 饱和返回 503。
+- 群文本请求仅执行一次 Daemon dispatch；HTTP 标准成功要求同请求强 native 成功和匹配的已持久 OneBot int32 ID。迟到或无持久投影按 unknown 返回，不自动重发。常驻私聊 UID 映射未证，私聊动作明确 unsupported。
+- 集成测试用 fake bridge 发出明确的强成功回执和合成 OneBot projection，经过真实 daemon pipe、actor、journal/store 与 HTTP `get_msg` 返回完整字段；这验证装配闭环，不证明当前 native receive 可提供 projection。当前 `daemon_client` 仍发 `onebot_projection: None`，登录昵称/账号和真实消息身份缺口也仍开放。
+- `cargo test -p caligo-core --lib onebot_http::tests::slow_header_reader_does_not_block_a_valid_request --locked --offline --target-dir target-harness -- --nocapture` PASS（1/1）；`cargo test -p caligo-core --lib --test daemon_chain --locked --offline --target-dir target-harness` PASS（core 44/44、daemon_chain 5/5）。Rust 编译含已有 bridge/core warnings，不影响退出；未跑 QQ 或 SnowLuma。
+- 本机 GitNexus CLI 工作树索引后 status 为 `up-to-date`、runner identity `current`、content drift `current`、无 incomplete reasons；索引报告 17,763 nodes / 47,711 edges / 145 clusters / 441 flows。流程入口丢弃、callee 分支截断与 reaching-defs cap 仍存在，查询缺边不作为无调用证明；`serve_http` 上游 LOW，`serve_parallel` 图返回 UNKNOWN/0 caller，源搜索和 Rust 装配核对确认新增调用位于 `serve_http`。
+- 没有可读取的 GitNexus MCP context server；本机 Docker Linux Node 24 容器内运行 descriptor-anchored `read-plan` 与 schema-2 snapshot 重算计划证据。计划路径/digest 匹配；39 个引用项均已比较，HEAD 和全局 dirty digest 因先前 R1–R3 提交与本轮实现变化而不同；没有超出引用清单的新增脏路径。依赖当前源码与提交历史重新核对，不改写计划体。
+- R5 HTTP 动作 listener 与慢读隔离只闭合离线入口和假 bridge 闭环。HTTP POST events、正向/反向 WS、真实应用互通、native receive projection、私聊 UID→UIN 及 R2/R3/R4 准入门继续开放；feat-006/产品状态保持 blocked / NOT READY。

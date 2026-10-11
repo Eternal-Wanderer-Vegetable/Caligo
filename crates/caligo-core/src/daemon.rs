@@ -151,6 +151,7 @@ pub struct Daemon {
     /// bridge 会话读唤醒:control 推入派发后置位,使其阻塞读立即返回
     /// (read 以 100ms 粒度轮询该标志)。
     pub(crate) bridge_wake: Arc<AtomicBool>,
+    api_request_seq: AtomicU64,
 }
 
 impl Daemon {
@@ -190,6 +191,7 @@ impl Daemon {
             test_fault_armed: AtomicBool::new(false),
             test_result_fault_armed: AtomicBool::new(false),
             bridge_wake: Arc::new(AtomicBool::new(false)),
+            api_request_seq: AtomicU64::new(1),
             config,
         }))
     }
@@ -227,6 +229,86 @@ impl Daemon {
     /// 当前连接代次(观测/LAB;每条新 bridge 连接递增)。
     pub fn connection_epoch(&self) -> u64 {
         self.epoch.load(Ordering::Relaxed)
+    }
+
+    /// Submit one OneBot action through the same durable actor→bridge path as
+    /// control clients. The request ID is generated once and never reused.
+    pub fn submit_onebot_text(
+        &self,
+        target: caligo_model::SessionKey,
+        text: String,
+        deadline_ms: u64,
+    ) -> Result<String, String> {
+        let sequence = self
+            .api_request_seq
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .map_err(|_| "OneBot request ID sequence exhausted")?;
+        let request_id = format!("onebot-{:016x}-{sequence}", self.core_nonce);
+        let mut actor = self
+            .actor
+            .lock()
+            .map_err(|_| "account actor lock poisoned")?;
+        let session = actor
+            .session()
+            .cloned()
+            .ok_or_else(|| "no active QQ session".to_string())?;
+        let mut request = SendTextRequest {
+            request_id: request_id.clone(),
+            session_identity: session,
+            target,
+            text,
+            payload_hash: 0,
+            deadline_ms,
+        };
+        request.payload_hash = SendTextRequest::compute_payload_hash(
+            request.session_identity.session_generation,
+            &request.target,
+            &request.text,
+            deadline_ms,
+        );
+        actor
+            .submit_send(request.clone())
+            .map_err(|error| format!("send request rejected: {error:?}"))?;
+        let wire_seq = actor
+            .dispatch_begin(&request_id)
+            .map_err(|error| format!("dispatch preparation failed: {error:?}"))?;
+        let timeout_ms = actor.remaining_timeout_ms(&request_id).unwrap_or_default();
+        self.dispatch_out
+            .lock()
+            .map_err(|_| "dispatch queue lock poisoned")?
+            .push(CoreToBridgeMsg::Dispatch {
+                request_id: request_id.clone(),
+                wire_seq,
+                timeout_ms,
+                target: serde_json::json!({
+                    "account": request.target.account.0,
+                    "kind": request.target.kind.to_string(),
+                    "peer": request.target.peer.0,
+                }),
+                text: request.text,
+            });
+        self.bridge_wake.store(true, Ordering::Relaxed);
+        Ok(request_id)
+    }
+
+    /// State for the same OneBot request, plus a durable public ID if its
+    /// matching projected event has reached MessageStore.
+    pub fn onebot_text_status(
+        &self,
+        request_id: &str,
+        target: &caligo_model::SessionKey,
+    ) -> Option<(caligo_model::ActionState, Option<i32>)> {
+        let actor = self.actor.lock().ok()?;
+        let state = actor.query_request(request_id)?;
+        let message_id = match &state {
+            caligo_model::ActionState::ConfirmedSuccess { native_id } => {
+                actor.onebot_message_id(target, &native_id.0)
+            }
+            _ => None,
+        };
+        Some((state, message_id))
     }
 
     /// 阻塞运行:双 accept 循环;停止后收尾 actor(stop→close)。

@@ -21,6 +21,11 @@ pub struct SendPayload {
 pub enum SendDisposition {
     /// Durable queue acceptance only; no OneBot message ID is known.
     AcceptedUnconfirmed,
+    /// A single dispatch ended without a stable public message identity.
+    /// Callers must report an unknown result and must not retry automatically.
+    DeliveryUnknown { reason: String },
+    /// This transport/target pair has no proven implementation path.
+    Unsupported { reason: String },
     /// Terminal receipt and persistent OneBot message ID are available.
     Confirmed { message_id: i32 },
 }

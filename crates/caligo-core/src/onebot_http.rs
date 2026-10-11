@@ -8,6 +8,8 @@ use std::net::{TcpListener, TcpStream};
 
 pub const DEFAULT_MAX_BODY: usize = 1024 * 1024;
 const MAX_HEADER: usize = 64 * 1024;
+const MAX_READ_DURATION: std::time::Duration = std::time::Duration::from_secs(10);
+const MAX_HTTP_WORKERS: usize = 16;
 
 #[derive(Debug, PartialEq, Eq)]
 struct RequestHead {
@@ -300,7 +302,8 @@ pub fn serve_one(
     access_token: Option<&str>,
     handler: impl FnOnce(&str, &Value, Value) -> ActionResponse,
 ) -> (String, String, Option<String>, Vec<u8>) {
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+    let read_deadline = std::time::Instant::now() + MAX_READ_DURATION;
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 4096];
     let end = loop {
@@ -316,6 +319,14 @@ pub fn serve_one(
             return (String::new(), String::new(), None, Vec::new());
         }
         let limit = (MAX_HEADER - buf.len()).min(tmp.len());
+        if !set_remaining_read_timeout(&stream, read_deadline) {
+            respond(
+                &mut stream,
+                400,
+                "{\"status\":\"failed\",\"retcode\":1440,\"wording\":\"请求头读取超时\"}",
+            );
+            return (String::new(), String::new(), None, Vec::new());
+        }
         match stream.read(&mut tmp[..limit]) {
             Ok(0) | Err(_) => {
                 respond(
@@ -424,6 +435,14 @@ pub fn serve_one(
     while buf.len() < total {
         let remaining = total - buf.len();
         let want = remaining.min(tmp.len());
+        if !set_remaining_read_timeout(&stream, read_deadline) {
+            respond(
+                &mut stream,
+                400,
+                "{\"status\":\"failed\",\"retcode\":1440,\"wording\":\"请求体读取超时\"}",
+            );
+            return (head.method, head.path, head.authorization, Vec::new());
+        }
         match stream.read(&mut tmp[..want]) {
             Ok(0) | Err(_) => {
                 respond(
@@ -461,6 +480,13 @@ pub fn serve_one(
     (head.method, head.path, head.authorization, body)
 }
 
+fn set_remaining_read_timeout(stream: &TcpStream, deadline: std::time::Instant) -> bool {
+    let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+        return false;
+    };
+    !remaining.is_zero() && stream.set_read_timeout(Some(remaining)).is_ok()
+}
+
 fn respond(stream: &mut TcpStream, code: u16, body: &str) {
     let reason = match code {
         200 => "OK",
@@ -472,6 +498,7 @@ fn respond(stream: &mut TcpStream, code: u16, body: &str) {
         413 => "Payload Too Large",
         406 => "Not Acceptable",
         431 => "Request Header Fields Too Large",
+        503 => "Service Unavailable",
         _ => "Error",
     };
     let response = format!(
@@ -480,6 +507,68 @@ fn respond(stream: &mut TcpStream, code: u16, body: &str) {
     );
     let _ = stream.write_all(response.as_bytes());
     let _ = stream.flush();
+}
+
+/// Concurrent, bounded HTTP accept loop. A slow reader occupies one worker
+/// only, and the listener refuses excess work instead of creating unbounded
+/// threads. On shutdown, remaining workers are joined after their read/action
+/// deadlines expire.
+pub fn serve_parallel(
+    listener: &TcpListener,
+    max_body: usize,
+    access_token: Option<&str>,
+    stop: impl Fn() -> bool,
+    handler: std::sync::Arc<dyn Fn(&str, &Value, Value) -> ActionResponse + Send + Sync>,
+) -> usize {
+    let mut served = 0usize;
+    let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    listener.set_nonblocking(true).ok();
+    loop {
+        let mut active = Vec::with_capacity(workers.len());
+        for worker in workers.drain(..) {
+            if worker.is_finished() {
+                let _ = worker.join();
+            } else {
+                active.push(worker);
+            }
+        }
+        workers = active;
+        if stop() {
+            break;
+        }
+        match listener.accept() {
+            Ok((stream, _)) if workers.len() >= MAX_HTTP_WORKERS => {
+                let mut stream = stream;
+                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+                respond(
+                    &mut stream,
+                    503,
+                    "{\"status\":\"failed\",\"retcode\":1503,\"wording\":\"HTTP workers are busy\"}",
+                );
+            }
+            Ok((stream, _)) => {
+                let handler = std::sync::Arc::clone(&handler);
+                let token = access_token.map(str::to_owned);
+                workers.push(std::thread::spawn(move || {
+                    let _ = serve_one(
+                        stream,
+                        max_body,
+                        token.as_deref(),
+                        |action, params, echo| handler(action, params, echo),
+                    );
+                }));
+                served += 1;
+            }
+            Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(_) => break,
+        }
+    }
+    for worker in workers {
+        let _ = worker.join();
+    }
+    served
 }
 
 /// Blocking HTTP accept loop shared by application assembly.
@@ -632,5 +721,45 @@ mod tests {
             ),
             Err(HeadError::BadRequest)
         );
+    }
+
+    #[test]
+    fn slow_header_reader_does_not_block_a_valid_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_stop = std::sync::Arc::clone(&stop);
+        let handler: std::sync::Arc<dyn Fn(&str, &Value, Value) -> ActionResponse + Send + Sync> =
+            std::sync::Arc::new(|action, params, echo| {
+                crate::onebot::handle_action(action, params, echo, &mut Sink, &Store)
+            });
+        let server = std::thread::spawn(move || {
+            serve_parallel(
+                &listener,
+                DEFAULT_MAX_BODY,
+                None,
+                move || server_stop.load(std::sync::atomic::Ordering::Relaxed),
+                handler,
+            )
+        });
+
+        let mut slow = TcpStream::connect(address).unwrap();
+        slow.write_all(b"GET /get_version_info HTTP/1.1\r\nHost: slow")
+            .unwrap();
+
+        let mut fast = TcpStream::connect(address).unwrap();
+        fast.set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        fast.write_all(b"GET /get_version_info HTTP/1.1\r\nHost: fast\r\n\r\n")
+            .unwrap();
+        fast.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = String::new();
+        fast.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(response.contains("\"protocol_version\":\"v11\""));
+
+        let _ = slow.shutdown(std::net::Shutdown::Both);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(server.join().unwrap(), 2);
     }
 }

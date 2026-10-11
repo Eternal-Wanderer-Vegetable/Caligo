@@ -762,6 +762,24 @@ impl AccountActor {
         self.requests.get(request_id).map(|e| e.state.clone())
     }
 
+    /// Resolve a public message ID for a send receipt only after the matching
+    /// native event projection has been durably indexed.
+    pub fn onebot_message_id(&self, target: &SessionKey, native_id: &str) -> Option<i32> {
+        let account_id = target.account.0.parse::<u64>().ok()?;
+        let chat_type = match target.kind {
+            SessionKind::Group => crate::message_store::ChatType::Group,
+            SessionKind::Private => crate::message_store::ChatType::Private,
+        };
+        self.message_store.as_ref()?.message_id_for_identity(
+            &crate::message_store::MessageIdentity {
+                account_id,
+                chat_type,
+                peer_id: target.peer.0.clone(),
+                native_id: native_id.to_string(),
+            },
+        )
+    }
+
     /// QueryRequest 的完整摘要(状态 + 代次 + 目标 + 等待策略)。
     pub fn request_summary(&self, request_id: &str) -> Option<RequestSummary> {
         self.requests.get(request_id).map(|e| RequestSummary {

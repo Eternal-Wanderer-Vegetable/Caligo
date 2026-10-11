@@ -3,8 +3,8 @@
 ## Current State
 
 **Last Updated:** 2026-10-12（Asia/Shanghai）
-**Baseline commit:** `0f5b483`；本次继续基于 `acc5723`，保留既有未跟踪文档 harness。
-**Active Feature:** N4-R3 回执期限与未知结果语义已离线补齐；CPB 稳定身份仍 unsupported。R2 native ABI/线程/排空门、R4 现场、R5 私聊身份及 R6 transports/应用验收未闭合，feat-005/006 仍 blocked。
+**Baseline commit:** `0f5b483`；本轮从 `b2b16cf` 继续，保留既有未跟踪文档 harness。
+**Active Feature:** N4-R3 回执期限与未知结果语义已离线补齐；R5 普通 caligod loopback HTTP 动作入口现已接入并通过 fake-daemon 闭环和慢读并发测试。CPB 稳定身份仍 unsupported；R2 native ABI/线程/排空门、R4 现场、R5 私聊身份与原生 projection，以及 R6 event/WS transports 和应用验收仍未闭合，feat-005/006 仍 blocked。
 **Scope:** 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)；完成可由离线证据支持的回执恢复行为，不越过 native 生命周期和现场准入门。
 
 ## 当前产品验收边界
@@ -17,7 +17,7 @@
 | 普通文本 wire/直调研究 | 共享 codec、golden、历史 r9/r18 送达与 errCode 通道 | 完整常驻链路、稳定关联与生产矩阵 |
 | consumer 接线 | `61f9d19` 的 cookie→响应槽→session→resident；离线合同有记录 | resident 现场响应回程与稳定存活 |
 | 常驻 bridge/core | `0f5b483` 的 Hello/attach、事件上行、gen 拒绝/幂等恢复、发送到 NativeStarted | 响应到达前实例损失，`consumer_result=0`，死因未定；现场硬停 |
-| OneBot/消息索引 | 解析、事件转换、HTTP、message_store 已有源码 | 全部目标 transport、真实应用互通、稳定消息关联与持续运行 |
+| OneBot/消息索引 | 解析、事件转换、持久索引与普通 caligod loopback HTTP 动作入口；合成群发送等待强回执和已持久 ID | 原生 receive projection、私聊 UID 映射、HTTP POST events/WS、真实应用互通、稳定消息关联与持续运行 |
 | @ 与其他消息段 | legacy-path @ 的 1006501/无 ack 负结果有记录 | Caligo 自有支持未通过；服务端/包/session 原因仍是假设 |
 
 **项目状态：NOT READY（生产 MVP 未验收）。** 不沿用台账的“代码 100% / 现场 80%”
@@ -31,7 +31,7 @@
 - R2 已基于磁盘文件与冻结样本同 hash（`63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`）静态确认 `1DB2(pair*)` release、`732A80` body 同步深复制及 `B75029` 输入释放；代码按代复用单个 service pair、body 调用后对称释放、去掉未使用的 self-string 副本。常驻与一次性 callback context 在发布前 PIN bridge image；resident 停止时本地关闭 callback 准入、等待已准入调用退出，隔离后迟到 callback 仅计数、不入槽。离线验证不证明 QQ consumer 停止、原生队列排空或最终业务回执持久化。callback manager 其它操作、owner/回调线程、QQ stop/cancel/drain/quiescence 和历史 AV 原因仍未证；产品仍 blocked。
 - R3 使用 core journal 作为常驻候选 wire sequence authority，见 ADR；CPB 只有弱文本候选，stable identity unsupported，同步 send 不能返回成功。
 - CPB identity follow-up 移除了 `cpbseq:{seq}` 伪 native ID。当前 decoder 不产生稳定 native ID 或 sender UID→UIN 映射；缺少这些证据时只计 `identity_blocked`，不向 resident 事件流发布。定向 gate 1/1 与 `init.ps1 -Mode all`（default 191/191、research 227/227）通过；详见 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。这关闭伪身份入口，不关闭 receive/OneBot 功能或 R4 门。
-- R5 core/store 子块现已接入：数值 account 的 Daemon 打开 sibling MessageStore；AccountActor 在 journal 后、ACK 前持久化显式 OneBot projection，重启时幂等重建索引，Daemon `StoreReader` 与 OneBot `get_msg` 共用该索引。daemon pipe 集成测试覆盖事件、完整 get_msg action 与字段；`daemon_client` 当前仍提供 `None` projection，不能因此声称 native receive 可查询。`.\init.ps1 -Mode all` 本次通过（docs 9/163 links，默认/research 所有 test binaries 成功退出）；普通 caligod HTTP listener、私聊 peer UID 映射、HTTP POST event/WS/反向 WS 与真实应用互通未完成，feat-006 仍 blocked。
+- R5 core/store 子块现已接入：数值 account 的 Daemon 打开 sibling MessageStore；AccountActor 在 journal 后、ACK 前持久化显式 OneBot projection，重启时幂等重建索引，Daemon `StoreReader` 与 OneBot `get_msg` 共用该索引。普通构建 `caligod` 现启动 loopback-only HTTP listener，共用动作层和 Daemon；标准群发送只在强 native 回执及匹配的持久 OneBot ID 均可读后成功，私聊映射未证时明确 unsupported。`daemon_client` 当前仍提供 `None` projection，不能声称 native receive 可查询；HTTP POST events、WS/反向 WS、私聊 peer UID 映射与真实应用互通未完成，feat-006 仍 blocked。
 - R4 现场完成门不满足；保留最新现场硬停、钩子路线否决、旧实例不可复用。
 - 部分 research/profile 文件仍有“实现未开始/阻塞 retCode”等旧描述。
   [docs 索引](docs/README.md) 指向后续台账；历史原文保留，能力 gate 未自动升级。
@@ -77,7 +77,7 @@
 
 ## Next / 下一工作入口
 
-按 [会话交接](session-handoff.md) 继续核对 callback manager/thread/drain 与历史 AV 证据，并从固定-hash CPB/native record 研究稳定 native ID 和 sender UID→UIN 映射。R5 core/store 接线已有离线证据；R6 transport 与真实客户端矩阵仍待办。强 identity 与现场生命周期门未满足前不开始 R4。旧实例、旧钩子和旧 unknown 请求均不能作为继续实验或自动重发的入口。
+按 [会话交接](session-handoff.md) 继续核对 callback manager/thread/drain 与历史 AV 证据，并从固定-hash CPB/native record 研究稳定 native ID 和 sender UID→UIN 映射。R5 core/store/普通 HTTP listener 已有离线证据；R6 event/WS transport 与真实客户端矩阵仍待办。强 identity 与现场生命周期门未满足前不开始 R4。旧实例、旧钩子和旧 unknown 请求均不能作为继续实验或自动重发的入口。
 
 ## 2026-10-11 N4 响应恢复执行
 
@@ -88,7 +88,7 @@
 - R2/R3 后续静态补齐：`1DB2` 与 `2632` 区分，service lease 在 probe→attach→adapter 间复用，body 用同一 QQ allocator pair 释放；`g3_session` 的空地址 `probe_ready(0)` 阻断已移除；同文记录重复/歧义 fixture 不消费发送登记。详细证据与验证见 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。
 - R2 生命周期 follow-up：`consumer_probe::leak_ctx` 在共享入口 PIN bridge image，覆盖 `native_resident` 与 `g3_send_run` 两条 callback delegate 路径；resident stop 增加代次隔离/in-flight callback 准入栅栏，并有界 join Caligo 自有 pump、receive、daemon worker；未登记 generation 走 orphan 计数且不入共享槽。consumer quarantine 7 项测试与 owned-worker join helper 单测通过；QQ dispatcher 的 stop/cancel/drain/quiescence、完整 manager ABI 与历史 AV 仍开放，不作为 R4 准入。
 - AV 后续复核：原始记录为 `caligo_bridge-c00aae2a8f83540a.exe` / `0xc0000005`，只看到前两项 `asyncrun` 测试通过；本次 research bridge lib 串行与默认并行各 69/69，通过但未复现，不能归因为已修复。无 WER 事件/dump 或调试器堆栈；忽略输出在 `target-harness/n4-av-serial-recheck.log`、`target-harness/n4-av-parallel-recheck.log`。
-- R5 typed target、动作层、append-only durable MessageStore 与分片安全 HTTP parser 已实现/离线测；core AccountActor/Daemon 的接收索引和 get_msg 已装配并有 pipe 集成证据。bridge projection 仍为 None，普通 caligod HTTP listener、私聊 peer UID 映射、HTTP POST event/WS/反向 WS 与真实应用互通未完成，feat-006 继续 blocked。
+- R5 typed target、动作层、append-only durable MessageStore、分片安全 HTTP parser 与普通 caligod HTTP listener 已实现/离线测；core AccountActor/Daemon 的接收索引和 get_msg 已装配并有 pipe 集成证据。HTTP 使用 loopback bind、有限 worker/read deadline；慢头客户端不阻塞另一请求。bridge projection 仍为 None，私聊 peer UID 映射、HTTP POST event/WS/反向 WS 与真实应用互通未完成，feat-006 继续 blocked。
 - 初次默认并行 full suite 的 allocator 资源断言受其它测试线程干扰；将断言计数改为当前测试线程局部后，`resident_lifecycle` 默认并行 18/18 通过。该结果不解释此前 0xc0000005。
 - 当前项目仍 NOT READY；R4 未启动，R6 应用验收未完成；下一步见本页 Next 与 `session-handoff.md`。
 

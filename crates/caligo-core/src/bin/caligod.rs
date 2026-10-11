@@ -8,6 +8,7 @@
 //! 用法:caligod --pipe-prefix <name> --journal <path> --baseline <id> --account <u>
 //!            [--expect-pid <n>] [--core-build <s>]
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Ctrl+C 处理器可见的进程级停止标志(与 control Stop 汇合)。
@@ -30,6 +31,7 @@ struct Args {
     /// 凭据文件:存在则读取(重启连续性),不存在则生成并写入(user-only)。
     /// 计划 §6.4:凭据不进 argv/日志 —— 文件是本地私有通道。
     token_file: Option<String>,
+    onebot_http_bind: String,
 }
 
 fn parse_args() -> Option<Args> {
@@ -42,6 +44,7 @@ fn parse_args() -> Option<Args> {
         expect_pid: 0,
         core_build: caligo_core::CORE_BUILD.to_string(),
         token_file: None,
+        onebot_http_bind: "127.0.0.1:5700".into(),
     };
     let mut i = 0;
     while i < args.len() {
@@ -57,13 +60,14 @@ fn parse_args() -> Option<Args> {
             "--expect-pid" => a.expect_pid = next(&mut i)?.parse().ok()?,
             "--core-build" => a.core_build = next(&mut i)?,
             "--token-file" => a.token_file = next(&mut i),
+            "--onebot-http-bind" => a.onebot_http_bind = next(&mut i)?,
             _ => {}
         }
         i += 1;
     }
     if a.pipe_prefix.is_empty() || a.journal.is_empty() || a.account.is_empty() {
         eprintln!(
-            "caligod --pipe-prefix <name> --journal <path> --baseline <id> --account <u> [--expect-pid <n>] [--core-build <s>]"
+            "caligod --pipe-prefix <name> --journal <path> --baseline <id> --account <u> [--expect-pid <n>] [--core-build <s>] [--onebot-http-bind 127.0.0.1:5700]"
         );
         return None;
     }
@@ -105,6 +109,14 @@ fn main() {
         };
         daemon.set_auth_token(&token);
     }
+    let listener = match caligo_core::onebot_server::bind_loopback(&args.onebot_http_bind) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("[caligod] OneBot HTTP bind failed: {error}");
+            std::process::exit(6);
+        }
+    };
+    let onebot_http_addr: SocketAddr = listener.local_addr().expect("bound listener address");
     let (bridge_name, control_name) = daemon.pipe_names();
     // 启动信息首行(JSON):管道名 + 认证 token。启动方读取后应立即吞掉该输出。
     println!(
@@ -113,8 +125,17 @@ fn main() {
             "bridge_pipe": bridge_name,
             "control_pipe": control_name,
             "auth_token": daemon.auth_token(),
+            "onebot_http": onebot_http_addr,
         })
     );
+
+    let onebot_server = {
+        let d = daemon.clone();
+        let token = daemon.auth_token();
+        std::thread::spawn(move || {
+            caligo_core::onebot_server::serve_http(d, &listener, Some(&token))
+        })
+    };
 
     // SAFETY: 处理器为进程生存期静态 fn;仅置原子标志。
     unsafe {
@@ -147,5 +168,7 @@ fn main() {
             std::process::exit(5);
         }
     }
+    let served = onebot_server.join().expect("OneBot HTTP thread panicked");
+    println!("[caligod] OneBot HTTP 已停止，共处理 {served} 个请求");
     println!("[caligod] stopped(closed;journal 保留)");
 }

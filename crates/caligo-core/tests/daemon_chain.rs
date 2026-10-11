@@ -6,6 +6,8 @@
 //!   初始化(会话幂等绑定);限额/拒绝经明确消息呈现;
 //! - journal 重开:请求终态与事件均可恢复(与 recovery_contract 互补)。
 
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -170,7 +172,6 @@ fn spawn_bridge_agent(daemon: Arc<Daemon>, stop: Arc<AtomicBool>) -> std::thread
                     }
                     assert_eq!(resident.request_state(&request_id), Some("done"));
                     native_sends += 1;
-                    let _ = target;
                     for notice in resident.take_results() {
                         let msg = match notice {
                             caligo_bridge::resident::ResidentNotice::NativeStarted {
@@ -179,17 +180,50 @@ fn spawn_bridge_agent(daemon: Arc<Daemon>, stop: Arc<AtomicBool>) -> std::thread
                             caligo_bridge::resident::ResidentNotice::Outcome(
                                 caligo_bridge::resident::SendOutcome::Success {
                                     request_id,
-                                    native_id: _,
+                                    native_id,
                                 },
                             ) => BridgeMsg::SendResult {
                                 request_id,
                                 outcome: OutcomePayload::Success {
-                                    native_id: format!("NM-{native_sends}"),
+                                    native_id: native_id.clone(),
                                 },
                             },
                             other => panic!("unexpected resident notice: {other:?}"),
                         };
                         bridge.send(&msg).unwrap();
+                        if let BridgeMsg::SendResult {
+                            request_id: _,
+                            outcome: OutcomePayload::Success { native_id },
+                        } = msg
+                        {
+                            let account = target["account"].as_str().unwrap();
+                            let peer = target["peer"].as_str().unwrap().parse::<u64>().unwrap();
+                            bridge
+                                .send(&BridgeMsg::Event {
+                                    event: caligo_core::ipc::EventPayload {
+                                        event_seq: native_sends,
+                                        session_generation: 1,
+                                        session: target.clone(),
+                                        direction: "self_sent".into(),
+                                        sender: account.into(),
+                                        native_id: native_id.clone(),
+                                        text: text.clone(),
+                                        platform_time: Some(1_791_621_805),
+                                        onebot_projection: Some(
+                                            caligo_model::OneBotMessageProjection {
+                                                peer_id: peer,
+                                                sender_user_id: account.parse().unwrap(),
+                                                real_id: native_sends as i32,
+                                                time: 1_791_621_805,
+                                                sender_nickname: Some("Caligo test".into()),
+                                            },
+                                        ),
+                                        observed_at_unix_ms: 1_791_621_805_000,
+                                        source: "recv".into(),
+                                    },
+                                })
+                                .unwrap();
+                        }
                     }
                 }
                 Ok(
@@ -219,6 +253,19 @@ fn spawn_bridge_agent(daemon: Arc<Daemon>, stop: Arc<AtomicBool>) -> std::thread
         assert_eq!(report.listener_removed, Some(true));
         native_sends
     })
+}
+
+fn http_request(address: SocketAddr, token: &str, method: &str, path: &str, body: &str) -> String {
+    let mut stream = TcpStream::connect(address).unwrap();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.as_bytes().len()
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
 }
 
 #[test]
@@ -430,6 +477,79 @@ fn event_roundtrip_through_pipe_and_journal() {
         caligo_core::runtime::AccountActor::open(&journal, RuntimeConfig::default()).unwrap();
     assert_eq!(report.recovered_events, 1);
     assert_eq!(actor2.pending_event_queue_len(), 0);
+}
+
+#[test]
+fn onebot_http_uses_daemon_receipt_and_persisted_message_id() {
+    let (daemon, runner, _) = start_daemon("onebot-http");
+    let stop_agent = Arc::new(AtomicBool::new(false));
+    let agent = spawn_bridge_agent(daemon.clone(), stop_agent.clone());
+    let listener = caligo_core::onebot_server::bind_loopback("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let http_daemon = daemon.clone();
+    let http_thread = std::thread::spawn(move || {
+        caligo_core::onebot_server::serve_http(http_daemon, &listener, Some("lab-token"))
+    });
+
+    let status_deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        let response = http_request(address, "lab-token", "GET", "/get_status", "");
+        let body = response.split_once("\r\n\r\n").unwrap().1;
+        let value: serde_json::Value = serde_json::from_str(body).unwrap();
+        if value["status"] == "ok" {
+            assert_eq!(value["data"]["online"], true);
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < status_deadline,
+            "bridge never became active"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let private = http_request(
+        address,
+        "lab-token",
+        "POST",
+        "/send_private_msg",
+        r#"{"user_id":9988,"message":"private"}"#,
+    );
+    let private: serde_json::Value =
+        serde_json::from_str(private.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(private["retcode"], caligo_core::onebot::RET_UNSUPPORTED);
+    assert_eq!(private["data"], serde_json::Value::Null);
+
+    let sent = http_request(
+        address,
+        "lab-token",
+        "POST",
+        "/send_group_msg",
+        r#"{"group_id":778899,"message":"http-lab-send"}"#,
+    );
+    let sent: serde_json::Value =
+        serde_json::from_str(sent.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(sent["status"], "ok", "{sent}");
+    assert_eq!(sent["data"]["message_id"], 1);
+
+    let fetched = http_request(address, "lab-token", "GET", "/get_msg?message_id=1", "");
+    let fetched: serde_json::Value =
+        serde_json::from_str(fetched.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(fetched["data"]["message_type"], "group");
+    assert_eq!(fetched["data"]["message_id"], 1);
+    assert_eq!(fetched["data"]["real_id"], 1);
+    assert_eq!(fetched["data"]["sender"]["user_id"], 10001);
+    assert_eq!(fetched["data"]["message"], "http-lab-send");
+    assert_eq!(fetched["data"]["time"], 1_791_621_805);
+
+    let mut control = connect_control(&daemon);
+    assert!(matches!(
+        control.request(ControlMsg::Stop {}).unwrap(),
+        CoreToControlMsg::Stopped { .. }
+    ));
+    stop_agent.store(true, Ordering::Relaxed);
+    agent.join().unwrap();
+    runner.join().unwrap().unwrap();
+    assert!(http_thread.join().unwrap() >= 4);
 }
 
 struct NoopSendSink;

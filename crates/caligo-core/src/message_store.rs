@@ -269,6 +269,12 @@ impl MessageStore {
         self.by_id.get(&message_id)
     }
 
+    /// Resolve a OneBot ID only for an identity already persisted from a
+    /// complete native message projection.
+    pub fn message_id_for_identity(&self, identity: &MessageIdentity) -> Option<i32> {
+        self.by_identity.get(identity).copied()
+    }
+
     pub fn len(&self) -> usize {
         self.by_id.len()
     }

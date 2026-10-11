@@ -95,6 +95,12 @@ fn dispatch_send(
             "请求已受理但尚无稳定消息身份；结果未知，禁止自动重发",
             echo,
         ),
+        Ok(SendDisposition::DeliveryUnknown { reason }) => {
+            ActionResponse::failed(RET_NOT_CONFIRMED, &reason, echo)
+        }
+        Ok(SendDisposition::Unsupported { reason }) => {
+            ActionResponse::failed(RET_UNSUPPORTED, &reason, echo)
+        }
         Err(e) => ActionResponse::failed(RET_NOT_READY, &e, echo),
     }
 }
@@ -363,6 +369,45 @@ mod tests {
         );
         assert_eq!(r.retcode, RET_NOT_CONFIRMED);
         assert_eq!(r.data, Value::Null);
+    }
+
+    #[test]
+    fn unsupported_and_unknown_sends_keep_distinct_public_results() {
+        struct ResultSink(SendDisposition);
+        impl SendSink for ResultSink {
+            fn send(&mut self, _: &SendPayload) -> Result<SendDisposition, String> {
+                Ok(self.0.clone())
+            }
+        }
+        let payload = serde_json::json!({"group_id":1,"message":"x"});
+        let unsupported = handle_action(
+            "send_private_msg",
+            &serde_json::json!({"user_id":2,"message":"x"}),
+            Value::Null,
+            &mut ResultSink(SendDisposition::Unsupported {
+                reason: "private mapping unavailable".into(),
+            }),
+            &FakeStore,
+        );
+        assert_eq!(unsupported.retcode, RET_UNSUPPORTED);
+        assert_eq!(
+            unsupported.wording.as_deref(),
+            Some("private mapping unavailable")
+        );
+        assert_eq!(unsupported.data, Value::Null);
+
+        let unknown = handle_action(
+            "send_group_msg",
+            &payload,
+            Value::Null,
+            &mut ResultSink(SendDisposition::DeliveryUnknown {
+                reason: "receipt deadline elapsed".into(),
+            }),
+            &FakeStore,
+        );
+        assert_eq!(unknown.retcode, RET_NOT_CONFIRMED);
+        assert_eq!(unknown.wording.as_deref(), Some("receipt deadline elapsed"));
+        assert_eq!(unknown.data, Value::Null);
     }
 
     #[test]

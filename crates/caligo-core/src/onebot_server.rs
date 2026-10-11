@@ -1,0 +1,142 @@
+//! Normal-build OneBot HTTP assembly for caligod.
+//!
+//! This layer translates a standard OneBot action into exactly one durable
+//! AccountActor dispatch and waits for both a strong native receipt and the
+//! matching persisted OneBot projection before reporting send success.
+
+use crate::daemon::Daemon;
+use crate::onebot::handle_action;
+use crate::onebot_http::{serve_parallel, DEFAULT_MAX_BODY};
+use caligo_model::onebot_traits::{SendDisposition, SendPayload, SendSink, SendTarget};
+use caligo_model::{ActionState, SessionKey, SessionKind};
+use std::net::TcpListener;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+const SEND_DEADLINE_MS: u64 = 30_000;
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Send adapter shared by all HTTP actions. Private targets remain explicit
+/// unsupported until the native UID mapping is independently proven.
+pub struct DaemonSendSink {
+    daemon: Arc<Daemon>,
+}
+
+impl DaemonSendSink {
+    pub fn new(daemon: Arc<Daemon>) -> Self {
+        Self { daemon }
+    }
+}
+
+impl SendSink for DaemonSendSink {
+    fn send(&mut self, payload: &SendPayload) -> Result<SendDisposition, String> {
+        let group_id = match &payload.target {
+            SendTarget::Group { group_id } => *group_id,
+            SendTarget::Private { .. } => {
+                return Ok(SendDisposition::Unsupported {
+                    reason: "常驻私聊 UID 映射尚未证实，当前明确不支持私聊发送".into(),
+                })
+            }
+        };
+        let account = self.daemon.config.account.clone();
+        let target = SessionKey::new(account, SessionKind::Group, group_id.to_string());
+        let request_id = self.daemon.submit_onebot_text(
+            target.clone(),
+            payload.text.clone(),
+            SEND_DEADLINE_MS,
+        )?;
+        let deadline = Instant::now() + Duration::from_millis(SEND_DEADLINE_MS + 1_000);
+        loop {
+            if let Some((state, message_id)) = self.daemon.onebot_text_status(&request_id, &target)
+            {
+                match state {
+                    ActionState::ConfirmedSuccess { .. } => {
+                        if let Some(message_id) = message_id {
+                            return Ok(SendDisposition::Confirmed { message_id });
+                        }
+                    }
+                    ActionState::ConfirmedFailure { reason } => {
+                        return Err(format!("native send rejected: {reason}"));
+                    }
+                    ActionState::DeliveryUnknown => {
+                        return Ok(SendDisposition::DeliveryUnknown {
+                            reason: "发送结果未知；未自动重发，请先查询现有记录".into(),
+                        });
+                    }
+                    ActionState::CancelledUnsent => {
+                        return Err("请求已确认未发送".into());
+                    }
+                    ActionState::Accepted
+                    | ActionState::Queued
+                    | ActionState::DispatchIntent
+                    | ActionState::NativeStarted
+                    | ActionState::AcceptedUnconfirmed => {}
+                }
+            }
+            if Instant::now() >= deadline {
+                return Ok(SendDisposition::DeliveryUnknown {
+                    reason:
+                        "等待 native identity 与持久 OneBot message_id 超时；结果未知，未自动重发"
+                            .into(),
+                });
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+}
+
+/// Blocking normal-build listener. The bind address is chosen and validated
+/// by caligod; this function shares the existing action registry and parser.
+pub fn serve_http(
+    daemon: Arc<Daemon>,
+    listener: &TcpListener,
+    access_token: Option<&str>,
+) -> usize {
+    let stop = daemon.stop_flag();
+    let handler_daemon = Arc::clone(&daemon);
+    let handler: Arc<
+        dyn Fn(&str, &serde_json::Value, serde_json::Value) -> crate::onebot::ActionResponse
+            + Send
+            + Sync,
+    > = Arc::new(move |action, params, echo| {
+        let mut sink = DaemonSendSink::new(Arc::clone(&handler_daemon));
+        handle_action(action, params, echo, &mut sink, handler_daemon.as_ref())
+    });
+    serve_parallel(
+        listener,
+        DEFAULT_MAX_BODY,
+        access_token,
+        move || stop.load(std::sync::atomic::Ordering::Relaxed),
+        handler,
+    )
+}
+
+/// Bind only to a loopback address so OneBot credentials are not exposed to a
+/// network interface by an accidental command-line setting.
+pub fn bind_loopback(address: &str) -> std::io::Result<TcpListener> {
+    let address = address.parse::<std::net::SocketAddr>().map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, error.to_string())
+    })?;
+    if !address.ip().is_loopback() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "OneBot HTTP must bind to a loopback address",
+        ));
+    }
+    TcpListener::bind(address)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listener_accepts_ephemeral_loopback_and_rejects_external_bind() {
+        let listener = bind_loopback("127.0.0.1:0").unwrap();
+        assert!(listener.local_addr().unwrap().ip().is_loopback());
+        assert_eq!(
+            bind_loopback("192.0.2.1:0").unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+}
