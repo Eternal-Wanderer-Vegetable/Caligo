@@ -937,3 +937,36 @@ N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。
 - invoker:ctx 从 this+0x10 取(魔数自检),字符串 RPM-self 读,JSONL 追加;
 - 全测试绿。**字段重试待用户明确批准**(今日已两实例死亡;修正后的
   manager 语义与 L1 布局均有直接反汇编依据,但 3fce5e 门内部逻辑未全解)。
+## 2026-10-11(三十):消费者实验 r2 —— 契约安全,响应路由缺口定位
+
+### r2(修正版 delegate,n3res7,PID 25072 = 用户重启后的 bot 宿主)
+- **零崩溃**(r1 的 manager 损坏问题修正生效);N3R31-CONSUMER 送达
+  (服务器 seq 400714);**consumer 未被调用**(capture 无 consumer_result)。
+- 结论:cb delegate 的 manager/invoker 契约处理正确(克隆 + 门查询安全),
+  但**响应到 73bd6c 的路由需要上游注册** —— 732A80 内建的 dispatch 对象
+  只是传递结构;消费者→请求的关联(按 cookie/msgUid)发生在更上层的
+  发送路径(25757ea → 182578e18 → 732A80),裸调 732A80 绕过了它。
+  与 scope 文档"cbCfg/9bef60 构造路径才是消费者安装点"的修正一致。
+
+### r1 教训的完整闭环
+- 0x72D596 = std::function 式管理器(op 0/1 = 克隆/销毁写 {manager,
+  invoker} 对;op 2/3 = no-op);0x72D5C8 = 空调用 terminate 哨兵;
+- 3fce5e 门 = 调 manager(NULL, op=4, NULL, 0, &out16, 0) 后查 out[0]
+  非零 —— **门查询是 manager 的 op=4 契约**;
+- 布局 L1({storage0, storage1, manager, invoker})下 r1 崩溃 =
+  处理器误放 manager 槽 → 克隆损坏;r2 修正后零崩溃,契约处理验证通过。
+
+### 方法论修正(重要)
+- 昨日"8112 提权不可注入"诊断 = **十进制→hex 换算错误**(wrapper 实际
+  base 0x7FFDEDA00000,当时按错误地址读 → 299 误判提权)。进制转换
+  程序化;PowerShell Modules 枚举与 RPM 交叉验证。
+- QQ 进程枚举时 PowerShell Modules 的"无 wrapper"需区分枚举失败与
+  真 absence(本轮 25072 就在被漏掉的进程中)。
+
+### 下一步(纯离线)
+- 找 182578e18 的反编译/反汇编中的 registry insert(cookie → 消费者);
+  或 95d4e6 的 9 个调用方函数中定位真正的注册调用;
+- 拿到注册调用后:消费者实验 v3 = 裸调 732A80 前**手动执行注册调用**
+  (cookie + 我们的 delegate)→ 响应路由闭环。
+- 当前状态:25072 存活,OneBot 正常;n3res7 驻留其内(仅持 leaked ctx,
+  无活动线程)。

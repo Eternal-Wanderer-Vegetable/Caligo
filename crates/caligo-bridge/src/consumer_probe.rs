@@ -118,33 +118,44 @@ fn append_line(ctx: &ConsumerCtx, line: &str) {
 /// QQ 线程调用;不得 unwind。
 pub unsafe extern "system" fn consumer_dtor(_ctx: *mut c_void) {}
 
-/// manager(QQ 在请求建立时以 op=0 克隆本 delegate;契约 = 0x72D596):
-/// `(dest=rcx, op=edx, ...)`。op 0/1 = 向 dest 复制完整 4 qword
-/// (manager/invoker/storage);其他 op = no-op。定长写,零读零分配。
+/// manager(QQ 侧 delegate 管理器;契约 = 0x72D596 反编译 + 3fce5e 门查询):
+/// `(dest=rcx, op=edx, src=r8, size=r9, out=[rsp+28h])`。
+/// - op=0(克隆,submit 时):向 dest 写 {manager, invoker} 对(空管理器
+///   同款;16B = size);
+/// - op=4(门查询,3fce5e:dest/src/size 全零,arg5=&out16):向 out 写
+///   非零({invoker, manager})—— 门 = out[0] != 0;
+/// - 其他 op(含销毁):no-op(storage 为 leaked)。
+/// 定长写,零读零分配。
 ///
 /// # Safety
-/// QQ 线程调用;dest 必须为 QQ 提供的 ≥32B 缓冲;不得 unwind。
+/// QQ 线程调用;dest/out 为 QQ 提供缓冲;不得 unwind。
 pub unsafe extern "system" fn consumer_manager(
     dest: *mut c_void,
     op: u32,
-    _a3: *mut c_void,
-    _a4: usize,
-    _a5: *mut c_void,
+    _src: *mut c_void,
+    _size: usize,
+    out: *mut c_void,
 ) {
-    if op > 1 || dest.is_null() {
-        return;
-    }
-    // SAFETY: dest 为 QQ 分配的 delegate 缓冲(≥32B,与空实现写 2 qword
-    // 同级别);我们写满 4 qword(本函数自身的地址组 + ctx 在 src 侧不变,
-    // 故直接重写本 delegate 的标准形态)。
+    // SAFETY: dest/out 为 QQ 提供的 delegate/查询缓冲(空管理器同类操作
+    // 写 2 qword,我们同级别);定长写。
     unsafe {
-        let d = dest as *mut u64;
-        core::ptr::write(d, consumer_manager as usize as u64);
-        core::ptr::write(d.add(1), consumer_invoke as usize as u64);
-        // storage:ctx 指针 + 标记(与 build_cb 一致;从不可变来源取)。
-        let ctx = STORAGE_CTX.load(std::sync::atomic::Ordering::Acquire);
-        core::ptr::write(d.add(2), ctx);
-        core::ptr::write(d.add(3), 1);
+        match op {
+            0 => {
+                if !dest.is_null() {
+                    let d = dest as *mut u64;
+                    core::ptr::write(d, consumer_manager as usize as u64);
+                    core::ptr::write(d.add(1), consumer_invoke as usize as u64);
+                }
+            }
+            4 => {
+                if !out.is_null() {
+                    let o = out as *mut u64;
+                    core::ptr::write(o, consumer_invoke as usize as u64);
+                    core::ptr::write(o.add(1), consumer_manager as usize as u64);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -187,17 +198,19 @@ pub unsafe extern "system" fn consumer_invoke(
     }
 }
 
-/// 从 invoker 首参(delegate 起点)恢复 ctx:读 this+0x10(storage0 =
-/// ctx 指针);魔数自检;失败用进程级 fallback。
+/// 从 invoker 首参(delegate 起点)恢复 ctx:依次尝试 this+0/+8/+0x10
+/// 处的指针(魔数自检);失败用进程级 fallback(仍写诊断行)。
 unsafe fn resolve_ctx(this_addr: usize) -> &'static ConsumerCtx {
     unsafe {
         if this_addr > 0x10000 {
-            if let Some(p) = safe_read_qword(this_addr + 0x10) {
-                let p = p as usize;
-                if p > 0x10000 {
-                    if let Some(m) = safe_read_qword(p + 16) {
-                        if m == CTX_MAGIC {
-                            return &*(p as *const ConsumerCtx);
+            for off in [0usize, 8, 0x10] {
+                if let Some(p) = safe_read_qword(this_addr + off) {
+                    let p = p as usize;
+                    if p > 0x10000 {
+                        if let Some(m) = safe_read_qword(p + 16) {
+                            if m == CTX_MAGIC {
+                                return &*(p as *const ConsumerCtx);
+                            }
                         }
                     }
                 }
