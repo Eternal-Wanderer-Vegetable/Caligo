@@ -887,18 +887,18 @@ fn encode_send_msg(
     // @ 元素构造(v6;N3R37 SnowLuma 送达件堆转储 0x21ba203c387 字节级对齐):
     // elem(text) = {1: {1: "@<显示名> "(含 @ 前缀 + 尾空格),
     //   3: attr13B{00,01,len = at段 UTF-16 units,00,uin_be32,00,00},
-    //   12: {3: 2, 4: uin, 9: peerUid} —— 无 f5/f11(r20 版多加,已删)}}。
-    // 显示名 = 文本首词(调用方传被 @ 人昵称;服务器是否校验显示名待定)。
+    //   12: {3: 2, 4: uin, 5: 0, 9: peerUid}(主账号 CAPWIRE47 记录实测;
+    //   N3R37/SnowLuma 异路径无 f5 —— 已回滚)}}。
+    // at 文本 = "@显示名" 无尾空格(空格在 rest 头,主账号实测)。
     let mut at_parts: Option<(Vec<u8>, Vec<u8>)> = None;
     if let Some(atuid) = at_uid {
         if let Some(sp) = text.find(' ') {
             let (at_name, rest) = text.split_at(sp);
-            let at_text = format!("@{at_name} ");
+            let at_text = format!("@{at_name}");
             let mut at_txt = Vec::new();
             pb_len_field(&mut at_txt, 1, at_text.as_bytes());
             let mut attr = vec![0u8, 1u8];
-            // len = at 段 UTF-16 code-unit 数(N3R37 实测:18 = 18 units,
-            // 字节数 42 ≠ 18;BMP 内 chars().count() == UTF-16 units)。
+            // len = at 段 UTF-16 code-unit 数(主账号实测 "@Stella" = 7)。
             attr.extend_from_slice(&(at_text.chars().count() as u32).to_be_bytes());
             attr.push(0u8);
             attr.extend_from_slice(&at_uin.to_be_bytes());
@@ -907,6 +907,7 @@ fn encode_send_msg(
             let mut f12 = Vec::new();
             pb_varint_field(&mut f12, 3, 2);
             pb_varint_field(&mut f12, 4, at_uin as u64);
+            pb_varint_field(&mut f12, 5, 0);
             pb_len_field(&mut f12, 9, atuid.as_bytes());
             pb_len_field(&mut at_txt, 12, &f12);
             let mut rest_txt = Vec::new();
@@ -932,24 +933,24 @@ fn encode_send_msg(
             return w;        }
     }
     if let Some((at_txt, rest_txt)) = &at_parts {
-        // v9:CH = N3R37 记录实测 9 键 {1:82, 3:1, 4:divSeq, 5:seq, 6:ts,
-        // 7:1, 29:395247, 30:1, 32:r64} —— **有 f3:1、无 f12**(r16 老规格
-        // 的 f12/divSeq|1<<63 与"无 f3"均被真实件否定;f5 = 消息 seq)。
+        // v13:CH = 10 键 {1:82, 4:divSeq, 5:seq, 6:ts, 7:1, 12:divSeq|1<<63,
+        // 29:395247, 30:1, 32:r64} —— 主账号 CAPWIRE47 记录实测**含 f12**
+        // (N3R37 异路径 9 键无 f12;两路径 CH 不同,r16 规格对本路径正确)。
         let div_seq = random as u64;
         let mut ch = Vec::new();
         pb_varint_field(&mut ch, 1, 82);
-        pb_varint_field(&mut ch, 3, 1);
         pb_varint_field(&mut ch, 4, div_seq);
         pb_varint_field(&mut ch, 5, client_seq as u64);
         pb_varint_field(&mut ch, 6, ts);
         pb_varint_field(&mut ch, 7, 1);
+        pb_varint_field(&mut ch, 12, div_seq | (1u64 << 63));
         pb_varint_field(&mut ch, 29, 395247);
         pb_varint_field(&mut ch, 30, 1);
         let mut r64 = unsafe { core::arch::x86_64::_rdtsc() };
         r64 ^= r64 >> 32;
         pb_varint_field(&mut ch, 32, r64);
         pb_len_field(&mut w, 2, &ch);
-        // Rich.Attr(真实 @ 件必有;f3 = divSeq 与真实件同源)。
+        // Rich.Attr(真实 @ 件必有;f3 = divSeq;f9 = "宋体" 主账号实测)。
         {
             let mut attr = Vec::new();
             pb_varint_field(&mut attr, 1, 0);
@@ -960,28 +961,47 @@ fn encode_send_msg(
             pb_varint_field(&mut attr, 6, 0);
             pb_varint_field(&mut attr, 7, 134);
             pb_varint_field(&mut attr, 8, 2);
-            pb_len_field(&mut attr, 9, &[0xe5, 0xaa, 0x92, 0xe4, 0xbd, 0x93]);
+            pb_len_field(&mut attr, 9, &[0xe5, 0xae, 0x8b, 0xe4, 0xbd, 0x93]);
             pb_len_field(&mut rich, 1, &attr);
         }
-        // @ 场景 elem37(v7 = N3R37 真实 88B;替换 r28 125B 仿件 —— 其 f19
-        // 带 f1:6 与多余全零字段,与真实件结构不符)。
+        {
+            let mut attr = Vec::new();
+            pb_varint_field(&mut attr, 1, 0);
+            pb_varint_field(&mut attr, 2, ts);
+            pb_varint_field(&mut attr, 3, div_seq);
+            pb_varint_field(&mut attr, 4, 0);
+            pb_varint_field(&mut attr, 5, 10);
+            pb_varint_field(&mut attr, 6, 0);
+            pb_varint_field(&mut attr, 7, 134);
+            pb_varint_field(&mut attr, 8, 2);
+            pb_len_field(&mut attr, 9, &[0xe5, 0xae, 0x8b, 0xe4, 0xbd, 0x93]);
+            pb_len_field(&mut rich, 1, &attr);
+        }
+        // @ 场景 elem37(v13 = 回滚 r28 125B:f19 带 f1:6 是本路径真实形状,
+        // CAPWIRE47 记录实测 08 06 开头;v7 按 N3R37 异路径换成无 f1 版系误判)。
         const AT_ELEM37: &[u8] = &[
-            0xaa, 0x02, 0x55, 0x60, 0x07, 0x9a, 0x01, 0x50, 0x20, 0xcb,
-            0x50, 0xc8, 0x01, 0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00, 0x90, 0x02,
-            0x00, 0x98, 0x03, 0x00, 0xa0, 0x03, 0x00, 0xb0, 0x03, 0x00, 0xc0, 0x03,
-            0x00, 0xd0, 0x03, 0x00, 0x8a, 0x04, 0x04, 0x08, 0x02, 0x10, 0x27, 0x90,
-            0x04, 0x80, 0x01, 0xb8, 0x04, 0x00, 0xc0, 0x04, 0x00, 0xca, 0x04, 0x00,
-            0xf8, 0x04, 0xcc, 0x84, 0x08, 0x80, 0x05, 0x42, 0x88, 0x05, 0x00, 0xd2,
-            0x05, 0x00, 0xd8, 0x06, 0xe8, 0xb9, 0x18, 0xa0, 0x07, 0xbf, 0xba, 0xcf,
-            0x87, 0x9f, 0xf2, 0xd7, 0xba, 0x4d,
+            0xaa, 0x02, 0x7a, 0x08, 0x00, 0x50, 0x00, 0x60, 0x00, 0x68, 0x00, 0x80,
+            0x01, 0x00, 0x88, 0x01, 0x00, 0x9a, 0x01, 0x69, 0x08, 0x06, 0x20, 0xcb,
+            0x50, 0x78, 0x00, 0xc8, 0x01, 0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00,
+            0x90, 0x02, 0x00, 0xc8, 0x02, 0x00, 0x98, 0x03, 0x00, 0xa0, 0x03, 0x00,
+            0xb0, 0x03, 0x00, 0xb8, 0x03, 0x00, 0xc0, 0x03, 0x00, 0xd0, 0x03, 0x00,
+            0xe8, 0x03, 0x00, 0x8a, 0x04, 0x02, 0x10, 0x11, 0x90, 0x04, 0x80, 0x01,
+            0xb8, 0x04, 0x00, 0xc0, 0x04, 0x00, 0xca, 0x04, 0x00, 0xf8, 0x04, 0xcc,
+            0x84, 0x08, 0x80, 0x05, 0x4d, 0x88, 0x05, 0x00, 0x80, 0x06, 0x00, 0xb2,
+            0x06, 0x0a, 0x0a, 0x08, 0x08, 0x00, 0x10, 0x00, 0x18, 0x00, 0x20, 0x00,
+            0xd8, 0x06, 0x8b, 0x95, 0x18, 0xa0, 0x07, 0xcf, 0xfe, 0xe3, 0xc3, 0xee,
+            0xdd, 0xc9, 0xa1, 0xef, 0x01,
         ];
-        // v7 顺序(= N3R37 全元素):Attr → at → rest → 元素9 → elem37 → 元素16
-        // (本账号真实值 {2:"Stella",3:1,5:0,7:"AI朋友"};v6 误删元素16)。
-        pb_len_field(&mut rich, 2, at_txt);
-        pb_len_field(&mut rich, 2, rest_txt);
-        // 元素 9(6B 固定):真实 @ 消息携带(普通文本可省)。
-        pb_len_field(&mut rich, 2, &[0x4a, 0x04, 0x08, 0x00, 0x40, 0x01]);
+        // v13 顺序(= 主账号实测):Attr → elem37 → 元素9 → at → Rich.f11=0
+        // → rest → 元素16(r28 顺序本来正确;v6/v7 按 N3R37 重排系误判)。
         pb_len_field(&mut rich, 2, AT_ELEM37);
+        // 元素 9(6B 固定;主账号件 f1 = 动态 id,N3R37 = 0 —— 0 可过)。
+        pb_len_field(&mut rich, 2, &[0x4a, 0x04, 0x08, 0x00, 0x40, 0x01]);
+        pb_len_field(&mut rich, 2, at_txt);
+        // Rich.f11 = 0(主账号件 at 与 rest 之间携带,异路径无 —— 补齐)。
+        pb_varint_field(&mut rich, 11, 0);
+        pb_len_field(&mut rich, 2, rest_txt);
+        // 元素16(发送者信息;本账号真实值,N3R37 记录)。
         pb_len_field(&mut rich, 16, &[
             0x12, 0x06, 0x53, 0x74, 0x65, 0x6c, 0x6c, 0x61, 0x18, 0x01, 0x20, 0x00,
             0x3a, 0x08, 0x41, 0x49, 0xe6, 0x9c, 0x8b, 0xe5, 0x8f, 0x8b,

@@ -1280,3 +1280,38 @@ N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。
 - 流程:用户在主账号 GUI 发 @ 哨兵消息(CAPWIRE47)→ 扫 33736 →
   按 protobuf 顶层形状分类各命中 → 取 wire body 与我们 v9 形状比对;
 - 前置:bot 实例重启(OneBot 恢复),重注前先 plain 基线;**不再装钩子**。
+## 2026-10-11(三十九):CAPWIRE47 主账号真体取证;v13 仍拒;@ 谜题终局判定
+
+### 主账号(33736,732A80 真实路径)@ 件记录取证(wirebody_scan.py,CAPWIRE47 哨兵)
+- 27 命中 → 4 份同内容存储记录;at-elem 真实形状(732A80 路径权威):
+  f12 = {3:2, 4:uin, **5:0**, 9:peerUid}(f5 存在!N3R37/SnowLuma 异路径无 f5);
+  at 文本 "@Stella" 无尾空格(空格在 rest 头);attr13B len = UTF-16 units ✓;
+  **elem37 = f1:6 家族(r28 125B 常量本是对的)**;顺序 = Attr → 37 → 9 → at
+  → **Rich.f11=0** → rest → 元素16(发送者信息);Attr f9 = "宋体";
+  CH = **10 键含 f12=divSeq|1<<63**(r16 规格对本路径正确;f5 = seq)。
+- **两路径形状系统性分歧**(SnowLuma vs 732A80):f5 有无、elem37 家族、
+  CH 键集、f11 —— 此前 v6/v7/v9 按 N3R37(SnowLuma)修正 @ 全部修错了方向。
+
+### v13(n3res23,全量回滚真路径形状:f5:0 + r28 elem37 + 真顺序 + f11=0 + 10键CH)
+- **仍 1006501(+30.5s 无 ack)**;实例健康。形状假设空间穷尽:
+  at-elem 三参照(SnowLuma 记录/主账号记录/r16 wire 规格)× CH 两式 ×
+  路由两式 × 顺序两式,10+ 变体全测。
+
+### @ 谜题终局判定(诚实结论)
+- **服务器对 legacy-732A80-path 的 @ 消息静默不 ack**,与 body 形状无关
+  (真路径形状逐字节对齐后依然);判因在 body 之外的包级/服务器侧
+  (session 级 capability、包框架、或风控灰度)——以现有无钩子手段不可达;
+- wirecap 钩子(唯一能看到 wire 的手段)已因两次实例损失永久退役;
+  qqxlog 解码器 = 可选后续离线工程;
+- **retCode 通道价值不受影响**:plain errCode=0 全程 8 次复现;@ 的
+  拒绝也被通道如实上报(1006501)—— 通道本身就是本轮最大成果;
+- **@ 生产建议**:经 SnowLuma/OneBot 路径(send_group_msg + at,已证送达
+  N3R37/45);legacy 732A80-path @ 归档为"服务器侧静默弃"负结果。
+- scope 文档"重定位 @ 阻塞于响应 retCode"任务关闭:retCode 已通,
+  @ 拒因已测得(1006501 无 ack),形状空间已穷尽。
+
+### 现场状态
+- 实例 14632(13:16 起)健康,errCode 通道工作;今日注入 16 次、实例损失
+  4 次(2 次定案为 wirecap 缺陷/机制,1 次风控踢,1 次r1契约错位);
+- 新工具:wirebody_scan.py(主账号 heap 扫描)、wirecap(uninstall 模式)、
+  protobuf 遍历器、pb-walker 分类器。
