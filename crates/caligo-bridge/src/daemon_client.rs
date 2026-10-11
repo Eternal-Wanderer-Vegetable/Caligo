@@ -2,7 +2,7 @@
 //!
 //! 把 daemon_chain 的 LAB 链延伸进 QQ 进程:常驻 worker 线程(自有线程,
 //! 只做管道 I/O 与 resident 提交,**零 QQ/V8 API** —— 计划 §3.1)连接
-//! caligod 的 bridge 管道,说 IPC v2:
+//! caligod 的 bridge 管道,说 IPC v3:
 //! - Hello(认证/基线/账号/会话代次)→ HelloAck;
 //! - Dispatch → NativeStarted → `resident.submit(SendText)` → `wake()`
 //!   (uv_async_send,唯一合法跨线程面)→ owner pump drain → 结果经
@@ -293,7 +293,7 @@ fn notice_request_id(notice: &ResidentNotice) -> &str {
             SendOutcome::Success { request_id, .. }
             | SendOutcome::AcceptedUnconfirmed { request_id }
             | SendOutcome::Failure { request_id, .. }
-            | SendOutcome::Unknown { request_id },
+            | SendOutcome::Unknown { request_id, .. },
         ) => request_id,
     }
 }
@@ -327,9 +327,13 @@ fn notice_message(notice: &ResidentNotice) -> (BridgeMsg, bool) {
                         reason: reason.clone(),
                     },
                 },
-                SendOutcome::Unknown { request_id } => BridgeMsg::SendResult {
+                SendOutcome::Unknown {
+                    request_id, reason, ..
+                } => BridgeMsg::SendResult {
                     request_id: request_id.clone(),
-                    outcome: OutcomePayload::Unknown,
+                    outcome: OutcomePayload::Unknown {
+                        reason: reason.clone(),
+                    },
                 },
             },
             true,
@@ -797,7 +801,7 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
     let mut last_heartbeat = Instant::now();
     let mut heartbeat_misses: u32 = 0;
     // resident 未就绪期的待提交队列(owner 初始化完成后补交)。
-    let mut pending: VecDeque<(String, u32, u32, String, String)> = VecDeque::new(); // (id, wire seq, chat, peer, text)
+    let mut pending: VecDeque<(String, u32, u64, u32, String, String)> = VecDeque::new(); // id, wire seq, timeout, chat, peer, text
 
     // HelloAck(阻塞;被拒 → 不可重试)。
     let connection_epoch = loop {
@@ -837,10 +841,12 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
                      // 0) 待提交补交(resident 就绪后)。
         let plen = pending.len();
         for _ in 0..plen {
-            let (id, wire_seq, chat, peer, text) = pending.front().cloned().expect("nonempty");
+            let (id, wire_seq, timeout_ms, chat, peer, text) =
+                pending.front().cloned().expect("nonempty");
             match resident.submit(crate::resident::OwnedRequest::SendText {
                 request_id: id.clone(),
                 wire_seq,
+                timeout_ms,
                 chat_type: chat,
                 peer_uid: peer,
                 text: text.clone(),
@@ -980,6 +986,7 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
             Ok(CoreToBridgeMsg::Dispatch {
                 request_id,
                 wire_seq,
+                timeout_ms,
                 target,
                 text,
             }) => {
@@ -989,6 +996,7 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
                 match resident.submit(crate::resident::OwnedRequest::SendText {
                     request_id: request_id.clone(),
                     wire_seq,
+                    timeout_ms,
                     chat_type: chat_type_from_target(&target),
                     peer_uid: peer_uid_from_target(&target),
                     text: text.clone(),
@@ -1000,6 +1008,7 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
                     _ => pending.push_back((
                         request_id,
                         wire_seq,
+                        timeout_ms,
                         chat_type_from_target(&target),
                         peer_uid_from_target(&target),
                         text.clone(),
@@ -1109,6 +1118,7 @@ mod tests {
             CoreToBridgeMsg::Dispatch {
                 request_id: "R1".into(),
                 wire_seq: 1,
+                timeout_ms: 30_000,
                 target: serde_json::json!({"account":"a","kind":"private","peer":"p"}),
                 text: "hi".into(),
             },

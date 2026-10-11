@@ -2,10 +2,10 @@
 
 ## Current State
 
-**Last Updated:** 2026-10-11（Asia/Shanghai）
-**Baseline commit:** `0f5b483`；N4 响应恢复计划提交为 `d637901`，工作树保留既有未提交文档 harness。
-**Active Feature:** 离线执行 N4-R1/R2/R3 子块及 R5 core/store 接线；CPB 假身份事件入口已 fail-closed；R6 transport 尚未开始，产品 feat-005/006 仍 blocked，R4 现场停止。
-**Scope:** 执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)；修 Rust 离线闭环与 OneBot/HTTP 组件，记录不可跨越的 native 与现场门。
+**Last Updated:** 2026-10-12（Asia/Shanghai）
+**Baseline commit:** `0f5b483`；本次继续基于 `acc5723`，保留既有未跟踪文档 harness。
+**Active Feature:** N4-R3 回执期限与未知结果语义已离线补齐；CPB 稳定身份仍 unsupported。R2 native ABI/线程/排空门、R4 现场、R5 私聊身份及 R6 transports/应用验收未闭合，feat-005/006 仍 blocked。
+**Scope:** 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)；完成可由离线证据支持的回执恢复行为，不越过 native 生命周期和现场准入门。
 
 ## 当前产品验收边界
 
@@ -27,7 +27,7 @@
 
 ## Blockers / Risks
 
-- 离线修复已贯通 request_id、NativeStarted 边界、AcceptedUnconfirmed 与旧 journal 保守恢复；没有稳定 native identity 的成功现继续 unsupported/unknown，不自动重发。
+- 离线修复已贯通 request_id、NativeStarted 边界、AcceptedUnconfirmed 与旧 journal 保守恢复。2026-10-12 follow-up 使非零 callback code 保持 unknown 并保留原始 errCode/errStr 诊断；core 将剩余响应期限随 v3 Dispatch 下发，bridge 超时后发 DeliveryUnknown，并为同一请求保留最多 60 秒、最多 256 项的迟到强身份更正槽。无稳定 native identity 的成功仍 unsupported/unknown，不自动重发；实现与验证见执行记录。
 - R2 已基于磁盘文件与冻结样本同 hash（`63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`）静态确认 `1DB2(pair*)` release、`732A80` body 同步深复制及 `B75029` 输入释放；代码按代复用单个 service pair、body 调用后对称释放、去掉未使用的 self-string 副本。常驻与一次性 callback context 在发布前 PIN bridge image；resident 停止时本地关闭 callback 准入、等待已准入调用退出，隔离后迟到 callback 仅计数、不入槽。离线验证不证明 QQ consumer 停止、原生队列排空或最终业务回执持久化。callback manager 其它操作、owner/回调线程、QQ stop/cancel/drain/quiescence 和历史 AV 原因仍未证；产品仍 blocked。
 - R3 使用 core journal 作为常驻候选 wire sequence authority，见 ADR；CPB 只有弱文本候选，stable identity unsupported，同步 send 不能返回成功。
 - CPB identity follow-up 移除了 `cpbseq:{seq}` 伪 native ID。当前 decoder 不产生稳定 native ID 或 sender UID→UIN 映射；缺少这些证据时只计 `identity_blocked`，不向 resident 事件流发布。定向 gate 1/1 与 `init.ps1 -Mode all`（default 191/191、research 227/227）通过；详见 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。这关闭伪身份入口，不关闭 receive/OneBot 功能或 R4 门。
@@ -88,6 +88,14 @@
 - R2/R3 后续静态补齐：`1DB2` 与 `2632` 区分，service lease 在 probe→attach→adapter 间复用，body 用同一 QQ allocator pair 释放；`g3_session` 的空地址 `probe_ready(0)` 阻断已移除；同文记录重复/歧义 fixture 不消费发送登记。详细证据与验证见 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。
 - R2 生命周期 follow-up：`consumer_probe::leak_ctx` 在共享入口 PIN bridge image，覆盖 `native_resident` 与 `g3_send_run` 两条 callback delegate 路径；resident stop 增加代次隔离/in-flight callback 准入栅栏，并有界 join Caligo 自有 pump、receive、daemon worker；未登记 generation 走 orphan 计数且不入共享槽。consumer quarantine 7 项测试与 owned-worker join helper 单测通过；QQ dispatcher 的 stop/cancel/drain/quiescence、完整 manager ABI 与历史 AV 仍开放，不作为 R4 准入。
 - AV 后续复核：原始记录为 `caligo_bridge-c00aae2a8f83540a.exe` / `0xc0000005`，只看到前两项 `asyncrun` 测试通过；本次 research bridge lib 串行与默认并行各 69/69，通过但未复现，不能归因为已修复。无 WER 事件/dump 或调试器堆栈；忽略输出在 `target-harness/n4-av-serial-recheck.log`、`target-harness/n4-av-parallel-recheck.log`。
-- R5 typed target、动作层、append-only durable MessageStore 与分片安全 HTTP parser 已实现/离线测；runtime/event/store/listener 尚未装配，不提升 feat-006。
+- R5 typed target、动作层、append-only durable MessageStore 与分片安全 HTTP parser 已实现/离线测；core AccountActor/Daemon 的接收索引和 get_msg 已装配并有 pipe 集成证据。bridge projection 仍为 None，普通 caligod HTTP listener、私聊 peer UID 映射、HTTP POST event/WS/反向 WS 与真实应用互通未完成，feat-006 继续 blocked。
 - 初次默认并行 full suite 的 allocator 资源断言受其它测试线程干扰；将断言计数改为当前测试线程局部后，`resident_lifecycle` 默认并行 18/18 通过。该结果不解释此前 0xc0000005。
 - 当前项目仍 NOT READY；R4 未启动，R6 应用验收未完成；下一步见本页 Next 与 `session-handoff.md`。
+
+## 2026-10-12 N4 R3 回执期限补齐
+
+- `1006501` 等非零 callback code 不再直接解释为业务拒绝：结果为 `DeliveryUnknown`，v3 诊断保留原始 code/text，避免把本地网络观察误报成确定失败。
+- core 依据原始受理时间下发剩余 timeout；bridge ledger 在期限到达时发出终态 unknown，不重派请求。未知记录在有界 60 秒宽限期内仅允许同 request 的强身份成功更正，容量上限 256；到期清理记录槽。
+- `Unknown(None)` 与 v2 framing 保持兼容边界；v3 business protocol revision 提升为 2，旧 revision 明确拒绝。审计写 journal 失败时拒绝吞掉诊断错误并使 actor 降级。
+- `.\init.ps1 -Mode all` 通过：docs 9 份 / 163 个本地链接；默认与 research 两套 workspace 的测试二进制均成功退出。该结果只证明离线合同，不证明 native callback 线程/寿命、强身份或现场响应。
+- R2 callback manager 完整 ABI、owner/consumer thread、QQ dispatcher stop/cancel/drain/quiescence 与历史 AV 根因仍开放；R3 stable native identity 与 sender UID→UIN 未建立。R4 不准入，未启动 QQ 或改变 SnowLuma 连接。

@@ -91,7 +91,9 @@ pub enum NativeResult {
         reason: String,
     },
     /// 结果丢失/不确定:dispatch 窗口崩溃等。
-    Unknown,
+    Unknown {
+        reason: Option<String>,
+    },
 }
 
 /// 取消结果:只有"可证明未执行"才算 cancelled_unsent。
@@ -647,7 +649,7 @@ impl AccountActor {
             NativeResult::Failure { reason } => ActionState::ConfirmedFailure {
                 reason: reason.clone(),
             },
-            NativeResult::Unknown => ActionState::DeliveryUnknown,
+            NativeResult::Unknown { .. } => ActionState::DeliveryUnknown,
         };
         let Some(entry) = self.requests.get(request_id) else {
             // 未知请求的回执:仅审计。
@@ -656,12 +658,23 @@ impl AccountActor {
                 0,
                 format!("late receipt for unknown request: {new_state:?}"),
                 now,
-            );
+            )?;
             self.counters.receipts_audited_only += 1;
             return Ok(ReceiptOutcome::AuditedOnly);
         };
         let gen = entry.session_generation;
         let current_state = entry.state.clone();
+        if let NativeResult::Unknown {
+            reason: Some(reason),
+        } = &result
+        {
+            self.audit_receipt(
+                request_id,
+                gen,
+                format!("delivery unknown diagnostic: {reason}"),
+                now,
+            )?;
+        }
         match (&current_state, &new_state) {
             (ActionState::DeliveryUnknown, ActionState::DeliveryUnknown) => {
                 self.counters.receipts_duplicate_ignored += 1;
@@ -705,7 +718,7 @@ impl AccountActor {
                     gen,
                     format!("duplicate receipt {new_state:?} on terminal {s:?}"),
                     now,
-                );
+                )?;
                 self.counters.receipts_duplicate_ignored += 1;
                 Ok(ReceiptOutcome::DuplicateIgnored)
             }
@@ -757,6 +770,18 @@ impl AccountActor {
             target_repr: e.target.to_string(),
             deadline_ms: e.deadline_ms,
         })
+    }
+
+    /// Remaining response budget, accounting from durable request acceptance.
+    pub fn remaining_timeout_ms(&self, request_id: &str) -> Option<u64> {
+        let entry = self.requests.get(request_id)?;
+        let accepted_at = entry
+            .history
+            .first()
+            .map(|(_, at)| *at)
+            .unwrap_or_else(now_ms);
+        let elapsed = now_ms().saturating_sub(accepted_at);
+        Some(entry.deadline_ms.saturating_sub(elapsed))
     }
 
     pub fn request_history(&self, request_id: &str) -> Option<Vec<(String, u64)>> {
@@ -955,7 +980,7 @@ impl AccountActor {
     fn require_mutable(&mut self, request_id: &str) -> Result<(), RejectReason> {
         match self.requests.get(request_id) {
             None => {
-                self.audit_receipt(request_id, 0, "op on unknown request".into(), now_ms());
+                self.audit_receipt(request_id, 0, "op on unknown request".into(), now_ms())?;
                 Err(RejectReason::SessionStale) // 未知请求按无效处理并审计
             }
             Some(e) if e.state.is_terminal() => Err(RejectReason::RequestIdPayloadConflict),
@@ -1136,14 +1161,20 @@ impl AccountActor {
         Ok(())
     }
 
-    fn audit_receipt(&mut self, request_id: &str, gen: u64, detail: String, at: u64) {
+    fn audit_receipt(
+        &mut self,
+        request_id: &str,
+        gen: u64,
+        detail: String,
+        at: u64,
+    ) -> Result<(), RejectReason> {
         let entry = ReceiptAuditEntry {
             request_id: request_id.to_string(),
             session_generation: gen,
             detail,
             at_unix_ms: at,
         };
-        let _ = self.journal.append(&JournalRecord::ReceiptAudit(
+        if let Err(error) = self.journal.append(&JournalRecord::ReceiptAudit(
             crate::journal::ReceiptAuditRecord {
                 v: 1,
                 request_id: entry.request_id.clone(),
@@ -1151,11 +1182,15 @@ impl AccountActor {
                 detail: entry.detail.clone(),
                 at_unix_ms: entry.at_unix_ms,
             },
-        ));
+        )) {
+            self.journal_failure(error);
+            return Err(RejectReason::JournalFailure);
+        }
         self.receipt_audits.push_back(entry);
         if self.receipt_audits.len() > 1024 {
             self.receipt_audits.pop_front();
         }
+        Ok(())
     }
 
     fn journal_failure(&mut self, _e: JournalError) {

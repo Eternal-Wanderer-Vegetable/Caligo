@@ -281,10 +281,20 @@ fn l10_late_duplicate_and_unknown_receipts_are_idempotent_audit() {
     bridge.dispatch(&mut a, "q1");
     // 结果丢失:Unknown(不是失败)。
     assert_eq!(
-        a.bridge_result("q1", NativeResult::Unknown).unwrap(),
+        a.bridge_result(
+            "q1",
+            NativeResult::Unknown {
+                reason: Some("response callback errCode=1006501; provenance unverified".into()),
+            },
+        )
+        .unwrap(),
         ReceiptOutcome::Applied
     );
     assert_eq!(a.query_request("q1"), Some(ActionState::DeliveryUnknown));
+    assert!(a
+        .receipt_audits()
+        .iter()
+        .any(|entry| entry.detail.contains("errCode=1006501")));
     // 迟到明确回执:更正当前已知结果,不重开动作。
     assert_eq!(
         a.bridge_result(
@@ -319,7 +329,12 @@ fn l10_late_duplicate_and_unknown_receipts_are_idempotent_audit() {
         ReceiptOutcome::AuditedOnly
     );
     assert!(a.query_request("ghost").is_none());
-    assert_eq!(a.receipt_audits().len(), 2);
+    let audits = a.receipt_audits();
+    assert_eq!(audits.len(), 3);
+    assert!(audits
+        .iter()
+        .any(|entry| entry.detail.contains("errCode=1006501")));
+    assert!(audits.iter().any(|entry| entry.request_id == "ghost"));
 }
 
 #[test]

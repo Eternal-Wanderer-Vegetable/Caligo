@@ -16,6 +16,8 @@
 
 use crate::native_response::{Completion, Cookie, ResponseLedger, ResponseOutcome};
 
+const DEFAULT_RESPONSE_TIMEOUT_MS: u64 = 30_000;
+
 /// 附加证据(调用方已完成门核对后传入;本模块如实登记,不重复核对)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttachProof {
@@ -279,14 +281,34 @@ impl<S: SeqSource> NativeSession<S> {
         wire_seq: u32,
         body: &[u8],
     ) -> SendAcceptance {
+        self.enqueue_send_with_timeout(
+            ops,
+            request_id,
+            cookie,
+            wire_seq,
+            Some(DEFAULT_RESPONSE_TIMEOUT_MS),
+            body,
+        )
+    }
+
+    /// N4 dispatch path with the caller's remaining response budget.
+    pub fn enqueue_send_with_timeout<O: NativeOps>(
+        &mut self,
+        ops: &mut O,
+        request_id: &str,
+        cookie: Cookie,
+        wire_seq: u32,
+        timeout_ms: Option<u64>,
+        body: &[u8],
+    ) -> SendAcceptance {
         if self.phase != SessionPhase::Ready {
             return SendAcceptance::NotAttached;
         }
         // 预登记先于发起(计划 §5-2)。登记失败(重复 cookie/request)= 调用方
         // 缺陷,不发起。
-        if let Err(e) = self
-            .ledger
-            .register_with_wire_seq(request_id, cookie, Some(wire_seq))
+        if let Err(e) =
+            self.ledger
+                .register_with_timeout(request_id, cookie, Some(wire_seq), timeout_ms)
         {
             self.counters.refused_pre_call += 1;
             return SendAcceptance::RefusedPreCall {
@@ -370,9 +392,19 @@ impl<S: SeqSource> NativeSession<S> {
         }
     }
 
-    /// 终态取走(交付给 core;交付后迟到回调转 UnknownCookie 审计)。
+    /// 终态取走(交付给 core);期限 Unknown 保留有界 tombstone 供迟到强回执更正。
     pub fn take_terminal(&mut self) -> Vec<(String, ResponseOutcome)> {
         self.ledger.take_terminal()
+    }
+
+    /// Expire unfinished native responses and return terminal outcomes for
+    /// the resident result channel. Unknown registrations remain bounded
+    /// tombstones for late strong receipts.
+    pub fn expire_responses(&mut self, now: std::time::Instant) -> Vec<(String, ResponseOutcome)> {
+        self.ledger.expire_due(now);
+        let out = self.ledger.take_terminal();
+        self.ledger.prune_tombstones(now);
+        out
     }
 }
 

@@ -362,6 +362,7 @@ fn adapter_listener_ops_via_v8_ladder_and_resident_full_mode() {
         adapter.native_op(HostOp::SendText {
             request_id: "LAB-request".into(),
             wire_seq: 1,
+            timeout_ms: 30_000,
             chat_type: 1,
             peer_uid: "p".into(),
             text: "x".into()

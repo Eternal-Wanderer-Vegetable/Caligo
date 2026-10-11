@@ -516,7 +516,7 @@ impl Daemon {
                                 NativeResult::AcceptedUnconfirmed
                             }
                             OutcomePayload::Failure { reason } => NativeResult::Failure { reason },
-                            OutcomePayload::Unknown => NativeResult::Unknown,
+                            OutcomePayload::Unknown { reason } => NativeResult::Unknown { reason },
                         };
                         let applied = {
                             let mut actor = self.actor.lock().unwrap();
@@ -709,10 +709,13 @@ impl Daemon {
                             Ok(state) => {
                                 // 受理即派发(dispatch_intent 窗口显式化)。
                                 if let Ok(wire_seq) = actor.dispatch_begin(&request_id) {
+                                    let timeout_ms =
+                                        actor.remaining_timeout_ms(&request_id).unwrap_or_default();
                                     self.dispatch_out.lock().unwrap().push(
                                         CoreToBridgeMsg::Dispatch {
                                             request_id: request_id.clone(),
                                             wire_seq,
+                                            timeout_ms,
                                             target,
                                             text: req.text,
                                         },

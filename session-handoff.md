@@ -2,19 +2,23 @@
 
 ## Current Objective
 
-- 日期：2026-10-11（Asia/Shanghai）；计划源基线 `0f5b483`，N4 计划提交 `d637901`。
+- 日期：2026-10-12（Asia/Shanghai）；计划源基线 `0f5b483`，本次 follow-up 基于提交 `acc5723`。
 - 用户请求执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)。
-- 本次 R1 离线恢复闭环、R2 callback capture/固定-hash资源修复/bridge PIN、resident generation 隔离及本地 worker join、R3 sequence authority 子块、R5 core MessageStore 接收/查询接线与 HTTP LAB 已实现；明细、命令和缺口见 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。
-- 产品仍 **NOT READY**；feat-005/006 仍 `blocked`。未启动 QQ/注入/现场发送，没有提交或推送。
+- R3 follow-up 新增 callback nonzero→unknown 诊断保留、core→bridge 剩余 timeout 传播、bridge deadline 收口与有界迟到强身份更正。此前 R1/R2 离线子块、R3 sequence 子块、R5 core MessageStore 接线与 HTTP LAB 的证据见 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。
+- 产品仍 **NOT READY**；feat-005/006 仍 `blocked`。R2/R3 native 与 identity 门未闭合，因此 R4 不准入；没有启动 QQ/注入/现场发送，也没有改变 SnowLuma 连接。
 
 ## Changed Areas
 
-- Rust：bridge 原请求关联/生命周期通知、有界 consumer、序号贯通与 native session、固定-hash service pair lease/body ownership 修复、core recovery/journal/message store/Daemon `StoreReader`、OneBot actions/HTTP parser，及对应合同测试。
+- Rust：bridge 回执期限与 unknown 诊断语义、response ledger timeout/tombstone 和迟到更正；同步更新 model v3 DTO、daemon dispatch 与 actor journal 审计，增加合同测试。
 - 文档：执行记录、wire sequence [ADR](docs/decisions/2026-10-11-wire-sequence-authority.md)、progress/feature/index/architecture 状态。
 - 测试 harness：`resident_lifecycle` 的资源快照从进程级并行污染源改为当前测试线程 opt-in 计数，L17 assertions 保留。
 - 既有 README/AGENTS/guides/skills/verification harness 等未提交改动继续保留，勿回滚或重写。
 
 ## Verification
+
+- 本次 follow-up `.\init.ps1 -Mode all` PASS：docs 9 live docs / 163 local links；默认与 research 两种构建的全部 test binaries 均成功退出。具体限制：只属离线测试，不替代 native/QQ 回执验收。
+- `cargo fmt --all` 后审阅并撤销了本范围外的纯格式化变更；保留修改仅涉及 R3 timeout/result path 与对应测试。
+- 既有完整 R1/R2/R3 sequence/R5 离线证据仍见下方历史记录；不将本次验证写成当前 callback manager ABI、线程/排空或 R4 现场通过。
 
 - 前一轮 `.\init.ps1 -Mode all` PASS，docs 9 live docs / 161 links；普通 workspace 192 passed、research workspace 226 passed；历史原始摘要 `target-harness/n4-r2-owned-join-all.log`。CPB identity follow-up 的最新完整结果见下一条。
 - `consumer_probe::tests` 7/7 PASS；另有 owned-worker join helper 1/1 PASS。callback context 注册前通过 Win32 `GetModuleHandleExW(FROM_ADDRESS|PIN)` 固定 bridge 到进程结束；resident stop 隔离代次并等本地 in-flight callback 退出，随后有界 join Caligo 自有 worker。此结果不证明 QQ loaded-DLL 现场行为、QQ dispatcher 停止或原生 quiescence。

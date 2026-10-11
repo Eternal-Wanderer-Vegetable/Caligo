@@ -1,6 +1,6 @@
 //! IPC v3 语义消息(计划 §6.2/C9:真实宿主身份握手)。
 //!
-//! v3 = v2 + bridge 侧宿主身份进 Hello:
+//! v3 = v2 + bridge 侧宿主身份进 Hello + 有界发送响应期限/诊断:
 //! - `host_nonce`:QQ bridge 宿主实例随机 nonce(宿主进程内一次生成,
 //!   保持到 QQ 退出;PID 数字重用也无法与旧宿主混淆);
 //! - `host_process_created_utc`:宿主进程创建时间(RFC3339 UTC;取不到
@@ -8,16 +8,64 @@
 //!
 //! v2 定义原样保留(`ipc_v2`);daemon 只受理 v3 握手 —— 旧消息因缺少
 //! 必填字段反序列化失败而显式拒绝,不靠 serde 默认值放行(C9 反例 T05)。
-//! frame/EventPayload/OutcomePayload/Role 与 v2 共用,语义不变。
+//! frame/EventPayload/Role 与 v2 共用；发送结果与 Dispatch DTO 在 v3 独立。
 
 use serde::{Deserialize, Serialize};
 
 /// IPC 语义协议 v3。v2 保持原定义供历史对照;不接受 v2/v1 握手降级。
 pub const PROTOCOL_VERSION_V3: u32 = 3;
 /// Bridge/core business receipt contract revision, independent of frame/IPC v3.
-pub const BUSINESS_PROTOCOL_REVISION: u32 = 1;
+pub const BUSINESS_PROTOCOL_REVISION: u32 = 2;
 
-pub use super::ipc_v2::{EventPayload, OutcomePayload, Role};
+pub use super::ipc_v2::{EventPayload, Role};
+
+/// v3 receipt payload carries diagnostics for ambiguous native response codes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", content = "d", rename_all = "snake_case")]
+pub enum OutcomePayload {
+    Success { native_id: String },
+    AcceptedUnconfirmed,
+    Failure { reason: String },
+    Unknown { reason: Option<String> },
+}
+
+/// v3 core → bridge messages. v2 remains unchanged for historical readers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "t", content = "d", rename_all = "snake_case")]
+pub enum CoreToBridgeMsg {
+    HelloAck {
+        protocol_version: u32,
+        core_build: String,
+        connection_epoch: u64,
+        accepted: bool,
+        reject_reason: Option<String>,
+    },
+    Dispatch {
+        request_id: String,
+        /// Unique sequence authority is core; persisted before dispatch.
+        wire_seq: u32,
+        /// Remaining response budget measured from durable request acceptance.
+        timeout_ms: u64,
+        target: serde_json::Value,
+        text: String,
+    },
+    HealthAck {},
+    EventAck {
+        event_seq: u64,
+        suppressed: bool,
+    },
+    NativeStartedAck {
+        request_id: String,
+    },
+    SendResultAck {
+        request_id: String,
+        terminal: bool,
+    },
+    Stopped {},
+    Reject {
+        reason: String,
+    },
+}
 
 /// bridge → core 的 v3 消息(Hello 增加宿主身份;其余与 v2 一致)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,7 +109,7 @@ pub enum BridgeMsg {
     Stop {},
 }
 
-pub use super::ipc_v2::{ControlMsg, CoreToBridgeMsg, CoreToControlMsg};
+pub use super::ipc_v2::{ControlMsg, CoreToControlMsg};
 
 #[cfg(test)]
 mod tests {
@@ -88,7 +136,7 @@ mod tests {
     fn v3_hello_with_host_identity_decodes() {
         let v3 = r#"{"t":"hello","d":{
             "protocol_version":3,
-            "business_protocol_revision":1,
+            "business_protocol_revision":2,
             "bridge_build":"b",
             "auth_token":"tok",
             "role":"bridge",
@@ -126,5 +174,30 @@ mod tests {
             "host_process_created_utc":"2026-10-08T00:00:00Z"
         }}"#;
         assert!(serde_json::from_str::<BridgeMsg>(old_v3).is_err());
+    }
+
+    #[test]
+    fn v3_dispatch_timeout_and_unknown_diagnostic_round_trip() {
+        let dispatch = CoreToBridgeMsg::Dispatch {
+            request_id: "R-timeout".into(),
+            wire_seq: 12,
+            timeout_ms: 18_000,
+            target: serde_json::json!({"kind":"group","peer":"123"}),
+            text: "hello".into(),
+        };
+        let encoded = serde_json::to_vec(&dispatch).unwrap();
+        assert!(String::from_utf8_lossy(&encoded).contains("\"timeout_ms\":18000"));
+        let decoded: CoreToBridgeMsg = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, dispatch);
+
+        let result = BridgeMsg::SendResult {
+            request_id: "R-timeout".into(),
+            outcome: OutcomePayload::Unknown {
+                reason: Some("errCode=1006501; provenance unverified".into()),
+            },
+        };
+        let encoded = serde_json::to_vec(&result).unwrap();
+        let decoded: BridgeMsg = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, result);
     }
 }

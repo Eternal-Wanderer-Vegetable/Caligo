@@ -15,6 +15,8 @@
 //! - 未决四项(940588 门控/key 组合/msgUid 字段号/消费者 ABI)见
 //!   response-consumer-scope.md;本模块不假设其答案,仅固定关联语义。
 
+use std::time::{Duration, Instant};
+
 /// 响应关联键的 cookie:16B msgUid(95d4e6 契约;客户端自配)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Cookie(pub [u8; 16]);
@@ -43,6 +45,11 @@ pub enum ResponseOutcome {
     BusinessRejected { ret_code: i32, err: String },
     /// 传输层失败(未达业务层;与业务拒绝严格区分,不混用错误通道)。
     TransportFailed { reason: String },
+    /// 回执没有可证明的业务结果，或等待期限已满；诊断不能单独证明拒绝。
+    DeliveryUnknown {
+        reason: String,
+        late_receipt_possible: bool,
+    },
 }
 
 /// 预登记错误。
@@ -84,6 +91,10 @@ struct Registration {
     session_generation: u64,
     accepted_unconfirmed: bool,
     wire_seq: Option<u32>,
+    deadline: Option<Instant>,
+    timeout_ms: Option<u64>,
+    unknown_at: Option<Instant>,
+    unknown_emitted: bool,
 }
 
 /// cookie 键控响应账本。
@@ -112,7 +123,10 @@ pub struct LedgerAudit {
     pub stale_generation: u64,
     pub unknown_cookie: u64,
     pub drained_unknown: u64,
+    pub tombstones_evicted: u64,
 }
+
+const MAX_LATE_RECEIPT_TOMBSTONES: usize = 256;
 
 impl ResponseLedger {
     pub fn new() -> Self {
@@ -138,6 +152,18 @@ impl ResponseLedger {
         cookie: Cookie,
         wire_seq: Option<u32>,
     ) -> Result<(), RegisterError> {
+        self.register_with_timeout(request_id, cookie, wire_seq, None)
+    }
+
+    /// Register a request with a bounded response budget. The budget starts
+    /// when its cookie is reserved, before the native API is invoked.
+    pub fn register_with_timeout(
+        &mut self,
+        request_id: &str,
+        cookie: Cookie,
+        wire_seq: Option<u32>,
+        timeout_ms: Option<u64>,
+    ) -> Result<(), RegisterError> {
         if cookie.is_zero() {
             return Err(RegisterError::ZeroCookie);
         }
@@ -156,6 +182,13 @@ impl ResponseLedger {
                 session_generation: self.current_session_generation,
                 accepted_unconfirmed: false,
                 wire_seq,
+                deadline: timeout_ms.map(|ms| {
+                    let now = Instant::now();
+                    now.checked_add(Duration::from_millis(ms)).unwrap_or(now)
+                }),
+                timeout_ms,
+                unknown_at: None,
+                unknown_emitted: false,
             },
             None,
         ));
@@ -175,6 +208,23 @@ impl ResponseLedger {
         {
             self.audit.stale_generation = self.audit.stale_generation.saturating_add(1);
             return Completion::StaleGeneration {
+                request_id: reg.request_id.clone(),
+            };
+        }
+        if reg.unknown_at.is_some()
+            && matches!(&outcome, ResponseOutcome::BusinessSuccess { .. })
+            && (reg.unknown_emitted && slot.is_none()
+                || matches!(slot.as_ref(), Some(ResponseOutcome::DeliveryUnknown { .. })))
+        {
+            *slot = Some(outcome.clone());
+            return Completion::Terminated {
+                request_id: reg.request_id.clone(),
+                outcome,
+            };
+        }
+        if reg.unknown_emitted && slot.is_none() {
+            self.audit.duplicate_ignored = self.audit.duplicate_ignored.saturating_add(1);
+            return Completion::DuplicateIgnored {
                 request_id: reg.request_id.clone(),
             };
         }
@@ -208,7 +258,9 @@ impl ResponseLedger {
         self.by_cookie
             .0
             .iter()
-            .filter(|(_, _, o)| o.is_none())
+            .filter(|(_, registration, outcome)| {
+                outcome.is_none() && registration.unknown_at.is_none()
+            })
             .map(|(c, r, _)| (*c, r.request_id.clone()))
             .collect()
     }
@@ -221,18 +273,93 @@ impl ResponseLedger {
             .and_then(|(_, registration, _)| registration.wire_seq)
     }
 
-    /// 终态取走(上层经此把结果交给 core;取走后条目移除,迟到回调转为
-    /// UnknownCookie 审计 —— 终态只交付一次)。
+    /// Convert every due in-flight response to one explicit Unknown result.
+    pub fn expire_due(&mut self, now: Instant) -> usize {
+        let mut expired = 0;
+        for (_, registration, outcome) in &mut self.by_cookie.0 {
+            if outcome.is_none()
+                && registration
+                    .deadline
+                    .map(|deadline| now >= deadline)
+                    .unwrap_or(false)
+            {
+                let timeout_ms = registration.timeout_ms.unwrap_or_default();
+                registration.unknown_at = Some(now);
+                registration.deadline = None;
+                *outcome = Some(ResponseOutcome::DeliveryUnknown {
+                    reason: format!("response deadline elapsed ({timeout_ms}ms)"),
+                    late_receipt_possible: true,
+                });
+                expired += 1;
+            }
+        }
+        expired
+    }
+
+    /// Retire correction tombstones after the shared grace period and enforce
+    /// a fixed count cap. Active requests and undelivered results are retained.
+    pub fn prune_tombstones(&mut self, now: Instant) {
+        self.by_cookie.0.retain(|(_, registration, outcome)| {
+            let expired = registration.unknown_emitted
+                && outcome.is_none()
+                && registration
+                    .unknown_at
+                    .map(|at| {
+                        now.saturating_duration_since(at).as_millis()
+                            >= u128::from(caligo_model::LATE_RECEIPT_GRACE_MS)
+                    })
+                    .unwrap_or(false);
+            if expired {
+                self.audit.tombstones_evicted = self.audit.tombstones_evicted.saturating_add(1);
+            }
+            !expired
+        });
+        loop {
+            let tombstone_count = self
+                .by_cookie
+                .0
+                .iter()
+                .filter(|(_, registration, outcome)| {
+                    registration.unknown_emitted && outcome.is_none()
+                })
+                .count();
+            if tombstone_count <= MAX_LATE_RECEIPT_TOMBSTONES {
+                break;
+            }
+            let oldest = self
+                .by_cookie
+                .0
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, registration, outcome))| {
+                    registration.unknown_emitted && outcome.is_none()
+                })
+                .min_by_key(|(_, (_, registration, _))| registration.unknown_at)
+                .map(|(index, _)| index)
+                .expect("counted tombstone exists");
+            self.by_cookie.0.remove(oldest);
+            self.audit.tombstones_evicted = self.audit.tombstones_evicted.saturating_add(1);
+        }
+    }
+
+    /// 终态取走(上层经此把结果交给 core);期限 Unknown 仅交付一次并保留
+    /// 有界 cookie tombstone，强身份可在 grace window 内更正。
     pub fn take_terminal(&mut self) -> Vec<(String, ResponseOutcome)> {
         let mut out = Vec::new();
-        self.by_cookie.0.retain_mut(|(c, r, o)| {
+        self.by_cookie.0.retain_mut(|(_, r, o)| {
             if let Some(res) = o.take() {
-                let _ = c;
+                if matches!(&res, ResponseOutcome::DeliveryUnknown { .. }) && r.unknown_at.is_some()
+                {
+                    r.unknown_emitted = true;
+                    out.push((r.request_id.clone(), res));
+                    return true;
+                }
                 out.push((r.request_id.clone(), res));
                 return false; // 移除已交付条目
             }
             true
         });
+        self.prune_tombstones(Instant::now());
         out
     }
 
@@ -242,14 +369,18 @@ impl ResponseLedger {
     pub fn drain(&mut self, reason: &str) -> Vec<(String, String)> {
         let mut out = Vec::new();
         for (_, r, o) in self.by_cookie.0.iter_mut() {
-            if o.is_none() {
+            if o.is_none() && r.unknown_at.is_none() {
                 out.push((r.request_id.clone(), reason.to_string()));
             }
         }
         let drained: Vec<String> = out.iter().map(|(id, _)| id.clone()).collect();
         self.by_cookie.0.retain(|(_, r, o)| {
-            if o.is_none() && drained.contains(&r.request_id) {
+            if o.is_none() && r.unknown_at.is_none() && drained.contains(&r.request_id) {
                 self.audit.drained_unknown += 1;
+                return false;
+            }
+            if r.unknown_emitted && o.is_none() {
+                self.audit.tombstones_evicted = self.audit.tombstones_evicted.saturating_add(1);
                 return false;
             }
             true
@@ -430,6 +561,90 @@ mod tests {
             )]
         );
         assert!(ledger.pending().is_empty());
+    }
+
+    #[test]
+    fn response_deadline_emits_unknown_once_and_allows_late_strong_correction() {
+        let mut ledger = ResponseLedger::new();
+        ledger.set_generations(1, 7);
+        ledger
+            .register_with_timeout("R-timeout", cookie(15), Some(91), Some(1))
+            .unwrap();
+        assert_eq!(
+            ledger.complete(&cookie(15), ResponseOutcome::BusinessAccepted),
+            Completion::AcceptedUnconfirmed {
+                request_id: "R-timeout".into()
+            }
+        );
+
+        assert_eq!(
+            ledger.expire_due(Instant::now() + Duration::from_millis(5)),
+            1
+        );
+        assert!(ledger.pending().is_empty());
+        assert_eq!(
+            ledger.take_terminal(),
+            vec![(
+                "R-timeout".into(),
+                ResponseOutcome::DeliveryUnknown {
+                    reason: "response deadline elapsed (1ms)".into(),
+                    late_receipt_possible: true,
+                }
+            )]
+        );
+
+        assert_eq!(
+            ledger.complete(
+                &cookie(15),
+                ResponseOutcome::BusinessSuccess {
+                    native_id: "N-late".into()
+                }
+            ),
+            Completion::Terminated {
+                request_id: "R-timeout".into(),
+                outcome: ResponseOutcome::BusinessSuccess {
+                    native_id: "N-late".into()
+                }
+            }
+        );
+        assert_eq!(
+            ledger.take_terminal(),
+            vec![(
+                "R-timeout".into(),
+                ResponseOutcome::BusinessSuccess {
+                    native_id: "N-late".into()
+                }
+            )]
+        );
+        assert!(ledger.pending().is_empty());
+    }
+
+    #[test]
+    fn expired_tombstone_is_pruned_after_grace_window() {
+        let mut ledger = ResponseLedger::new();
+        ledger.set_generations(1, 7);
+        ledger
+            .register_with_timeout("R-expired", cookie(16), Some(92), Some(0))
+            .unwrap();
+        let after_deadline = Instant::now() + Duration::from_millis(1);
+        assert_eq!(ledger.expire_due(after_deadline), 1);
+        assert!(matches!(
+            ledger.take_terminal()[0].1,
+            ResponseOutcome::DeliveryUnknown { .. }
+        ));
+        ledger.prune_tombstones(
+            after_deadline + Duration::from_millis(caligo_model::LATE_RECEIPT_GRACE_MS),
+        );
+        assert_eq!(
+            ledger.complete(
+                &cookie(16),
+                ResponseOutcome::BusinessSuccess {
+                    native_id: "too-late".into()
+                }
+            ),
+            Completion::UnknownCookie
+        );
+        assert_eq!(ledger.audit.tombstones_evicted, 1);
     }
 
     /// T08:旧代次回调只审计;登记绑定发起时代次。

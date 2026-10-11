@@ -6,6 +6,10 @@
 
 use std::fmt;
 
+/// 保留同一原请求迟到强回执的最长窗口；超窗后只保留 core 的
+/// DeliveryUnknown 台账，bridge 释放关联与 resident 结果容量。
+pub const LATE_RECEIPT_GRACE_MS: u64 = 60_000;
+
 /// QQ 账号 ID。
 ///
 /// 以字符串保存:不对号码取值范围、前导零或数值上限做未经证实的假设。

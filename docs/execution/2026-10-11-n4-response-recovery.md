@@ -161,3 +161,12 @@ feat-005 / feat-006 保持 blocked，整个项目保持 NOT READY。
 - 搜索本机 local-only evidence 时发现一份更早（2026-10-09）的 QQ Crashpad dump；只读 MINIDUMP header 给出的 exception code 为 `0xE06D7363`（C++ exception），不是旧 research test 记录的 `0xC0000005`。没有证据将二者关联，因此没有读取/提取该 dump 的其它内容，也不拿它解释 AV；旧 research AV 仍缺匹配 dump 与故障栈。
 - 更早记录中“MessageStore 尚未装配 AccountActor”属于接线前状态；由本节更新。
   feat-006 与项目状态继续 blocked / NOT READY。
+
+### 2026-10-12 R3 回执期限与未知诊断补齐（离线）
+
+- 所有 native callback 非零 `errCode` 均不再直接映射业务拒绝。`1006501` 与来源未验证的其它码成为 `DeliveryUnknown`；v3 result 保留原始 `errCode`、`errStr` 和 provenance 未验证说明，Actor 写入 append-only receipt audit。审计 journal 写入失败现在向上返回 `JournalFailure` 并触发 actor 降级。
+- core 使用请求 journal history 的受理时间计算剩余 deadline，随 v3 `Dispatch.timeout_ms` 发送到 resident→`HostOp::SendText`→native session。v2 DTO 保持原样；v3 dispatch 与 unknown diagnostic 独立定义，business protocol revision 从 1 提升到 2，旧语义 revision 被拒绝。
+- response ledger 注册 timeout，到期发出一次 `DeliveryUnknown` terminal。该 registration 保留为最多 60 秒、最多 256 项的 tombstone；同一 cookie/request 后续只有带 native identity 的强成功可以更正 unknown。宽限期后槽被回收；所有路径均不重发原动作。
+- 新增/扩展测试覆盖 v3 timeout/diagnostic roundtrip、旧 business revision 拒绝、1006501 unknown 分类与诊断保留、超时 unknown、同请求迟到强身份更正、grace 清理与 resident 有界槽释放，以及 core receipt audit。
+- `.\init.ps1 -Mode all` PASS：docs 9 live docs / 163 local links；default 与 research 全套测试二进制均成功退出，且 `QQ field acceptance is separate`。运行中第一次暴露一条预期 audit 数量从 2 增至 3 的断言；断言已修正后 full run PASS。此前 `cargo fmt --all` 带来的旁支纯格式化差异已从工作树撤销。
+- 此次完成的是 R3 的 nonzero result classification 与 ordinary deadline/tombstone 子块，不是强身份闭合。稳定 native identity、sender UID→UIN、R2 callback manager 全操作 ABI、当前 owner/consumer thread、QQ dispatcher stop/cancel/drain/quiescence 与旧访问冲突根因仍开放；R4 不准入。没有启动 QQ 或改变 SnowLuma。

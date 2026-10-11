@@ -9,6 +9,7 @@
 //! 仅用于本文件的资源增长断言。
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -302,6 +303,188 @@ impl HostAdapter for CorrelationHost {
     }
 }
 
+struct LateReceiptHost {
+    owner: u64,
+    outcomes: Arc<std::sync::Mutex<VecDeque<(String, SendOutcome)>>>,
+}
+
+impl HostAdapter for LateReceiptHost {
+    fn owner_thread_id(&self) -> u64 {
+        self.owner
+    }
+    fn current_thread_id(&self) -> u64 {
+        self.owner
+    }
+    fn env_valid(&self) -> bool {
+        true
+    }
+    fn current_context_ok(&self) -> bool {
+        true
+    }
+    fn native_op(&mut self, op: HostOp) -> Result<HostOpResult, HostError> {
+        Ok(match op {
+            HostOp::ListenerAdd => HostOpResult::ListenerDeferred,
+            HostOp::ListenerRemove { .. } => HostOpResult::ListenerRemoved,
+            HostOp::Probe => HostOpResult::ProbeDone,
+            HostOp::SendText { .. } => HostOpResult::SendFired {
+                mid: "MID-late".into(),
+            },
+        })
+    }
+    fn drain_send_responses(&mut self) -> Vec<(String, SendOutcome)> {
+        self.outcomes.lock().unwrap().drain(..).collect()
+    }
+}
+
+#[test]
+fn unknown_holds_bounded_slot_for_late_strong_identity_then_releases_it() {
+    let outcomes = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+    let resident = Resident::new(
+        LateReceiptHost {
+            owner: OWNER,
+            outcomes: outcomes.clone(),
+        },
+        ResidentLimits {
+            results_max: 2,
+            ..ResidentLimits::default()
+        },
+    );
+    resident.bootstrap().unwrap();
+    assert_eq!(
+        resident.submit(OwnedRequest::SendText {
+            request_id: "R-late".into(),
+            wire_seq: 9,
+            timeout_ms: 5,
+            chat_type: 2,
+            peer_uid: "123".into(),
+            text: "x".into(),
+        }),
+        SubmitVerdict::Accepted
+    );
+    assert_eq!(resident.drain().unwrap(), 1);
+    assert!(resident.take_results().iter().any(|notice| matches!(
+        notice,
+        caligo_bridge::resident::ResidentNotice::NativeStarted { request_id }
+            if request_id == "R-late"
+    )));
+    assert!(resident.ack_notice("R-late", true));
+
+    outcomes.lock().unwrap().push_back((
+        "R-late".into(),
+        SendOutcome::Unknown {
+            request_id: "R-late".into(),
+            reason: Some("timeout".into()),
+            late_receipt_possible: true,
+        },
+    ));
+    assert_eq!(resident.drain_send_responses(), 1);
+    let unknown = resident.take_results();
+    assert!(unknown.iter().any(|notice| matches!(
+        notice,
+        caligo_bridge::resident::ResidentNotice::Outcome(SendOutcome::Unknown { request_id, .. })
+            if request_id == "R-late"
+    )));
+    assert!(resident.ack_result_notice("R-late", true));
+    assert_eq!(
+        resident.submit(OwnedRequest::SendText {
+            request_id: "blocked-by-correction-slot".into(),
+            wire_seq: 10,
+            timeout_ms: 5,
+            chat_type: 2,
+            peer_uid: "123".into(),
+            text: "x".into(),
+        }),
+        SubmitVerdict::QueueFull
+    );
+
+    outcomes.lock().unwrap().push_back((
+        "R-late".into(),
+        SendOutcome::Success {
+            request_id: "R-late".into(),
+            native_id: "N-late".into(),
+        },
+    ));
+    assert_eq!(resident.drain_send_responses(), 1);
+    assert!(matches!(
+        resident.take_results().as_slice(),
+        [caligo_bridge::resident::ResidentNotice::Outcome(SendOutcome::Success {
+            request_id,
+            native_id,
+        })] if request_id == "R-late" && native_id == "N-late"
+    ));
+    assert!(resident.ack_result_notice("R-late", true));
+    assert_eq!(
+        resident.submit(OwnedRequest::SendText {
+            request_id: "after-correction".into(),
+            wire_seq: 11,
+            timeout_ms: 5,
+            chat_type: 2,
+            peer_uid: "123".into(),
+            text: "x".into(),
+        }),
+        SubmitVerdict::Accepted
+    );
+}
+
+#[test]
+fn unknown_correction_slot_expires_and_unblocks_new_dispatch() {
+    let outcomes = Arc::new(std::sync::Mutex::new(VecDeque::new()));
+    let resident = Resident::new(
+        LateReceiptHost {
+            owner: OWNER,
+            outcomes: outcomes.clone(),
+        },
+        ResidentLimits {
+            results_max: 2,
+            ..ResidentLimits::default()
+        },
+    );
+    resident.bootstrap().unwrap();
+    assert_eq!(
+        resident.submit(OwnedRequest::SendText {
+            request_id: "R-expiring".into(),
+            wire_seq: 13,
+            timeout_ms: 1,
+            chat_type: 2,
+            peer_uid: "123".into(),
+            text: "x".into(),
+        }),
+        SubmitVerdict::Accepted
+    );
+    resident.drain().unwrap();
+    resident.take_results();
+    assert!(resident.ack_notice("R-expiring", true));
+    outcomes.lock().unwrap().push_back((
+        "R-expiring".into(),
+        SendOutcome::Unknown {
+            request_id: "R-expiring".into(),
+            reason: Some("timeout".into()),
+            late_receipt_possible: true,
+        },
+    ));
+    resident.drain_send_responses();
+    resident.take_results();
+    assert!(resident.ack_result_notice("R-expiring", true));
+    assert_eq!(
+        resident.expire_late_receipts(
+            std::time::Instant::now()
+                + std::time::Duration::from_millis(caligo_model::LATE_RECEIPT_GRACE_MS + 1),
+        ),
+        1
+    );
+    assert_eq!(
+        resident.submit(OwnedRequest::SendText {
+            request_id: "R-after-grace".into(),
+            wire_seq: 14,
+            timeout_ms: 1,
+            chat_type: 2,
+            peer_uid: "123".into(),
+            text: "x".into(),
+        }),
+        SubmitVerdict::Accepted
+    );
+}
+
 #[test]
 fn original_request_id_survives_async_response_correlation() {
     let pending = Arc::new(std::sync::Mutex::new(None));
@@ -318,6 +501,7 @@ fn original_request_id_survives_async_response_correlation() {
         resident.submit(OwnedRequest::SendText {
             request_id: "R-origin".into(),
             wire_seq: 1,
+            timeout_ms: 30_000,
             chat_type: 2,
             peer_uid: "123".into(),
             text: "hello".into(),
@@ -357,6 +541,7 @@ fn unknown_native_response_id_is_audited_and_not_forwarded() {
         resident.submit(OwnedRequest::SendText {
             request_id: "R-origin".into(),
             wire_seq: 1,
+            timeout_ms: 30_000,
             chat_type: 2,
             peer_uid: "123".into(),
             text: "hello".into(),
@@ -429,6 +614,7 @@ fn l16_close_protocol_and_late_callbacks() {
     r.submit(OwnedRequest::SendText {
         request_id: "a".into(),
         wire_seq: 1,
+        timeout_ms: 30_000,
         chat_type: 1,
         peer_uid: "p".into(),
         text: "x".repeat(2),
@@ -436,6 +622,7 @@ fn l16_close_protocol_and_late_callbacks() {
     r.submit(OwnedRequest::SendText {
         request_id: "b".into(),
         wire_seq: 2,
+        timeout_ms: 30_000,
         chat_type: 1,
         peer_uid: "p".into(),
         text: "x".repeat(3),
@@ -492,6 +679,7 @@ fn close_cancels_queued_and_reports_failure_vs_unknown() {
     r.submit(OwnedRequest::SendText {
         request_id: "inflight".into(),
         wire_seq: 3,
+        timeout_ms: 30_000,
         chat_type: 1,
         peer_uid: "p".into(),
         text: "x".repeat(1),
@@ -513,6 +701,7 @@ fn close_cancels_queued_and_reports_failure_vs_unknown() {
     r.submit(OwnedRequest::SendText {
         request_id: "ghost".into(),
         wire_seq: 4,
+        timeout_ms: 30_000,
         chat_type: 1,
         peer_uid: "p".into(),
         text: "x".repeat(1),
@@ -531,6 +720,7 @@ fn close_cancels_queued_and_reports_failure_vs_unknown() {
     r.submit(OwnedRequest::SendText {
         request_id: "queued".into(),
         wire_seq: 5,
+        timeout_ms: 30_000,
         chat_type: 1,
         peer_uid: "p".into(),
         text: "x".repeat(1),
@@ -702,6 +892,7 @@ fn duplicate_send_request_id_is_not_redispatched() {
     let req = OwnedRequest::SendText {
         request_id: "dup".into(),
         wire_seq: 6,
+        timeout_ms: 30_000,
         chat_type: 1,
         peer_uid: "p".into(),
         text: "x".repeat(5),
@@ -731,6 +922,7 @@ fn result_notice_capacity_is_reserved_until_core_ack() {
             r.submit(OwnedRequest::SendText {
                 request_id,
                 wire_seq: n + 1,
+                timeout_ms: 30_000,
                 chat_type: 1,
                 peer_uid: "p".into(),
                 text: "x".into(),
@@ -744,6 +936,7 @@ fn result_notice_capacity_is_reserved_until_core_ack() {
     let overflow = OwnedRequest::SendText {
         request_id: "bounded-overflow".into(),
         wire_seq: 500,
+        timeout_ms: 30_000,
         chat_type: 1,
         peer_uid: "p".into(),
         text: "x".into(),
@@ -760,7 +953,7 @@ fn result_notice_capacity_is_reserved_until_core_ack() {
                     SendOutcome::Success { request_id, .. }
                     | SendOutcome::AcceptedUnconfirmed { request_id }
                     | SendOutcome::Failure { request_id, .. }
-                    | SendOutcome::Unknown { request_id } => request_id,
+                    | SendOutcome::Unknown { request_id, .. } => request_id,
                 };
                 assert!(r.ack_result_notice(&request_id, true));
             }
@@ -778,6 +971,7 @@ fn accepted_unconfirmed_ack_keeps_terminal_capacity_and_never_redispatches() {
         let req = OwnedRequest::SendText {
             request_id: request_id.clone(),
             wire_seq: n + 1,
+            timeout_ms: 30_000,
             chat_type: 2,
             peer_uid: "group".into(),
             text: "accepted-without-id".into(),
@@ -809,6 +1003,7 @@ fn accepted_unconfirmed_ack_keeps_terminal_capacity_and_never_redispatches() {
     let overflow = OwnedRequest::SendText {
         request_id: "accepted-overflow".into(),
         wire_seq: 256,
+        timeout_ms: 30_000,
         chat_type: 2,
         peer_uid: "group".into(),
         text: "accepted-without-id".into(),
@@ -942,6 +1137,7 @@ fn inline_callback_reentrancy_no_deadlock() {
         resident.submit(OwnedRequest::SendText {
             request_id: "R-INLINE".into(),
             wire_seq: 7,
+            timeout_ms: 30_000,
             chat_type: 1,
             peer_uid: "peer".into(),
             text: "x".into(),
@@ -1020,6 +1216,7 @@ fn send_pending_classified_unknown_on_close() {
         resident.submit(OwnedRequest::SendText {
             request_id: "R-PENDING".into(),
             wire_seq: 8,
+            timeout_ms: 30_000,
             chat_type: 1,
             peer_uid: "peer".into(),
             text: "x".into(),

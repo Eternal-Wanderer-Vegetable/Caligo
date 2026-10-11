@@ -29,8 +29,8 @@ pub struct ResidentLimits {
     pub ingress_max: usize,
     /// 出站事件队列上限。
     pub events_max: usize,
-    /// 已接受发送可占用的未确认生命周期通知槽上限(每个请求预留
-    /// started 与 terminal 两槽;core ACK 后归还)。
+    /// 已接受发送可占用的生命周期与迟到回执槽上限(每个请求预留
+    /// started 与 terminal 两槽;unknown 的 terminal 槽在纠正窗口后归还)。
     pub results_max: usize,
     /// 单次宿主 drain 上限;有剩余则由调用方继续调度。
     pub drain_batch: usize,
@@ -57,6 +57,7 @@ pub enum OwnedRequest {
     SendText {
         request_id: String,
         wire_seq: u32,
+        timeout_ms: u64,
         chat_type: u32,
         peer_uid: String,
         text: String,
@@ -129,7 +130,11 @@ pub enum SendOutcome {
     /// 宿主侧明确失败(如 native 服务报错)。
     Failure { request_id: String, reason: String },
     /// 结果不确定(env 失效/未知错误):执行与否不可证明。
-    Unknown { request_id: String },
+    Unknown {
+        request_id: String,
+        reason: Option<String>,
+        late_receipt_possible: bool,
+    },
 }
 
 /// 与 daemon 有序传递的发送生命周期事件。NativeStarted 必须排在同一
@@ -176,6 +181,7 @@ struct ReqRecord {
     state: ReqState,
     /// V8 Promise 路线的本地调用键；native CPB 文本候选不写入此字段。
     pending_mid: Option<String>,
+    late_receipt_deadline: Option<std::time::Instant>,
     /// bit 0 = NativeStarted 未确认, bit 1 = terminal result 未确认。
     unacked_notice_mask: u8,
 }
@@ -303,6 +309,7 @@ impl<A: HostAdapter> Resident<A> {
                 ReqRecord {
                     state: ReqState::Queued,
                     pending_mid: None,
+                    late_receipt_deadline: None,
                     unacked_notice_mask: 0b11,
                 },
             );
@@ -363,12 +370,14 @@ impl<A: HostAdapter> Resident<A> {
                     OwnedRequest::SendText {
                         request_id,
                         wire_seq,
+                        timeout_ms,
                         chat_type,
                         peer_uid,
                         text,
                     } => HostOp::SendText {
                         request_id: request_id.clone(),
                         wire_seq: *wire_seq,
+                        timeout_ms: *timeout_ms,
                         chat_type: *chat_type,
                         peer_uid: peer_uid.clone(),
                         text: text.clone(),
@@ -464,6 +473,8 @@ impl<A: HostAdapter> Resident<A> {
                             c.results_out.push_back(ResidentNotice::Outcome(
                                 SendOutcome::Unknown {
                                     request_id: request_id.clone(),
+                                    reason: None,
+                                    late_receipt_possible: false,
                                 },
                             ));
                         }
@@ -491,6 +502,8 @@ impl<A: HostAdapter> Resident<A> {
                             c.results_out.push_back(ResidentNotice::Outcome(
                                 SendOutcome::Unknown {
                                     request_id: request_id.clone(),
+                                    reason: None,
+                                    late_receipt_possible: false,
                                 },
                             ));
                         }
@@ -576,10 +589,20 @@ impl<A: HostAdapter> Resident<A> {
         release_notice_slot(&mut c, request_id, if started { 0b01 } else { 0b10 })
     }
 
-    /// 中间态 ACK 移除当前 outbox 项，但保留终态结果槽，等待强身份或 unknown。
+    /// 中间态 ACK 移除当前 outbox 项，但保留终态结果槽。
     pub fn ack_result_notice(&self, request_id: &str, terminal: bool) -> bool {
         let mut c = self.core.lock().unwrap();
         if terminal {
+            if c.requests
+                .get(request_id)
+                .map(|rec| {
+                    rec.state == ReqState::DeliveryUnknown && rec.late_receipt_deadline.is_some()
+                })
+                .unwrap_or(false)
+            {
+                // ACK 接受了 Unknown；槽仍为迟到强身份预留。
+                return true;
+            }
             release_notice_slot(&mut c, request_id, 0b10)
         } else {
             c.requests
@@ -587,6 +610,30 @@ impl<A: HostAdapter> Resident<A> {
                 .map(|rec| rec.unacked_notice_mask & 0b10 != 0)
                 .unwrap_or(false)
         }
+    }
+
+    /// Release result capacity after the bounded late-identity correction window.
+    pub fn expire_late_receipts(&self, now: std::time::Instant) -> usize {
+        let mut c = self.core.lock().unwrap();
+        let expired: Vec<String> = c
+            .requests
+            .iter()
+            .filter(|(_, rec)| {
+                rec.state == ReqState::DeliveryUnknown
+                    && rec
+                        .late_receipt_deadline
+                        .map(|deadline| now >= deadline)
+                        .unwrap_or(false)
+            })
+            .map(|(request_id, _)| request_id.clone())
+            .collect();
+        for request_id in &expired {
+            if let Some(rec) = c.requests.get_mut(request_id) {
+                rec.late_receipt_deadline = None;
+            }
+            release_notice_slot(&mut c, request_id, 0b10);
+        }
+        expired.len()
     }
 
     /// 排空异步发送响应消费槽(adapter → 账本终局 → core 结果通道)。
@@ -609,6 +656,12 @@ impl<A: HostAdapter> Resident<A> {
                     .get(&request_id)
                     .map(|rec| {
                         matches!(rec.state, ReqState::SendPending | ReqState::IdentityPending)
+                            || (matches!(&outcome, SendOutcome::Success { .. })
+                                && rec.state == ReqState::DeliveryUnknown
+                                && rec
+                                    .late_receipt_deadline
+                                    .map(|deadline| std::time::Instant::now() < deadline)
+                                    .unwrap_or(false))
                     })
                     .unwrap_or(false);
             if !valid {
@@ -617,11 +670,24 @@ impl<A: HostAdapter> Resident<A> {
                 continue;
             }
             if let Some(rec) = c.requests.get_mut(&request_id) {
-                rec.state = if matches!(&outcome, SendOutcome::AcceptedUnconfirmed { .. }) {
-                    ReqState::IdentityPending
-                } else {
-                    ReqState::Done
-                };
+                match &outcome {
+                    SendOutcome::AcceptedUnconfirmed { .. } => {
+                        rec.state = ReqState::IdentityPending;
+                    }
+                    SendOutcome::Unknown {
+                        late_receipt_possible: true,
+                        ..
+                    } => {
+                        rec.state = ReqState::DeliveryUnknown;
+                        rec.late_receipt_deadline = std::time::Instant::now().checked_add(
+                            std::time::Duration::from_millis(caligo_model::LATE_RECEIPT_GRACE_MS),
+                        );
+                    }
+                    _ => {
+                        rec.state = ReqState::Done;
+                        rec.late_receipt_deadline = None;
+                    }
+                }
             }
             c.results_out.push_back(ResidentNotice::Outcome(outcome));
             accepted += 1;
@@ -787,7 +853,7 @@ fn send_outcome_request_id(outcome: &SendOutcome) -> &str {
         SendOutcome::Success { request_id, .. }
         | SendOutcome::AcceptedUnconfirmed { request_id }
         | SendOutcome::Failure { request_id, .. }
-        | SendOutcome::Unknown { request_id } => request_id,
+        | SendOutcome::Unknown { request_id, .. } => request_id,
     }
 }
 

@@ -184,6 +184,16 @@ fn bridge_business_protocol_revision_is_checked_separately_from_ipc_v3() {
     assert!(matches!(
         validate_bridge_hello_v3(
             PROTOCOL_VERSION_V3,
+            BUSINESS_PROTOCOL_REVISION - 1,
+            caligo_core::ipc::Role::Bridge,
+            caligo_core::ipc::Role::Bridge,
+            CORE_BUILD,
+        ),
+        Err(caligo_core::ipc::RejectReason::BusinessProtocolRevisionMismatch { .. })
+    ));
+    assert!(matches!(
+        validate_bridge_hello_v3(
+            PROTOCOL_VERSION_V3,
             BUSINESS_PROTOCOL_REVISION + 1,
             caligo_core::ipc::Role::Bridge,
             caligo_core::ipc::Role::Bridge,

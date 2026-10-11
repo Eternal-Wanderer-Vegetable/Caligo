@@ -1,6 +1,6 @@
 {
   "$schema": ".agents/skills/harness-creator/templates/feature-list.schema.json",
-  "updated": "2026-10-11",
+  "updated": "2026-10-12",
   "baseline_commit": "0f5b483",
   "active_feature": null,
   "status_basis": "产品 status 反映完成门，implemented/wired/lab/field 分开描述。历史执行台账是证据，状态更新不能替代现场验收。",
@@ -45,7 +45,7 @@
       "plan_steps": ["N2"],
       "dependencies": ["feat-002"],
       "status": "in-progress",
-      "evidence": "N4-R1 离线实现将 AcceptedUnconfirmed 与强 ID 成功分离，request_id/started/outcome 与旧 Success(None) replay 已覆盖；R2 callback 局部收敛。CPB→native identity 强关联仍 unsupported，QQ ABI/线程/释放和现场回程未验收，保持 in-progress。",
+      "evidence": "N4-R1 离线实现将 AcceptedUnconfirmed 与强 ID 成功分离，request_id/started/outcome 与旧 Success(None) replay 已覆盖。2026-10-12 follow-up 将所有非零 native callback code 保守归为 DeliveryUnknown 并保留原始诊断；剩余 timeout 随 IPC v3 Dispatch 下发，bridge deadline 产出终态 unknown，同请求强身份迟到回执可在有界 grace 内更正。CPB→native identity 强关联仍 unsupported，QQ ABI/线程/释放和现场回程未验收，保持 in-progress。",
       "evidence_paths": ["crates/caligo-bridge/src/consumer_probe.rs", "crates/caligo-bridge/src/native_response.rs", "crates/caligo-core/src/runtime.rs", "docs/execution/2026-10-11-n4-response-recovery.md", "docs/execution/2026-10-09-snowluma-parity/ledger.md"],
       "done_criteria": ["预登记先于 native 调用", "inline/重复/旧代次回调只终结一次", "拒绝码保留，接受与稳定身份成功区分", "超时/排空保持 unknown 且不自动重发"]
     },

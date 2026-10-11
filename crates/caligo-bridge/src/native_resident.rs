@@ -378,20 +378,13 @@ impl NativeHostAdapter {
 impl NativeHostAdapter {
     /// 排空消费响应槽 → 账本终局 → (request_id, SendOutcome)。
     /// 映射:code==0 → BusinessAccepted(ack,无 native_id;计划 §178
-    /// "ACK 不能变成业务成功"的忠实表达);code!=0 → BusinessRejected
-    /// (retCode/errStr 如实)。
+    /// "ACK 不能变成业务成功"的忠实表达);code!=0 → DeliveryUnknown。
+    /// 消费者暴露 errCode/errStr 但没有可验证来源位，不能推断业务拒绝。
     pub fn drain_send_responses(&mut self) -> Vec<(String, SendOutcome)> {
         let mut inner = self.inner.lock().unwrap();
         let mut out = Vec::new();
         for (cookie, code, err) in crate::consumer_probe::drain_responses() {
-            let outcome = if code == 0 {
-                crate::native_response::ResponseOutcome::BusinessAccepted
-            } else {
-                crate::native_response::ResponseOutcome::BusinessRejected {
-                    ret_code: code,
-                    err: err.clone(),
-                }
-            };
+            let outcome = callback_response_outcome(code, &err);
             let completion = inner.session.on_response(&cookie, outcome);
             match completion {
                 crate::native_response::Completion::AcceptedUnconfirmed { request_id } => {
@@ -400,51 +393,78 @@ impl NativeHostAdapter {
                         SendOutcome::AcceptedUnconfirmed { request_id },
                     ));
                 }
-                crate::native_response::Completion::Terminated {
-                    request_id,
-                    outcome,
-                } => {
-                    let so = match outcome {
-                        crate::native_response::ResponseOutcome::BusinessAccepted => {
-                            SendOutcome::AcceptedUnconfirmed {
-                                request_id: request_id.clone(),
-                            }
-                        }
-                        crate::native_response::ResponseOutcome::BusinessSuccess { native_id } => {
-                            if native_id.is_empty() {
-                                SendOutcome::AcceptedUnconfirmed {
-                                    request_id: request_id.clone(),
-                                }
-                            } else {
-                                SendOutcome::Success {
-                                    request_id: request_id.clone(),
-                                    native_id,
-                                }
-                            }
-                        }
-                        crate::native_response::ResponseOutcome::BusinessRejected {
-                            ret_code,
-                            err,
-                        } => SendOutcome::Failure {
-                            request_id: request_id.clone(),
-                            reason: format!("retCode={ret_code} err={err}"),
-                        },
-                        crate::native_response::ResponseOutcome::TransportFailed { reason } => {
-                            SendOutcome::Failure {
-                                request_id: request_id.clone(),
-                                reason,
-                            }
-                        }
-                    };
-                    out.push((request_id, so));
-                }
+                crate::native_response::Completion::Terminated { .. } => {}
                 // DuplicateIgnored/StaleGeneration/UnknownCookie remain audit-only.
                 crate::native_response::Completion::DuplicateIgnored { .. }
                 | crate::native_response::Completion::StaleGeneration { .. }
                 | crate::native_response::Completion::UnknownCookie => {}
             }
         }
+        for (request_id, outcome) in inner.session.expire_responses(std::time::Instant::now()) {
+            out.push((
+                request_id.clone(),
+                terminal_send_outcome(&request_id, outcome),
+            ));
+        }
         out
+    }
+}
+
+fn callback_response_outcome(code: i32, err: &str) -> crate::native_response::ResponseOutcome {
+    if code == 0 {
+        crate::native_response::ResponseOutcome::BusinessAccepted
+    } else {
+        crate::native_response::ResponseOutcome::DeliveryUnknown {
+            reason: format!(
+                "response callback errCode={code} errStr={err:?}; code provenance is unverified"
+            ),
+            late_receipt_possible: false,
+        }
+    }
+}
+
+fn terminal_send_outcome(
+    request_id: &str,
+    outcome: crate::native_response::ResponseOutcome,
+) -> SendOutcome {
+    match outcome {
+        crate::native_response::ResponseOutcome::BusinessAccepted => {
+            SendOutcome::AcceptedUnconfirmed {
+                request_id: request_id.to_string(),
+            }
+        }
+        crate::native_response::ResponseOutcome::BusinessSuccess { native_id } => {
+            if native_id.is_empty() {
+                SendOutcome::AcceptedUnconfirmed {
+                    request_id: request_id.to_string(),
+                }
+            } else {
+                SendOutcome::Success {
+                    request_id: request_id.to_string(),
+                    native_id,
+                }
+            }
+        }
+        crate::native_response::ResponseOutcome::BusinessRejected { ret_code, err } => {
+            SendOutcome::Failure {
+                request_id: request_id.to_string(),
+                reason: format!("retCode={ret_code} err={err}"),
+            }
+        }
+        crate::native_response::ResponseOutcome::TransportFailed { reason } => {
+            SendOutcome::Failure {
+                request_id: request_id.to_string(),
+                reason,
+            }
+        }
+        crate::native_response::ResponseOutcome::DeliveryUnknown {
+            reason,
+            late_receipt_possible,
+        } => SendOutcome::Unknown {
+            request_id: request_id.to_string(),
+            reason: Some(reason),
+            late_receipt_possible,
+        },
     }
 }
 
@@ -478,6 +498,7 @@ impl HostAdapter for NativeHostAdapter {
             HostOp::SendText {
                 request_id,
                 wire_seq,
+                timeout_ms,
                 chat_type,
                 peer_uid,
                 text,
@@ -524,11 +545,12 @@ impl HostAdapter for NativeHostAdapter {
                 let mut cookie = crate::native_response::Cookie([0u8; 16]);
                 cookie.0[..8].copy_from_slice(&self.session_generation.to_le_bytes());
                 cookie.0[8..16].copy_from_slice(&(self.cookie_epoch ^ cookie_seq).to_le_bytes());
-                match inner.session.enqueue_send_with_wire_seq(
+                match inner.session.enqueue_send_with_timeout(
                     &mut inner.ops,
                     &request_id,
                     cookie,
                     wire_seq,
+                    Some(timeout_ms),
                     &body,
                 ) {
                     crate::native_session::SendAcceptance::Dispatched { .. } => {
@@ -749,6 +771,7 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
                     let _ = resident.drain();
                     // N3 retCode 消费者排空:QQ 分发线程 → 槽 → 账本终局。
                     resident.drain_send_responses();
+                    resident.expire_late_receipts(std::time::Instant::now());
                     for notice in resident.take_results() {
                         let _ = result_tx.send(notice);
                     }
@@ -1007,6 +1030,21 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callback_nonzero_code_stays_unknown_with_raw_diagnostic() {
+        assert_eq!(
+            callback_response_outcome(1006501, "local network timeout"),
+            crate::native_response::ResponseOutcome::DeliveryUnknown {
+                reason: "response callback errCode=1006501 errStr=\"local network timeout\"; code provenance is unverified".into(),
+                late_receipt_possible: false,
+            }
+        );
+        assert_eq!(
+            callback_response_outcome(0, ""),
+            crate::native_response::ResponseOutcome::BusinessAccepted
+        );
+    }
 
     #[test]
     fn owned_worker_join_is_reported_and_timeout_is_not_success() {

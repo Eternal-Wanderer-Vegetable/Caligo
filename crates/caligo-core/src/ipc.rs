@@ -132,10 +132,11 @@ pub use caligo_model::framing::{
     encode_frame, FrameDecoder, FrameError, FRAME_MAGIC, MAX_FRAME_SIZE,
 };
 pub use caligo_model::ipc_v2::{
-    ControlMsg, CoreToBridgeMsg, CoreToControlMsg, EventPayload, OutcomePayload, Role,
-    PROTOCOL_VERSION_V2,
+    ControlMsg, CoreToControlMsg, EventPayload, Role, PROTOCOL_VERSION_V2,
 };
-pub use caligo_model::ipc_v3::{BridgeMsg, BUSINESS_PROTOCOL_REVISION, PROTOCOL_VERSION_V3};
+pub use caligo_model::ipc_v3::{
+    BridgeMsg, CoreToBridgeMsg, OutcomePayload, BUSINESS_PROTOCOL_REVISION, PROTOCOL_VERSION_V3,
+};
 
 /// v3 握手校验(bridge/control 共用)。校验顺序:协议版本 → 角色。
 /// 认证(token)由调用方以 [`validate_auth`] 先行完成并拒绝。

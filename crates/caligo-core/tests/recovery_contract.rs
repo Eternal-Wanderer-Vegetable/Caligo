@@ -135,7 +135,8 @@ fn l09_crash_around_dispatch_intent_never_redispatches() {
 
     // bridge 对 B 的真实状态答复"未知"(结果丢失)→ delivery_unknown,不重发。
     assert_eq!(
-        a2.bridge_result("B", NativeResult::Unknown).unwrap(),
+        a2.bridge_result("B", NativeResult::Unknown { reason: None })
+            .unwrap(),
         ReceiptOutcome::Applied
     );
     assert_eq!(

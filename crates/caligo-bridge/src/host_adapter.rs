@@ -27,6 +27,8 @@ pub enum HostOp {
         request_id: String,
         /// core 持久分配的 client_seq；adapter 不得另行分配或替换。
         wire_seq: u32,
+        /// 请求尚可等待回执的剩余时长。
+        timeout_ms: u64,
         chat_type: u32,
         peer_uid: String,
         text: String,

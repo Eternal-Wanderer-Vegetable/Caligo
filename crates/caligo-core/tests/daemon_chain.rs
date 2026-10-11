@@ -146,14 +146,17 @@ fn spawn_bridge_agent(daemon: Arc<Daemon>, stop: Arc<AtomicBool>) -> std::thread
                 Ok(CoreToBridgeMsg::Dispatch {
                     request_id,
                     wire_seq,
+                    timeout_ms,
                     target,
                     text,
                 }) => {
+                    assert!(timeout_ms > 0 && timeout_ms <= 30_000);
                     // 语义链:resident.submit/drain 产生有序 started/result。
                     assert_eq!(
                         resident.submit(OwnedRequest::SendText {
                             request_id: request_id.clone(),
                             wire_seq,
+                            timeout_ms,
                             chat_type: 2,
                             peer_uid: "grp".into(),
                             text: text.clone(),
