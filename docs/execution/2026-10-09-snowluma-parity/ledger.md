@@ -1344,3 +1344,37 @@ N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。
 - resident 模式现场跑(caligod + IPC):daemon 发送 → Dispatched → QQ 响应 →
   BusinessAccepted/BusinessRejected 上行 —— N4 发送业务结果判定闭环;
 - 前置:实例 14632 健康;注入密度纪律(今日已 16 次,建议明日执行)。
+## 2026-10-11(四十一):N4 收口冲刺 —— 全链到 NativeStarted;响应腿未及验证;实例第 5 次损失
+
+### 现场链路(全链首次贯通到原生调用)
+- caligod(token-file 模式)+ n3res24 resident 注入:worker 连接 → Hello →
+  **gen-1 attach ✓** → bootstrap Ready → CPB 基线(4015 objs)→ **事件上行
+  230 sent / 84 acked**(接收路径完整工作);
+- daemon send:SendText → **send_accepted(Queued)** → 派发 → **NativeStarted**
+  —— G3NativeOps FFI + 消费 delegate 提交在 QQ 内真实执行;
+- **gen 合同实证**:第二次 worker 报 gen=2 → daemon attach 拒绝(T05 反劫持
+  门按设计工作;同 QQ 进程 = 同代次);gen=1 重连 = 幂等恢复 → actor 复活
+  (Degraded → Active)—— recovery 契约现场验证;
+- daemon 干净收停(stopped;journal 保留)。
+
+### 未闭合:响应腿
+- **实例 14632 死亡**(第 5 次;17 号注入)——死亡窗口 = n4r3 派发后、
+  响应到达前(consumer_result = 0;状态冻结 NativeStarted);
+- 无 WER 事件(静默终止;与 g3 流 fail-fast 0xc0000409 模式不同)——
+  死因未定案。候选:响应路径 consumer_invoke(resident 模式首测)、
+  常驻泵线程与 QQ 分发线程交互、session 状态累积、外部因素;
+- 与 g3 流差异:同 invoke 代码在 g3 流 8 次存活 —— resident 模式新增
+  变量 = 泵线程 FFI + CPB 扫描 + 会话状态。
+
+### 状态与收口(诚实)
+- **MVP 完成度:代码 100%(全周期单测绿);现场 80% —— 到 NativeStarted,
+  响应腿被实例不稳定性阻断**;
+- 今日注入 17 次、实例损失 5 次 —— 远超一切纪律线;本 session 现场工作
+  **硬停**。下一次(隔日、新实例、低密度):
+  ①plain 基线;②resident 单独跑(观察存活);③daemon 单发一次 → 响应腿
+  判定;④若再死:crash dump 配置(SnowLuma 宿主werодавитель)后重试;
+- 备选路径:resident 模式的响应腿也可经「g3 直调流 + 槽 drain 脚本」
+  离线验证(不走 daemon),作为低风险对照。
+
+### 提交
+- 61f9d19 = N4 接线五件套(代码完成);本节 = 现场冲刺记录。
