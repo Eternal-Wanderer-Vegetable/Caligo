@@ -53,6 +53,8 @@ pub struct HandshakeExpectation<'a> {
 pub enum RejectReason {
     /// 协议版本不匹配 → 拒绝,不降级协商。
     ProtocolVersionMismatch { got: u32, want: u32 },
+    /// Bridge/core business receipt contract revision mismatch.
+    BusinessProtocolRevisionMismatch { got: u32, want: u32 },
     /// 模块基线与 manifest 不匹配 → 拒绝 attach(计划 T01 的逻辑层)。
     ModuleBaselineMismatch { got: String, want: String },
     /// 账号不匹配 → 拒绝,与其他账号隔离(计划 T02 的逻辑层)。
@@ -64,6 +66,12 @@ impl core::fmt::Display for RejectReason {
         match self {
             RejectReason::ProtocolVersionMismatch { got, want } => {
                 write!(f, "protocol version mismatch: got {got}, want {want}")
+            }
+            RejectReason::BusinessProtocolRevisionMismatch { got, want } => {
+                write!(
+                    f,
+                    "business protocol revision mismatch: got {got}, want {want}"
+                )
             }
             RejectReason::ModuleBaselineMismatch { got, want } => {
                 write!(f, "module baseline mismatch: got {got:?}, want {want:?}")
@@ -120,14 +128,14 @@ pub fn validate_hello(
 // 此处按原路径再导出,既有代码与测试不受影响。
 // ---------------------------------------------------------------------------
 
-pub use caligo_model::framing::{encode_frame, FrameDecoder, FrameError, FRAME_MAGIC, MAX_FRAME_SIZE};
+pub use caligo_model::framing::{
+    encode_frame, FrameDecoder, FrameError, FRAME_MAGIC, MAX_FRAME_SIZE,
+};
 pub use caligo_model::ipc_v2::{
     ControlMsg, CoreToBridgeMsg, CoreToControlMsg, EventPayload, OutcomePayload, Role,
     PROTOCOL_VERSION_V2,
 };
-pub use caligo_model::ipc_v3::{
-    BridgeMsg, PROTOCOL_VERSION_V3,
-};
+pub use caligo_model::ipc_v3::{BridgeMsg, BUSINESS_PROTOCOL_REVISION, PROTOCOL_VERSION_V3};
 
 /// v3 握手校验(bridge/control 共用)。校验顺序:协议版本 → 角色。
 /// 认证(token)由调用方以 [`validate_auth`] 先行完成并拒绝。
@@ -150,6 +158,25 @@ pub fn validate_hello_v3(
         });
     }
     Ok((PROTOCOL_VERSION_V3, core_build.to_string()))
+}
+
+/// Bridge Hello negotiation: framing v3 and business receipt revision are
+/// independent gates. Control clients continue to use `validate_hello_v3`.
+pub fn validate_bridge_hello_v3(
+    protocol_version: u32,
+    business_protocol_revision: u32,
+    role: Role,
+    expect_role: Role,
+    core_build: &str,
+) -> Result<(u32, String), RejectReason> {
+    let ack = validate_hello_v3(protocol_version, role, expect_role, core_build)?;
+    if business_protocol_revision != BUSINESS_PROTOCOL_REVISION {
+        return Err(RejectReason::BusinessProtocolRevisionMismatch {
+            got: business_protocol_revision,
+            want: BUSINESS_PROTOCOL_REVISION,
+        });
+    }
+    Ok(ack)
 }
 
 /// v2 握手校验(bridge/control 共用)。校验顺序:协议版本 → 角色。

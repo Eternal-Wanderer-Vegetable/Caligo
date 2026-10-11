@@ -2,15 +2,13 @@
 //! 旧 JS/V8 pump 前提迁到 native 后端 —— 复用 IPC v3、跨连接未确认事件
 //! 窗口、actor/journal(core 侧零改动),替换的是宿主前提:
 //!
-//! - **发送**:HostOp::SendText → qq_wire 已证形状(群聊)→
-//!   `NativeSession::enqueue_send`(G3NativeOps 完整 FFI;r2 现场实证
-//!   服务器连号 seq)。`SendFired` 挂账,CPB 回流匹配(fresh 记录
-//!   peer+text 对齐)后 `complete_sends` 终态;未回流由 core 侧 deadline
-//!   表达 Unknown(受理 ≠ 回流,不冒充成功)。
+//! - **发送**:HostOp::SendText → qq_wire 群聊编码使用 core 先持久化的
+//!   client_seq。CPB peer+text+time 仅作候选诊断，不提升为业务成功；
+//!   强身份桥接未证前保持 AcceptedUnconfirmed，最终由 core 归 Unknown。
 //! - **接收**:worker 线程 CPB 差分轮询(`SeenRecords::absorb`;进程内
-//!   ~90ms/轮)。本版为**纯轮询** —— ledger(十三)定稿形态(通知处理器
-//!   轻量信号 + worker 收集)的严格子集:零回调接线,通知 swap 的常驻
-//!   化属后续增量(需独立生命周期评审)。
+//!   ~90ms/轮)。CPB seq 仅作会话内候选序数；缺少稳定 native ID、发送者
+//!   UID→UIN 映射或完整字段的记录只作诊断，不进入业务事件流。版本化
+//!   通知处理器与完整身份映射仍属后续增量。
 //! - **泵**:自有线程 + condvar 唤醒(零 uv_async/V8);daemon_client 的
 //!   wake = 泵唤醒。g3 FFI 无 JS 上下文前提(远线程调用现场实证),
 //!   owner 语义 = 泵线程自声明,bootstrap 在泵线程执行。
@@ -27,14 +25,12 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use crate::daemon_client::{run_worker, DaemonClientConfig, WorkerExit};
 use crate::g3_ops::G3NativeOps;
-use crate::resident::SendOutcome;
 use crate::host_adapter::{HostAdapter, HostError, HostOp, HostOpResult};
 use crate::native_receive::{
-    collect_record_fields, scan_cpb_objects_inproc, RpmSelfReader, SeenRecords,
+    collect_record_fields, scan_cpb_objects_inproc, RecordFields, RpmSelfReader, SeenRecords,
 };
-use crate::native_response::SeqAllocator;
-use crate::native_session::NativeSession;
-use crate::resident::{EventSourceKind, OwnedEvent, Resident, ResidentLimits};
+use crate::native_session::{NativeSession, SeqSource};
+use crate::resident::{EventSourceKind, OwnedEvent, Resident, ResidentLimits, SendOutcome};
 
 /// `native_op` 明确失败码(drain → `SendOutcome::Failure`,reason =
 /// "native code N";编码区分语义,未发起类与业务失败分开)。
@@ -123,9 +119,44 @@ fn stage(report: &str, stage_name: &str, ok: bool, detail: &str) {
         "ts": now_ms(), "tid": tid, "stage": stage_name, "ok": ok, "detail": detail
     });
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(report) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(report)
+    {
         let _ = f.write_all(line.to_string().as_bytes());
         let _ = f.write_all(b"\n");
+    }
+}
+
+fn join_owned_thread(
+    handle: std::thread::JoinHandle<()>,
+    report: &str,
+    stage_name: &str,
+    deadline: std::time::Instant,
+) -> bool {
+    while !handle.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            stage(
+                report,
+                stage_name,
+                false,
+                "join timeout; worker may remain resident",
+            );
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(50)));
+    }
+    match handle.join() {
+        Ok(()) => {
+            stage(report, stage_name, true, "joined");
+            true
+        }
+        Err(_) => {
+            stage(report, stage_name, false, "worker panicked");
+            false
+        }
     }
 }
 
@@ -140,6 +171,45 @@ pub fn chat_type_for_peer(peer: &str, groups: &HashSet<u64>) -> u32 {
         Ok(code) if groups.contains(&code) => 2,
         _ => 0,
     }
+}
+
+/// Build a business event only when CPB fields prove every identity field this
+/// path currently needs. `seq` is an ordering/candidate value, never a native
+/// message ID. The decoder presently leaves `native_id` and `sender_uin` empty
+/// because neither has a proven CPB mapping, so current CPB records stay out of
+/// the event stream.
+fn cpb_event_from_record(fields: &RecordFields, groups: &HashSet<u64>) -> Option<OwnedEvent> {
+    let native_id = fields
+        .native_id
+        .as_deref()
+        .filter(|value| !value.is_empty())?;
+    let sender_uin = fields
+        .sender_uin
+        .as_deref()
+        .filter(|value| !value.is_empty())?;
+    let peer = fields
+        .peer_uid
+        .as_deref()
+        .filter(|value| !value.is_empty())?;
+    fields.seq?;
+    let text = fields.text.as_deref()?;
+    let msg_time = fields.platform_time?;
+    let chat_type = chat_type_for_peer(peer, groups);
+    if chat_type != 2 {
+        // This CPB route only has an explicit group allowlist. It must not
+        // infer private-chat routing from an unclassified peer string.
+        return None;
+    }
+    Some(OwnedEvent {
+        source: EventSourceKind::Recv,
+        chat_type,
+        peer_uid: peer.to_owned(),
+        peer_uin: peer.to_owned(),
+        sender_uin: sender_uin.to_owned(),
+        native_id: native_id.to_owned(),
+        text: text.to_owned(),
+        msg_time: Some(msg_time),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -163,8 +233,10 @@ pub struct EchoMatcher {
     pending: Mutex<HashMap<String, PendingFire>>,
     /// 过期未回流被清理的 mid 数(诊断可见;core 侧 deadline 另行 Unknown)。
     pub expired: AtomicU64,
-    /// 已回流确认数。
-    pub confirmed: AtomicU64,
+    /// peer+text+time 候选观察数；不代表关联或送达。
+    pub unproven_candidates: AtomicU64,
+    /// 同一记录同时匹配多条发送候选数。
+    pub ambiguous_records: AtomicU64,
 }
 
 /// 回流窗口:登记超过此时长未匹配即清理(core 侧 deadline 兜底 Unknown)。
@@ -191,14 +263,13 @@ impl EchoMatcher {
         );
     }
 
-    /// 用一条 fresh CPB 记录匹配在途发送:peer 与 text 全等、
-    /// platform_time ≥ 发起时刻 − 容差。命中即摘除(一条回流只确认一笔)。
-    pub fn match_record(
+    /// 只统计候选数；文本相似不能证明 request↔native identity。
+    pub fn observe_record(
         &self,
         peer: Option<&str>,
         text: Option<&str>,
         platform_time: Option<u64>,
-    ) -> Option<String> {
+    ) -> usize {
         let now = now_ms();
         let mut p = self.pending.lock().unwrap();
         // 过期清理(不阻塞登记路径;诊断计数)。
@@ -212,22 +283,26 @@ impl EchoMatcher {
             self.expired.fetch_add(1, Ordering::Relaxed);
         }
         let (Some(peer), Some(text)) = (peer, text) else {
-            return None;
+            return 0;
         };
-        let hit = p.iter().find(|(_, f)| {
-            &f.peer == peer
+        let candidates = p
+            .iter()
+            .filter(|(_, f)| {
+                &f.peer == peer
                 && &f.text == text
                 // 时间缺席(半成品记录)不参与回流确认(保守:不误确认)。
                 && platform_time
                     .map(|t| t + ECHO_TIME_SLACK_SECS >= f.since_secs)
                     .unwrap_or(false)
-        });
-        let mid = hit.map(|(k, _)| k.clone());
-        if let Some(m) = &mid {
-            p.remove(m);
-            self.confirmed.fetch_add(1, Ordering::Relaxed);
+            })
+            .count();
+        if candidates > 0 {
+            self.unproven_candidates.fetch_add(1, Ordering::Relaxed);
         }
-        mid
+        if candidates > 1 {
+            self.ambiguous_records.fetch_add(1, Ordering::Relaxed);
+        }
+        candidates
     }
 
     pub fn pending_len(&self) -> usize {
@@ -239,46 +314,63 @@ impl EchoMatcher {
 // NativeHostAdapter(owner = 泵线程;零 V8/uv 前提)
 // ---------------------------------------------------------------------------
 
-type NativeSeqAlloc = SeqAllocator<Box<dyn FnMut(u64) -> Result<(), std::io::Error> + Send>>;
+#[derive(Debug)]
+struct CoreSeqRequired;
 
-/// g3 路线的宿主适配器:owner = 泵线程(启动时自声明 tid),env = 锚点
-/// 探针(每次进入宿主 API 前重查,不缓存),current_context = 恒可
+impl SeqSource for CoreSeqRequired {
+    fn allocate(&mut self) -> Result<u64, std::io::Error> {
+        Err(std::io::Error::other(
+            "N4 client_seq must be persisted by core",
+        ))
+    }
+}
+
+/// g3 路线的宿主适配器:owner = 泵线程(启动时自声明 tid),env = 同一
+/// retained service lease 的锚点/transport 探针,current_context = 恒可
 /// (g3 FFI 无 JS 上下文前提;远线程调用现场实证)。
 pub struct NativeHostAdapter {
-    wrapper_base: usize,
     owner_tid: Arc<AtomicU64>,
     inner: Mutex<AdapterInner>,
     matcher: Arc<EchoMatcher>,
     /// 请求/候选消息 ID 单调计数(唯一性)。
     id_seq: AtomicU64,
+    /// cookie 的 adapter 实例随机域,与会话代次和单调序号组合。
+    cookie_epoch: u64,
+    session_generation: u64,
 }
 
 struct AdapterInner {
     ops: G3NativeOps,
-    session: NativeSession<NativeSeqAlloc>,
+    session: NativeSession<CoreSeqRequired>,
 }
 
 impl NativeHostAdapter {
-    pub fn new(
-        wrapper_base: usize,
-        session: NativeSession<NativeSeqAlloc>,
+    fn new(
+        ops: G3NativeOps,
+        session: NativeSession<CoreSeqRequired>,
         matcher: Arc<EchoMatcher>,
         owner_tid: Arc<AtomicU64>,
+        session_generation: u64,
     ) -> Self {
+        use std::hash::{BuildHasher, Hasher};
+        let wrapper_base = ops.wrapper_base();
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(wrapper_base as u64);
+        hasher.write_u64(std::process::id() as u64);
+        hasher.write_u64(now_ms());
+        let cookie_epoch = hasher.finish();
         Self {
-            wrapper_base,
             owner_tid,
-            inner: Mutex::new(AdapterInner {
-                ops: G3NativeOps::new(wrapper_base),
-                session,
-            }),
+            inner: Mutex::new(AdapterInner { ops, session }),
             matcher,
             id_seq: AtomicU64::new(1),
+            cookie_epoch,
+            session_generation,
         }
     }
 
     fn env_ok(&mut self) -> bool {
-        // 每次进入宿主 API 前重查锚点(getter 租约零副作用;不缓存 —— K3 教训)。
+        // 每次进入宿主 API 前重查 retained pair 的锚点与 transport；不重复 getter。
         matches!(self.inner.get_mut().unwrap().ops.probe_service(), Ok(_))
     }
 }
@@ -301,24 +393,56 @@ impl NativeHostAdapter {
                 }
             };
             let completion = inner.session.on_response(&cookie, outcome);
-            if let crate::native_response::Completion::Terminated { request_id, outcome } = completion {
-                let so = match outcome {
-                    crate::native_response::ResponseOutcome::BusinessAccepted => {
-                        SendOutcome::Success { request_id: request_id.clone(), native_id: None }
-                    }
-                    crate::native_response::ResponseOutcome::BusinessSuccess { native_id } => {
-                        SendOutcome::Success { request_id: request_id.clone(), native_id: Some(native_id) }
-                    }
-                    crate::native_response::ResponseOutcome::BusinessRejected { ret_code, err } => {
-                        SendOutcome::Failure { request_id: request_id.clone(), reason: format!("retCode={ret_code} err={err}") }
-                    }
-                    crate::native_response::ResponseOutcome::TransportFailed { reason } => {
-                        SendOutcome::Failure { request_id: request_id.clone(), reason }
-                    }
-                };
-                out.push((request_id, so));
+            match completion {
+                crate::native_response::Completion::AcceptedUnconfirmed { request_id } => {
+                    out.push((
+                        request_id.clone(),
+                        SendOutcome::AcceptedUnconfirmed { request_id },
+                    ));
+                }
+                crate::native_response::Completion::Terminated {
+                    request_id,
+                    outcome,
+                } => {
+                    let so = match outcome {
+                        crate::native_response::ResponseOutcome::BusinessAccepted => {
+                            SendOutcome::AcceptedUnconfirmed {
+                                request_id: request_id.clone(),
+                            }
+                        }
+                        crate::native_response::ResponseOutcome::BusinessSuccess { native_id } => {
+                            if native_id.is_empty() {
+                                SendOutcome::AcceptedUnconfirmed {
+                                    request_id: request_id.clone(),
+                                }
+                            } else {
+                                SendOutcome::Success {
+                                    request_id: request_id.clone(),
+                                    native_id,
+                                }
+                            }
+                        }
+                        crate::native_response::ResponseOutcome::BusinessRejected {
+                            ret_code,
+                            err,
+                        } => SendOutcome::Failure {
+                            request_id: request_id.clone(),
+                            reason: format!("retCode={ret_code} err={err}"),
+                        },
+                        crate::native_response::ResponseOutcome::TransportFailed { reason } => {
+                            SendOutcome::Failure {
+                                request_id: request_id.clone(),
+                                reason,
+                            }
+                        }
+                    };
+                    out.push((request_id, so));
+                }
+                // DuplicateIgnored/StaleGeneration/UnknownCookie remain audit-only.
+                crate::native_response::Completion::DuplicateIgnored { .. }
+                | crate::native_response::Completion::StaleGeneration { .. }
+                | crate::native_response::Completion::UnknownCookie => {}
             }
-            // DuplicateIgnored/StaleGeneration/UnknownCookie = 审计类,不上升。
         }
         out
     }
@@ -352,6 +476,8 @@ impl HostAdapter for NativeHostAdapter {
             // 延迟模式下 resident 不持有监听器 token,不会到达;到达即如实确认。
             HostOp::ListenerRemove { .. } => Ok(HostOpResult::ListenerRemoved),
             HostOp::SendText {
+                request_id,
+                wire_seq,
                 chat_type,
                 peer_uid,
                 text,
@@ -381,7 +507,7 @@ impl HostAdapter for NativeHostAdapter {
                 let body = match caligo_model::qq_wire::send::encode_group_text(
                     group_code,
                     &text,
-                    0,
+                    wire_seq,
                     // random 每消息新鲜(服务器 (uin, random) 近窗去重,N3R28 实证)。
                     caligo_model::qq_wire::send::fresh_random(),
                     ts,
@@ -394,18 +520,17 @@ impl HostAdapter for NativeHostAdapter {
                     }
                 };
                 // 新鲜 16B cookie(g3-session 同款:时钟派生;零值由 register 拒绝)。
-                let cv = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(1);
+                let cookie_seq = self.id_seq.fetch_add(1, Ordering::Relaxed);
                 let mut cookie = crate::native_response::Cookie([0u8; 16]);
-                cookie.0[..8].copy_from_slice(&cv.to_le_bytes());
-                cookie.0[8..16].copy_from_slice(&(cv.wrapping_mul(0x5DEECE66D)).to_le_bytes());
-                let rid = format!(
-                    "native-resident-{}",
-                    self.id_seq.fetch_add(1, Ordering::Relaxed)
-                );
-                match inner.session.enqueue_send(&mut inner.ops, &rid, cookie, &body) {
+                cookie.0[..8].copy_from_slice(&self.session_generation.to_le_bytes());
+                cookie.0[8..16].copy_from_slice(&(self.cookie_epoch ^ cookie_seq).to_le_bytes());
+                match inner.session.enqueue_send_with_wire_seq(
+                    &mut inner.ops,
+                    &request_id,
+                    cookie,
+                    wire_seq,
+                    &body,
+                ) {
                     crate::native_session::SendAcceptance::Dispatched { .. } => {
                         let mid = format!(
                             "n3r-{}-{}",
@@ -416,15 +541,23 @@ impl HostAdapter for NativeHostAdapter {
                         Ok(HostOpResult::SendFired { mid })
                     }
                     crate::native_session::SendAcceptance::NotReady { .. } => {
-                        Err(HostError::Native { code: native_code::NOT_READY })
+                        Err(HostError::Native {
+                            code: native_code::NOT_READY,
+                        })
                     }
-                    crate::native_session::SendAcceptance::AllocationFailed { .. } => Err(
-                        HostError::Native { code: native_code::ALLOCATION_FAILED },
-                    ),
-                    crate::native_session::SendAcceptance::RefusedPreCall { .. } => Err(
-                        HostError::Native { code: native_code::PRE_CALL_REFUSED },
-                    ),
-                    crate::native_session::SendAcceptance::NotAttached => Err(HostError::EnvInvalid),
+                    crate::native_session::SendAcceptance::AllocationFailed { .. } => {
+                        Err(HostError::Native {
+                            code: native_code::ALLOCATION_FAILED,
+                        })
+                    }
+                    crate::native_session::SendAcceptance::RefusedPreCall { .. } => {
+                        Err(HostError::Native {
+                            code: native_code::PRE_CALL_REFUSED,
+                        })
+                    }
+                    crate::native_session::SendAcceptance::NotAttached => {
+                        Err(HostError::EnvInvalid)
+                    }
                 }
             }
         }
@@ -444,7 +577,19 @@ impl HostAdapter for NativeHostAdapter {
 /// `ctx` 必须指向本进程内有效的 [`NativeResidentCtx`];各字符串指针 NUL 结尾。
 pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
     // 主线程一次性解引用 ctx(原始指针不跨线程;线程只拿 owned 数据)。
-    let (wb, report, pipe_name, auth_token, account, module_baseline, session_generation, group_codes_raw, self_uid, poll_ms, observe_ms) = unsafe {
+    let (
+        wb,
+        report,
+        pipe_name,
+        auth_token,
+        account,
+        module_baseline,
+        session_generation,
+        group_codes_raw,
+        self_uid,
+        poll_ms,
+        observe_ms,
+    ) = unsafe {
         (
             (*ctx).wrapper_base as usize,
             wide_str((*ctx).report_path),
@@ -477,23 +622,30 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
     // ⓪ consumer 武装(research;报告路径 + wrapper 基址)—— per-send
     // cookie delegate 的 manager/invoke 观测与 fallback 依赖此次登记。
     #[cfg(feature = "research")]
-    crate::consumer_probe::init(wb, (*ctx).report_path);
+    if !crate::consumer_probe::init(wb, (*ctx).report_path, session_generation) {
+        stage(
+            &report,
+            "n3res_consumer",
+            false,
+            "callback module pin or generation context registry unavailable",
+        );
+        return 1;
+    }
+    #[cfg(feature = "research")]
+    let callback_generation = crate::consumer_probe::GenerationGuard::new(session_generation);
 
     // ① attach(真实服务对象地址 = 诚实 proof 证据;g3-session r2 同款)。
-    let service_addr = {
-        let mut probe = G3NativeOps::new(wb);
-        match probe.probe_service() {
-            Ok(a) => a,
-            Err(e) => {
-                stage(&report, "n3res_attach", false, &format!("{e:?}"));
-                return 1;
-            }
+    let mut ops = G3NativeOps::new(wb);
+    let service_addr = match ops.probe_service() {
+        Ok(a) => a,
+        Err(e) => {
+            stage(&report, "n3res_attach", false, &format!("{e:?}"));
+            return 1;
         }
     };
-    let mut session: NativeSession<NativeSeqAlloc> =
-        NativeSession::new(SeqAllocator::new(1, Box::new(|_| Ok(()))));
+    let mut session = NativeSession::new(CoreSeqRequired);
     if let Err(e) = session.attach(
-        &mut G3NativeOps::new(wb),
+        &mut ops,
         crate::native_session::AttachProof {
             module_baseline: module_baseline.clone(),
             anchor_candidates: 1,
@@ -502,10 +654,16 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
             session_generation,
         },
     ) {
+        ops.release_unsubmitted_service_pair();
         stage(&report, "n3res_session", false, &format!("{e:?}"));
         return 2;
     }
-    stage(&report, "n3res_session", true, &format!("Ready svc={service_addr:#x}"));
+    stage(
+        &report,
+        "n3res_session",
+        true,
+        &format!("Ready svc={service_addr:#x}"),
+    );
 
     // ② CPB 基线(首批评见;差分从 baseline 之后起算)。
     let base_objs = scan_cpb_objects_inproc(wb as u64);
@@ -523,14 +681,20 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
     let stop = Arc::new(AtomicBool::new(false));
     let matcher = Arc::new(EchoMatcher::new());
     let owner_tid = Arc::new(AtomicU64::new(0));
-    let adapter = NativeHostAdapter::new(wb, session, matcher.clone(), owner_tid.clone());
+    let adapter = NativeHostAdapter::new(
+        ops,
+        session,
+        matcher.clone(),
+        owner_tid.clone(),
+        session_generation,
+    );
     let resident = Arc::new(Resident::new(adapter, ResidentLimits::default()));
-    let (result_tx, result_rx) = std::sync::mpsc::channel::<crate::resident::SendOutcome>();
+    let (result_tx, result_rx) = std::sync::mpsc::channel::<crate::resident::ResidentNotice>();
     let (event_tx, event_rx) = std::sync::mpsc::channel::<OwnedEvent>();
     let wake_pair = Arc::new((Mutex::new(false), Condvar::new()));
 
     // ④ 泵线程:bootstrap → drain 循环(锁序/回调纪律由 Resident 承担)。
-    {
+    let pump_handle = {
         let resident = resident.clone();
         let stop_pump = stop.clone();
         let wake_pair = wake_pair.clone();
@@ -554,10 +718,20 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
                             if stop_pump.load(Ordering::Relaxed)
                                 || t0.elapsed() > std::time::Duration::from_secs(10)
                             {
-                                stage(&report_pump, "n3res_bootstrap", false, &format!("give up: {e:?}"));
+                                stage(
+                                    &report_pump,
+                                    "n3res_bootstrap",
+                                    false,
+                                    &format!("give up: {e:?}"),
+                                );
                                 break false;
                             }
-                            stage(&report_pump, "n3res_bootstrap_retry", false, &format!("{e:?}"));
+                            stage(
+                                &report_pump,
+                                "n3res_bootstrap_retry",
+                                false,
+                                &format!("{e:?}"),
+                            );
                             std::thread::sleep(std::time::Duration::from_millis(200));
                         }
                     }
@@ -575,8 +749,8 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
                     let _ = resident.drain();
                     // N3 retCode 消费者排空:QQ 分发线程 → 槽 → 账本终局。
                     resident.drain_send_responses();
-                    for outcome in resident.take_results() {
-                        let _ = result_tx.send(outcome);
+                    for notice in resident.take_results() {
+                        let _ = result_tx.send(notice);
                     }
                     for ev in resident.take_events() {
                         let _ = event_tx.send(ev);
@@ -596,14 +770,17 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
                     Err(e) => stage(&report_pump, "n3res_close", false, &format!("{e:?}")),
                 }
             });
-        if spawner.is_err() {
-            stage(&report, "n3res_spawn", false, "pump thread");
-            return 3;
+        match spawner {
+            Ok(handle) => handle,
+            Err(_) => {
+                stage(&report, "n3res_spawn", false, "pump thread");
+                return 3;
+            }
         }
-    }
+    };
 
-    // ⑤ 接收 worker:CPB 差分轮询 → 回流匹配 + 事件注入。
-    {
+    // ⑤ 接收 worker:CPB 差分轮询 → 仅候选诊断 + 事件注入。
+    let recv_handle = {
         let resident = resident.clone();
         let stop_recv = stop.clone();
         let matcher = matcher.clone();
@@ -612,9 +789,8 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
             .name("caligo-native-recv".into())
             .spawn(move || {
                 let mut events_emitted: u64 = 0;
+                let mut identity_blocked: u64 = 0;
                 let mut partial_seen: u64 = 0;
-                let mut echo_done: Vec<(String, String)> = Vec::new();
-                let mut echo_rejected: Vec<(String, String)> = Vec::new();
                 let slice = std::time::Duration::from_millis(100);
                 loop {
                     // 分片睡眠:stop 响应 ≤100ms。
@@ -631,42 +807,26 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
                     let recs = collect_record_fields(&RpmSelfReader, &objs, 8192);
                     let fresh = seen.absorb(&recs);
                     for (_obj, rf) in fresh {
-                        // 回流匹配(先于事件;自发消息回流确认 SendFired)。
-                        if let Some(mid) = matcher.match_record(
+                        // 候选仅供诊断；禁止按相似文本给待发送请求分配 CPB 身份。
+                        matcher.observe_record(
                             rf.peer_uid.as_deref(),
                             rf.text.as_deref(),
                             rf.platform_time,
-                        ) {
-                            match rf.seq {
-                                Some(seq) => echo_done.push((mid, format!("cpbseq:{seq}"))),
-                                None => echo_rejected.push((mid, "echo record missing seq".into())),
-                            }
-                        }
-                        // 事件:peer+seq 在场才发出(text 可空;半成品对象计诊断)。
-                        match (&rf.peer_uid, rf.seq) {
-                            (Some(peer), Some(seq)) => {
-                                let ev = OwnedEvent {
-                                    source: EventSourceKind::Recv,
-                                    chat_type: chat_type_for_peer(peer, &groups),
-                                    peer_uid: peer.clone(),
-                                    peer_uin: peer.clone(),
-                                    sender_uin: rf.sender_uid.clone().unwrap_or_default(),
-                                    native_id: format!("cpbseq:{seq}"),
-                                    text: rf.text.clone().unwrap_or_default(),
-                                    msg_time: rf.platform_time,
-                                };
+                        );
+                        // A seq is not an identity. Require an independently
+                        // mapped native ID, sender UIN, full text/time, and a
+                        // configured group target before business ingestion.
+                        match cpb_event_from_record(&rf, &groups) {
+                            Some(ev) => {
                                 if resident.ingest_event(ev) {
                                     events_emitted += 1;
                                 }
                             }
-                            _ => partial_seen += 1,
+                            None if rf.peer_uid.is_some() && rf.seq.is_some() => {
+                                identity_blocked += 1;
+                            }
+                            None => partial_seen += 1,
                         }
-                    }
-                    if !echo_done.is_empty() || !echo_rejected.is_empty() {
-                        resident.complete_sends(
-                            &std::mem::take(&mut echo_done),
-                            &std::mem::take(&mut echo_rejected),
-                        );
                     }
                 }
                 stage(
@@ -674,25 +834,37 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
                     "n3res_recv_done",
                     true,
                     &format!(
-                        "events={events_emitted} partial={partial_seen} echo_ok={} echo_expired={} pending_left={}",
-                        matcher.confirmed.load(Ordering::Relaxed),
+                        "events={events_emitted} identity_blocked={identity_blocked} partial={partial_seen} echo_candidates={} echo_ambiguous={} echo_expired={} pending_left={}",
+                        matcher.unproven_candidates.load(Ordering::Relaxed),
+                        matcher.ambiguous_records.load(Ordering::Relaxed),
                         matcher.expired.load(Ordering::Relaxed),
                         matcher.pending_len(),
                     ),
                 );
             });
-        if spawner.is_err() {
-            stop.store(true, Ordering::Relaxed);
-            stage(&report, "n3res_spawn", false, "recv thread");
-            return 3;
+        match spawner {
+            Ok(handle) => handle,
+            Err(_) => {
+                stop.store(true, Ordering::Relaxed);
+                let (_, cv) = &*wake_pair;
+                cv.notify_all();
+                let pump_joined = join_owned_thread(
+                    pump_handle,
+                    &report,
+                    "n3res_pump_join",
+                    std::time::Instant::now() + std::time::Duration::from_secs(30),
+                );
+                stage(&report, "n3res_spawn", false, "recv thread");
+                return if pump_joined { 3 } else { 4 };
+            }
         }
-    }
+    };
 
     // ⑥ daemon_client worker(IPC v3;重连绝不重新 bootstrap)。
     let worker_handle = {
         let resident = resident.clone();
         let stop_worker = stop.clone();
-        let wake_pair = wake_pair.clone();
+        let wake_pair_worker = wake_pair.clone();
         let cfg = DaemonClientConfig {
             pipe_name,
             auth_token,
@@ -706,7 +878,7 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
             .name("caligo-daemon-client".into())
             .spawn(move || {
                 let wake = move || {
-                    let (flag, cv) = &*wake_pair;
+                    let (flag, cv) = &*wake_pair_worker;
                     let mut f = flag.lock().unwrap();
                     *f = true;
                     cv.notify_all();
@@ -718,17 +890,22 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
             Ok(h) => h,
             Err(_) => {
                 stop.store(true, Ordering::Relaxed);
+                let (_, cv) = &*wake_pair;
+                cv.notify_all();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let recv_joined =
+                    join_owned_thread(recv_handle, &report, "n3res_recv_join", deadline);
+                let pump_joined =
+                    join_owned_thread(pump_handle, &report, "n3res_pump_join", deadline);
                 stage(&report, "n3res_spawn", false, "daemon worker thread");
-                return 3;
+                return if recv_joined && pump_joined { 3 } else { 4 };
             }
         }
     };
 
     // ⑦ 有界窗口(或直到外部停止;研究注入走有界窗)。
     let deadline = if observe_ms > 0 {
-        Some(
-            std::time::Instant::now() + std::time::Duration::from_millis(observe_ms as u64),
-        )
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(observe_ms as u64))
     } else {
         None
     };
@@ -742,6 +919,11 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
     }
     stage(&report, "n3res_stopping", true, "stop signal");
     stop.store(true, Ordering::Relaxed);
+    // From this point, unresolved sends remain unknown. Close callback
+    // admission and wait for calls already inside; responses not consumed by
+    // the pump remain unknown. The QQ-owned dispatcher itself is not drained.
+    #[cfg(feature = "research")]
+    callback_generation.quarantine();
     {
         let (_, cv) = &*wake_pair;
         cv.notify_all();
@@ -767,37 +949,92 @@ pub unsafe fn native_resident_run(ctx: *const NativeResidentCtx) -> u32 {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    if let Some(Ok((counters, exit))) = joined {
-        let exit_name = match exit {
-            WorkerExit::LocalStop => "LocalStop",
-            WorkerExit::CoreStopped => "CoreStopped",
-            WorkerExit::HelloRejected => "HelloRejected",
-        };
-        stage(
-            &report,
-            "n3res_worker",
-            exit == WorkerExit::LocalStop || exit == WorkerExit::CoreStopped,
-            &format!(
-                "exit={exit_name} connects={} dispatches={} events_sent={} events_acked={} gap_dropped={}",
-                counters.connects,
-                counters.dispatches,
-                counters.events_sent,
-                counters.events_acked,
-                counters.events_gap_dropped,
-            ),
-        );
+    let daemon_worker_ok = match joined {
+        Some(Ok((counters, exit))) => {
+            let exit_name = match exit {
+                WorkerExit::LocalStop => "LocalStop",
+                WorkerExit::CoreStopped => "CoreStopped",
+                WorkerExit::HelloRejected => "HelloRejected",
+            };
+            let ok = exit == WorkerExit::LocalStop || exit == WorkerExit::CoreStopped;
+            stage(
+                &report,
+                "n3res_worker",
+                ok,
+                &format!(
+                    "exit={exit_name} connects={} dispatches={} events_sent={} events_acked={} gap_dropped={}",
+                    counters.connects,
+                    counters.dispatches,
+                    counters.events_sent,
+                    counters.events_acked,
+                    counters.events_gap_dropped,
+                ),
+            );
+            ok
+        }
+        Some(Err(reason)) => {
+            stage(&report, "n3res_worker", false, &reason);
+            false
+        }
+        None => false,
+    };
+
+    // ⑨ stop 之后汇合自有 worker。超时会显式返回失败，context / module
+    // 仍被保留和 PIN；绝不把超时解释为 QQ dispatcher 已静默。
+    let local_join_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let recv_joined =
+        join_owned_thread(recv_handle, &report, "n3res_recv_join", local_join_deadline);
+    let pump_joined =
+        join_owned_thread(pump_handle, &report, "n3res_pump_join", local_join_deadline);
+    let all_owned_threads_stopped = daemon_worker_ok && recv_joined && pump_joined;
+    stage(
+        &report,
+        "n3res_done",
+        all_owned_threads_stopped,
+        if all_owned_threads_stopped {
+            "resident window closed; owned workers joined"
+        } else {
+            "resident window closed with worker failure or join timeout"
+        },
+    );
+    if all_owned_threads_stopped {
+        0
+    } else {
+        4
     }
-    // 泵/接收线程由 stop 置位自然退出(内部 100ms 节拍);短暂宽限后返回,
-    // 其收尾 stage 行随进程继续写完。线程不 detach —— 返回后随进程回收,
-    // 研究注入模型下宿主进程长存,join 语义由 stop 标志保证。
-    std::thread::sleep(std::time::Duration::from_millis(800));
-    stage(&report, "n3res_done", true, "resident window closed");
-    0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_worker_join_is_reported_and_timeout_is_not_success() {
+        let report = std::env::temp_dir().join(format!("caligo-join-{}.jsonl", now_ms()));
+        let report = report.to_string_lossy().into_owned();
+        let finished = std::thread::spawn(|| {});
+        assert!(join_owned_thread(
+            finished,
+            &report,
+            "test_joined",
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+        ));
+
+        let slow = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+        assert!(!join_owned_thread(
+            slow,
+            &report,
+            "test_timeout",
+            std::time::Instant::now() + std::time::Duration::from_millis(1),
+        ));
+        let log = std::fs::read_to_string(&report).unwrap();
+        assert!(log.contains("\"stage\":\"test_joined\""));
+        assert!(log.contains("\"ok\":true"));
+        assert!(log.contains("join timeout; worker may remain resident"));
+        let _ = std::fs::remove_file(report);
+    }
 
     #[test]
     fn kind_only_from_configured_groups() {
@@ -811,24 +1048,88 @@ mod tests {
     }
 
     #[test]
-    fn echo_match_requires_peer_text_and_time() {
+    fn cpb_record_requires_stable_message_and_resolved_sender_identity() {
+        let groups: HashSet<u64> = [263402786u64].into();
+        let mut record = RecordFields {
+            sender_uid: Some("u_sender".into()),
+            peer_uid: Some("263402786".into()),
+            text: Some("message".into()),
+            seq: Some(17),
+            platform_time: Some(1_791_607_545),
+            ..Default::default()
+        };
+        assert!(cpb_event_from_record(&record, &groups).is_none());
+
+        record.native_id = Some("native-17".into());
+        assert!(
+            cpb_event_from_record(&record, &groups).is_none(),
+            "opaque senderUid is not a resolved sender UIN"
+        );
+        record.sender_uin = Some("1234567890".into());
+        let event = cpb_event_from_record(&record, &groups).unwrap();
+        assert_eq!(event.native_id, "native-17");
+        assert_eq!(event.sender_uin, "1234567890");
+        assert_eq!(event.chat_type, 2);
+
+        let unknown_groups = HashSet::new();
+        assert!(
+            cpb_event_from_record(&record, &unknown_groups).is_none(),
+            "an unclassified peer must not be inferred as a private user"
+        );
+    }
+
+    #[test]
+    fn text_echo_is_candidate_diagnostic_not_identity_proof() {
         let m = EchoMatcher::new();
         m.register("m1".into(), "263402786".into(), "hello".into());
         let t_ok = (now_ms() / 1000) as u64;
         // peer 不符。
-        assert_eq!(m.match_record(Some("999"), Some("hello"), Some(t_ok)), None);
+        assert_eq!(m.observe_record(Some("999"), Some("hello"), Some(t_ok)), 0);
         // text 不符。
-        assert_eq!(m.match_record(Some("263402786"), Some("other"), Some(t_ok)), None);
-        // 缺时间戳的半成品记录不参与匹配(保守:不误确认)。
-        assert_eq!(m.match_record(Some("263402786"), Some("hello"), None), None);
-        // 全对 + 时间在场 → 命中并摘除。
         assert_eq!(
-            m.match_record(Some("263402786"), Some("hello"), Some(t_ok)),
-            Some("m1".into())
+            m.observe_record(Some("263402786"), Some("other"), Some(t_ok)),
+            0
         );
-        // 摘除后不重复确认。
-        assert_eq!(m.match_record(Some("263402786"), Some("hello"), Some(t_ok)), None);
-        assert_eq!(m.confirmed.load(Ordering::Relaxed), 1);
+        // 缺时间戳的半成品记录不参与匹配(保守:不误确认)。
+        assert_eq!(m.observe_record(Some("263402786"), Some("hello"), None), 0);
+        assert_eq!(
+            m.observe_record(Some("263402786"), Some("hello"), Some(t_ok)),
+            1
+        );
+        assert_eq!(
+            m.observe_record(Some("263402786"), Some("hello"), Some(t_ok)),
+            1
+        );
+        assert_eq!(m.pending_len(), 1, "候选不消费发送登记");
+        assert_eq!(m.unproven_candidates.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn identical_text_echo_is_ambiguous_and_never_confirms() {
+        let m = EchoMatcher::new();
+        m.register("m1".into(), "group".into(), "same".into());
+        m.register("m2".into(), "group".into(), "same".into());
+        let now = now_ms() / 1000;
+        assert_eq!(m.observe_record(Some("group"), Some("same"), Some(now)), 2);
+        assert_eq!(m.ambiguous_records.load(Ordering::Relaxed), 1);
+        assert_eq!(m.pending_len(), 2);
+    }
+
+    #[test]
+    fn repeated_identical_records_remain_ambiguous_and_unconsumed() {
+        let m = EchoMatcher::new();
+        m.register("m1".into(), "group".into(), "same".into());
+        m.register("m2".into(), "group".into(), "same".into());
+        let now = now_ms() / 1000;
+
+        // Repeating the same peer/text/time tuple cannot supply record order,
+        // origin, or a request-to-native identity bridge.
+        for _ in 0..2 {
+            assert_eq!(m.observe_record(Some("group"), Some("same"), Some(now)), 2);
+        }
+        assert_eq!(m.pending_len(), 2, "candidate rows never consume sends");
+        assert_eq!(m.ambiguous_records.load(Ordering::Relaxed), 2);
+        assert_eq!(m.unproven_candidates.load(Ordering::Relaxed), 2);
     }
 
     #[test]
@@ -838,8 +1139,8 @@ mod tests {
         m.register("m2".into(), "g".into(), "t".into());
         let slightly_before = now_ms() / 1000 - 60;
         assert_eq!(
-            m.match_record(Some("g"), Some("t"), Some(slightly_before as u64)),
-            Some("m2".into())
+            m.observe_record(Some("g"), Some("t"), Some(slightly_before as u64)),
+            1
         );
         // 过期清理:TTL 后的登记不再匹配。
         let m3 = EchoMatcher::new();
@@ -852,7 +1153,7 @@ mod tests {
                 registered_ms: now_ms().saturating_sub(ECHO_TTL_MS + 1_000),
             },
         );
-        assert_eq!(m3.match_record(Some("g"), Some("t"), Some(1791639200)), None);
+        assert_eq!(m3.observe_record(Some("g"), Some("t"), Some(1791639200)), 0);
         assert_eq!(m3.expired.load(Ordering::Relaxed), 1);
     }
 }

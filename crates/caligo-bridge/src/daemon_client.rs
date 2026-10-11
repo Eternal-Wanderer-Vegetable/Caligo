@@ -21,23 +21,40 @@ use std::time::{Duration, Instant};
 
 use caligo_model::framing::{encode_frame, FrameDecoder, FrameError};
 use caligo_model::ipc_v3::{
-    BridgeMsg, CoreToBridgeMsg, EventPayload, OutcomePayload, Role, PROTOCOL_VERSION_V3,
+    BridgeMsg, CoreToBridgeMsg, EventPayload, OutcomePayload, Role, BUSINESS_PROTOCOL_REVISION,
+    PROTOCOL_VERSION_V3,
 };
 
-use crate::resident::{Resident, SendOutcome};
+use crate::resident::{Resident, ResidentNotice, SendOutcome};
 
 /// 宿主实例身份:进程内一次生成,保持到宿主进程退出(C9)。
 fn process_created_utc() -> String {
     // SAFETY: 只读查询当前进程;缓冲由调用方提供。
     unsafe {
         use windows_sys::Win32::Foundation::FILETIME;
-        let mut created = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-        let mut exited = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-        let mut kernel = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-        let mut user = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let mut created = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exited = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut kernel = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut user = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
         let handle = windows_sys::Win32::System::Threading::GetCurrentProcess();
         if windows_sys::Win32::System::Threading::GetProcessTimes(
-            handle, &mut created, &mut exited, &mut kernel, &mut user,
+            handle,
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
         ) == 0
         {
             return String::new(); // 取不到必须如实为空(不得伪造)
@@ -187,39 +204,62 @@ impl WorkerCounters {
     fn publish(&self) {
         let g = &GLOBAL_COUNTERS;
         g.connects.store(self.connects, Ordering::Relaxed);
-        g.connect_failures.store(self.connect_failures, Ordering::Relaxed);
+        g.connect_failures
+            .store(self.connect_failures, Ordering::Relaxed);
         g.reconnects.store(self.reconnects, Ordering::Relaxed);
-        g.hellos_accepted.store(self.hellos_accepted, Ordering::Relaxed);
-        g.hello_rejected.store(self.hello_rejected, Ordering::Relaxed);
+        g.hellos_accepted
+            .store(self.hellos_accepted, Ordering::Relaxed);
+        g.hello_rejected
+            .store(self.hello_rejected, Ordering::Relaxed);
         g.dispatches.store(self.dispatches, Ordering::Relaxed);
         g.results_sent.store(self.results_sent, Ordering::Relaxed);
         g.events_sent.store(self.events_sent, Ordering::Relaxed);
         g.events_acked.store(self.events_acked, Ordering::Relaxed);
-        g.events_gap_dropped.store(self.events_gap_dropped, Ordering::Relaxed);
-        g.heartbeats_sent.store(self.heartbeats_sent, Ordering::Relaxed);
-        g.heartbeat_timeouts.store(self.heartbeat_timeouts, Ordering::Relaxed);
-        g.protocol_errors.store(self.protocol_errors, Ordering::Relaxed);
+        g.events_gap_dropped
+            .store(self.events_gap_dropped, Ordering::Relaxed);
+        g.heartbeats_sent
+            .store(self.heartbeats_sent, Ordering::Relaxed);
+        g.heartbeat_timeouts
+            .store(self.heartbeat_timeouts, Ordering::Relaxed);
+        g.protocol_errors
+            .store(self.protocol_errors, Ordering::Relaxed);
         g.clean_stops.store(self.clean_stops, Ordering::Relaxed);
-        g.bootstraps_attempted.store(self.bootstraps_attempted, Ordering::Relaxed);
+        g.bootstraps_attempted
+            .store(self.bootstraps_attempted, Ordering::Relaxed);
     }
 
     pub fn as_json(&self) -> String {
         let mut out = String::with_capacity(256);
-        out.push_str("{\"connects\":"); out.push_str(&self.connects.to_string());
-        out.push_str(",\"connect_failures\":"); out.push_str(&self.connect_failures.to_string());
-        out.push_str(",\"reconnects\":"); out.push_str(&self.reconnects.to_string());
-        out.push_str(",\"hellos_accepted\":"); out.push_str(&self.hellos_accepted.to_string());
-        out.push_str(",\"hello_rejected\":"); out.push_str(&self.hello_rejected.to_string());
-        out.push_str(",\"dispatches\":"); out.push_str(&self.dispatches.to_string());
-        out.push_str(",\"results_sent\":"); out.push_str(&self.results_sent.to_string());
-        out.push_str(",\"events_sent\":"); out.push_str(&self.events_sent.to_string());
-        out.push_str(",\"events_acked\":"); out.push_str(&self.events_acked.to_string());
-        out.push_str(",\"events_gap_dropped\":"); out.push_str(&self.events_gap_dropped.to_string());
-        out.push_str(",\"heartbeats_sent\":"); out.push_str(&self.heartbeats_sent.to_string());
-        out.push_str(",\"heartbeat_timeouts\":"); out.push_str(&self.heartbeat_timeouts.to_string());
-        out.push_str(",\"protocol_errors\":"); out.push_str(&self.protocol_errors.to_string());
-        out.push_str(",\"clean_stops\":"); out.push_str(&self.clean_stops.to_string());
-        out.push_str(",\"bootstraps_attempted\":"); out.push_str(&self.bootstraps_attempted.to_string());
+        out.push_str("{\"connects\":");
+        out.push_str(&self.connects.to_string());
+        out.push_str(",\"connect_failures\":");
+        out.push_str(&self.connect_failures.to_string());
+        out.push_str(",\"reconnects\":");
+        out.push_str(&self.reconnects.to_string());
+        out.push_str(",\"hellos_accepted\":");
+        out.push_str(&self.hellos_accepted.to_string());
+        out.push_str(",\"hello_rejected\":");
+        out.push_str(&self.hello_rejected.to_string());
+        out.push_str(",\"dispatches\":");
+        out.push_str(&self.dispatches.to_string());
+        out.push_str(",\"results_sent\":");
+        out.push_str(&self.results_sent.to_string());
+        out.push_str(",\"events_sent\":");
+        out.push_str(&self.events_sent.to_string());
+        out.push_str(",\"events_acked\":");
+        out.push_str(&self.events_acked.to_string());
+        out.push_str(",\"events_gap_dropped\":");
+        out.push_str(&self.events_gap_dropped.to_string());
+        out.push_str(",\"heartbeats_sent\":");
+        out.push_str(&self.heartbeats_sent.to_string());
+        out.push_str(",\"heartbeat_timeouts\":");
+        out.push_str(&self.heartbeat_timeouts.to_string());
+        out.push_str(",\"protocol_errors\":");
+        out.push_str(&self.protocol_errors.to_string());
+        out.push_str(",\"clean_stops\":");
+        out.push_str(&self.clean_stops.to_string());
+        out.push_str(",\"bootstraps_attempted\":");
+        out.push_str(&self.bootstraps_attempted.to_string());
         out.push('}');
         out
     }
@@ -239,6 +279,63 @@ pub enum WorkerExit {
 /// 上行事件未确认窗口:满(项数或字节)→ 记 Gap 丢最旧(计数如实)。
 const EVENT_WINDOW_MAX_ITEMS: usize = 256;
 const EVENT_WINDOW_MAX_BYTES: usize = 8 * 1024 * 1024;
+const RESULT_OUTBOX_MAX_ITEMS: usize = 256;
+
+struct PendingNotice {
+    notice: ResidentNotice,
+    sent_epoch: Option<u64>,
+}
+
+fn notice_request_id(notice: &ResidentNotice) -> &str {
+    match notice {
+        ResidentNotice::NativeStarted { request_id } => request_id,
+        ResidentNotice::Outcome(
+            SendOutcome::Success { request_id, .. }
+            | SendOutcome::AcceptedUnconfirmed { request_id }
+            | SendOutcome::Failure { request_id, .. }
+            | SendOutcome::Unknown { request_id },
+        ) => request_id,
+    }
+}
+
+fn notice_message(notice: &ResidentNotice) -> (BridgeMsg, bool) {
+    match notice {
+        ResidentNotice::NativeStarted { request_id } => (
+            BridgeMsg::NativeStarted {
+                request_id: request_id.clone(),
+            },
+            false,
+        ),
+        ResidentNotice::Outcome(outcome) => (
+            match outcome {
+                SendOutcome::Success {
+                    request_id,
+                    native_id,
+                } => BridgeMsg::SendResult {
+                    request_id: request_id.clone(),
+                    outcome: OutcomePayload::Success {
+                        native_id: native_id.clone(),
+                    },
+                },
+                SendOutcome::AcceptedUnconfirmed { request_id } => BridgeMsg::SendResult {
+                    request_id: request_id.clone(),
+                    outcome: OutcomePayload::AcceptedUnconfirmed,
+                },
+                SendOutcome::Failure { request_id, reason } => BridgeMsg::SendResult {
+                    request_id: request_id.clone(),
+                    outcome: OutcomePayload::Failure {
+                        reason: reason.clone(),
+                    },
+                },
+                SendOutcome::Unknown { request_id } => BridgeMsg::SendResult {
+                    request_id: request_id.clone(),
+                    outcome: OutcomePayload::Unknown,
+                },
+            },
+            true,
+        ),
+    }
+}
 
 /// 最小管道客户端:OVERLAPPED 读写字节模式管道(与 core::transport 同语义;
 /// bridge 不能依赖 core —— 独立实现,CLG1 帧取自 model)。
@@ -317,7 +414,10 @@ impl PipeConn {
                 std::ptr::null(),
             );
             if event.is_null() || event == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-                return Err(PipeError::Win32 { op: "CreateEventW", code: windows_sys::Win32::Foundation::GetLastError() });
+                return Err(PipeError::Win32 {
+                    op: "CreateEventW",
+                    code: windows_sys::Win32::Foundation::GetLastError(),
+                });
             }
             let mut ov: windows_sys::Win32::System::IO::OVERLAPPED = std::mem::zeroed();
             ov.hEvent = event;
@@ -336,12 +436,21 @@ impl PipeConn {
                     if e == windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE {
                         return Err(PipeError::BrokenPipe);
                     }
-                    return Err(PipeError::Win32 { op: "ReadFile", code: e });
+                    return Err(PipeError::Win32 {
+                        op: "ReadFile",
+                        code: e,
+                    });
                 }
             }
             loop {
                 let mut transferred = 0u32;
-                if windows_sys::Win32::System::IO::GetOverlappedResult(self.handle, &mut ov, &mut transferred, 0) != 0 {
+                if windows_sys::Win32::System::IO::GetOverlappedResult(
+                    self.handle,
+                    &mut ov,
+                    &mut transferred,
+                    0,
+                ) != 0
+                {
                     windows_sys::Win32::Foundation::CloseHandle(event);
                     return Ok(transferred as usize);
                 }
@@ -351,7 +460,10 @@ impl PipeConn {
                     if e == windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE {
                         return Err(PipeError::BrokenPipe);
                     }
-                    return Err(PipeError::Win32 { op: "GetOverlappedResult", code: e });
+                    return Err(PipeError::Win32 {
+                        op: "GetOverlappedResult",
+                        code: e,
+                    });
                 }
                 let w = windows_sys::Win32::System::Threading::WaitForSingleObject(event, 100);
                 if w == 0 {
@@ -363,7 +475,12 @@ impl PipeConn {
                     if cancel.load(Ordering::Relaxed) {
                         windows_sys::Win32::System::IO::CancelIoEx(self.handle, &mut ov);
                         let mut t = 0u32;
-                        let ok = windows_sys::Win32::System::IO::GetOverlappedResult(self.handle, &mut ov, &mut t, 1);
+                        let ok = windows_sys::Win32::System::IO::GetOverlappedResult(
+                            self.handle,
+                            &mut ov,
+                            &mut t,
+                            1,
+                        );
                         windows_sys::Win32::Foundation::CloseHandle(event);
                         if ok != 0 && t > 0 {
                             return Ok(t as usize);
@@ -373,7 +490,10 @@ impl PipeConn {
                     continue;
                 }
                 windows_sys::Win32::Foundation::CloseHandle(event);
-                return Err(PipeError::Win32 { op: "WaitForSingleObject", code: windows_sys::Win32::Foundation::GetLastError() });
+                return Err(PipeError::Win32 {
+                    op: "WaitForSingleObject",
+                    code: windows_sys::Win32::Foundation::GetLastError(),
+                });
             }
         }
     }
@@ -388,8 +508,12 @@ impl PipeConn {
                     0,
                     std::ptr::null(),
                 );
-                if event.is_null() || event == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
-                    return Err(PipeError::Win32 { op: "CreateEventW", code: windows_sys::Win32::Foundation::GetLastError() });
+                if event.is_null() || event == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE
+                {
+                    return Err(PipeError::Win32 {
+                        op: "CreateEventW",
+                        code: windows_sys::Win32::Foundation::GetLastError(),
+                    });
                 }
                 let mut ov: windows_sys::Win32::System::IO::OVERLAPPED = std::mem::zeroed();
                 ov.hEvent = event;
@@ -408,17 +532,29 @@ impl PipeConn {
                         if e == windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE {
                             return Err(PipeError::BrokenPipe);
                         }
-                        return Err(PipeError::Win32 { op: "WriteFile", code: e });
+                        return Err(PipeError::Win32 {
+                            op: "WriteFile",
+                            code: e,
+                        });
                     }
                 }
                 let mut transferred = 0u32;
-                if windows_sys::Win32::System::IO::GetOverlappedResult(self.handle, &mut ov, &mut transferred, 1) == 0 {
+                if windows_sys::Win32::System::IO::GetOverlappedResult(
+                    self.handle,
+                    &mut ov,
+                    &mut transferred,
+                    1,
+                ) == 0
+                {
                     let e = windows_sys::Win32::Foundation::GetLastError();
                     windows_sys::Win32::Foundation::CloseHandle(event);
                     if e == windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE {
                         return Err(PipeError::BrokenPipe);
                     }
-                    return Err(PipeError::Win32 { op: "GetOverlappedResult(write)", code: e });
+                    return Err(PipeError::Win32 {
+                        op: "GetOverlappedResult(write)",
+                        code: e,
+                    });
                 }
                 windows_sys::Win32::Foundation::CloseHandle(event);
                 bytes = &bytes[transferred as usize..];
@@ -456,7 +592,10 @@ struct FramePipe {
 
 impl FramePipe {
     fn new() -> Self {
-        Self { dec: FrameDecoder::new(), queue: VecDeque::new() }
+        Self {
+            dec: FrameDecoder::new(),
+            queue: VecDeque::new(),
+        }
     }
 
     fn feed(&mut self, chunk: &[u8]) -> Result<(), PipeError> {
@@ -509,7 +648,7 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
     cfg: DaemonClientConfig,
     resident: Arc<Resident<A>>,
     wake: &dyn Fn() -> bool,
-    result_rx: mpsc::Receiver<SendOutcome>,
+    result_rx: mpsc::Receiver<ResidentNotice>,
     events_rx: mpsc::Receiver<crate::resident::OwnedEvent>,
     stop: Arc<AtomicBool>,
 ) -> (WorkerCounters, WorkerExit) {
@@ -522,6 +661,9 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
     // 断开前已发送未确认的事件在新连接上重放对账,不再随连接重建而丢失。
     let mut unacked: VecDeque<(u64, EventPayload)> = VecDeque::new();
     let mut unacked_bytes: usize = 0;
+    // Native lifecycle notices survive connection teardown until the core
+    // confirms durable application. Resident reserves at most two slots/send.
+    let mut result_outbox: VecDeque<PendingNotice> = VecDeque::new();
     macro_rules! publish {
         () => {
             c.publish();
@@ -553,6 +695,7 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
             &conn,
             &BridgeMsg::Hello {
                 protocol_version: PROTOCOL_VERSION_V3,
+                business_protocol_revision: BUSINESS_PROTOCOL_REVISION,
                 bridge_build: cfg.bridge_build.clone(),
                 auth_token: cfg.auth_token.clone(),
                 role: Role::Bridge,
@@ -598,6 +741,7 @@ pub fn run_worker<A: crate::host_adapter::HostAdapter>(
             &mut acked_high,
             &mut unacked,
             &mut unacked_bytes,
+            &mut result_outbox,
         );
         watchdog_stop.store(true, Ordering::Relaxed);
         match session {
@@ -638,7 +782,7 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
     cfg: &DaemonClientConfig,
     resident: &Arc<Resident<A>>,
     wake: &dyn Fn() -> bool,
-    result_rx: &mpsc::Receiver<SendOutcome>,
+    result_rx: &mpsc::Receiver<ResidentNotice>,
     events_rx: &mpsc::Receiver<crate::resident::OwnedEvent>,
     tick: &Arc<AtomicBool>,
     stop: &Arc<AtomicBool>,
@@ -647,20 +791,26 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
     acked_high: &mut u64,
     unacked: &mut VecDeque<(u64, EventPayload)>,
     unacked_bytes: &mut usize,
+    result_outbox: &mut VecDeque<PendingNotice>,
 ) -> SessionEnd {
     // 未确认事件窗口由 run_worker 持有(跨连接,C4);此处只借用。
     let mut last_heartbeat = Instant::now();
     let mut heartbeat_misses: u32 = 0;
     // resident 未就绪期的待提交队列(owner 初始化完成后补交)。
-    let mut pending: VecDeque<(String, u32, String, String)> = VecDeque::new(); // (id, chat, peer, text)
+    let mut pending: VecDeque<(String, u32, u32, String, String)> = VecDeque::new(); // (id, wire seq, chat, peer, text)
 
     // HelloAck(阻塞;被拒 → 不可重试)。
-    loop {
+    let connection_epoch = loop {
         match recv_json(conn, pipe, tick) {
-            Ok(CoreToBridgeMsg::HelloAck { accepted, reject_reason, .. }) => {
+            Ok(CoreToBridgeMsg::HelloAck {
+                accepted,
+                reject_reason,
+                connection_epoch,
+                ..
+            }) => {
                 if accepted {
                     c.hellos_accepted += 1;
-                    break;
+                    break connection_epoch;
                 }
                 let _ = reject_reason;
                 return SessionEnd::HelloRejected;
@@ -677,54 +827,55 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
             }
             Err(_) => return SessionEnd::Broken,
         }
-    }
+    };
 
     loop {
         if stop.load(Ordering::Relaxed) {
             return SessionEnd::LocalStop;
         }
         c.publish(); // 实时计数(导出侧快照取证)
-        // 0) 待提交补交(resident 就绪后)。
+                     // 0) 待提交补交(resident 就绪后)。
         let plen = pending.len();
         for _ in 0..plen {
-            let (id, chat, peer, text) = pending.front().cloned().expect("nonempty");
+            let (id, wire_seq, chat, peer, text) = pending.front().cloned().expect("nonempty");
             match resident.submit(crate::resident::OwnedRequest::SendText {
                 request_id: id.clone(),
+                wire_seq,
                 chat_type: chat,
                 peer_uid: peer,
                 text: text.clone(),
             }) {
                 crate::resident::SubmitVerdict::Accepted => {
                     pending.pop_front();
-                    // 补交受理 = 真实开始(C5):此刻才上报 NativeStarted。
-                    if send_json(conn, &BridgeMsg::NativeStarted { request_id: id.clone() }).is_err() {
-                        return SessionEnd::Broken;
-                    }
                     wake();
                 }
                 _ => break, // 仍未就绪:保留队列,下轮再试
             }
         }
-        // 1) 结果回传(Failure/Unknown/Success 都立即上报)。
-        while let Ok(outcome) = result_rx.try_recv() {
-            let msg = match outcome {
-                SendOutcome::Success { request_id, native_id } => BridgeMsg::SendResult {
-                    request_id,
-                    outcome: OutcomePayload::Success { native_id },
-                },
-                SendOutcome::Failure { request_id, reason } => BridgeMsg::SendResult {
-                    request_id,
-                    outcome: OutcomePayload::Failure { reason },
-                },
-                SendOutcome::Unknown { request_id } => BridgeMsg::SendResult {
-                    request_id,
-                    outcome: OutcomePayload::Unknown,
-                },
-            };
+        // 1) 收入有界 outbox。其上限与 Resident 的默认预留结果槽对齐;
+        // 已满则不再消费源队列,结果仍由 Resident 保留。
+        while result_outbox.len() < RESULT_OUTBOX_MAX_ITEMS {
+            match result_rx.try_recv() {
+                Ok(notice) => result_outbox.push_back(PendingNotice {
+                    notice,
+                    sent_epoch: None,
+                }),
+                Err(_) => break,
+            }
+        }
+        // 首次发送或新连接重放。FIFO 保证 NativeStarted 排在终态之前。
+        for pending in result_outbox.iter_mut() {
+            if pending.sent_epoch == Some(connection_epoch) {
+                continue;
+            }
+            let (msg, is_result) = notice_message(&pending.notice);
             if send_json(conn, &msg).is_err() {
                 return SessionEnd::Broken;
             }
-            c.results_sent += 1;
+            pending.sent_epoch = Some(connection_epoch);
+            if is_result {
+                c.results_sent += 1;
+            }
         }
         // 2) 事件上行:泵钩子经通道转交的 owned 事件(D8)+ 窗口重放。
         while let Ok(ev) = events_rx.try_recv() {
@@ -758,6 +909,9 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
                 native_id: ev.native_id.clone(),
                 text: ev.text.clone(),
                 platform_time: ev.msg_time,
+                // Native receive fields do not currently provide a proven
+                // OneBot real_id/time/peer projection.
+                onebot_projection: None,
                 observed_at_unix_ms: 0,
                 source: match ev.source {
                     crate::resident::EventSourceKind::Recv => "recv",
@@ -800,10 +954,13 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
         }
         // 3) 心跳(3 次未响应 → 主动断开重连;计划 §6.4)。
         if last_heartbeat.elapsed() >= Duration::from_millis(cfg.heartbeat_ms) {
-            if send_json(conn, &BridgeMsg::Health {
-                ingress_pending: resident.pending_ingress(),
-                native_ops_total: resident.counters().native_ops_total,
-            })
+            if send_json(
+                conn,
+                &BridgeMsg::Health {
+                    ingress_pending: resident.pending_ingress(),
+                    native_ops_total: resident.counters().native_ops_total,
+                },
+            )
             .is_err()
             {
                 return SessionEnd::Broken;
@@ -820,47 +977,73 @@ fn session_loop<A: crate::host_adapter::HostAdapter>(
         }
         // 4) 阻塞收(tick 周期返回)。
         match recv_json(conn, pipe, tick) {
-            Ok(CoreToBridgeMsg::Dispatch { request_id, target, text }) => {
+            Ok(CoreToBridgeMsg::Dispatch {
+                request_id,
+                wire_seq,
+                target,
+                text,
+            }) => {
                 c.dispatches += 1;
-                // 真实开始边界(C5):先提交;提交被受理(claim 进入)后才上报
-                // NativeStarted。此前"先报 started 再提交"会把未执行项记成已
-                // 开始,取消窗口与恢复分类都失真。未就绪挂 pending,等补交
-                // 受理时再报 started。
+                // resident 受理只代表排队。NativeStarted 由 owner drain
+                // 在 native 调用确已发起后通过有序 notice 通道上报。
                 match resident.submit(crate::resident::OwnedRequest::SendText {
                     request_id: request_id.clone(),
+                    wire_seq,
                     chat_type: chat_type_from_target(&target),
                     peer_uid: peer_uid_from_target(&target),
                     text: text.clone(),
                 }) {
                     crate::resident::SubmitVerdict::Accepted => {
-                        if send_json(conn, &BridgeMsg::NativeStarted {
-                            request_id: request_id.clone(),
-                        })
-                        .is_err()
-                        {
-                            return SessionEnd::Broken;
-                        }
                         wake();
                     }
-                    // resident 未就绪(owner 初始化重试中):挂待提交队列,
-                    // 不报 NativeStarted(尚未开始)。
+                    // resident 未就绪(owner 初始化重试中):挂待提交队列。
                     _ => pending.push_back((
                         request_id,
+                        wire_seq,
                         chat_type_from_target(&target),
                         peer_uid_from_target(&target),
                         text.clone(),
                     )),
                 }
             }
-            Ok(CoreToBridgeMsg::EventAck { event_seq, suppressed: _ }) => {
+            Ok(CoreToBridgeMsg::EventAck {
+                event_seq,
+                suppressed: _,
+            }) => {
                 // daemon 回显 wire seq(首次持久化与重复抑制均如此 —— 修复
                 // 抑制回显 0 导致窗口永不前移的重放风暴,D8 现场实证)。
                 *acked_high = (*acked_high).max(event_seq);
-                while unacked.front().map(|(s, _)| *s <= *acked_high).unwrap_or(false) {
+                while unacked
+                    .front()
+                    .map(|(s, _)| *s <= *acked_high)
+                    .unwrap_or(false)
+                {
                     if let Some((_, e)) = unacked.pop_front() {
                         *unacked_bytes -= e.native_id.len() + e.text.len() + 128;
                         c.events_acked += 1;
                     }
+                }
+                heartbeat_misses = 0;
+            }
+            Ok(CoreToBridgeMsg::NativeStartedAck { request_id }) => {
+                resident.ack_notice(&request_id, true);
+                if let Some(index) = result_outbox.iter().position(|item| {
+                    matches!(&item.notice, ResidentNotice::NativeStarted { request_id: id } if id == &request_id)
+                }) {
+                    result_outbox.remove(index);
+                }
+                heartbeat_misses = 0;
+            }
+            Ok(CoreToBridgeMsg::SendResultAck {
+                request_id,
+                terminal,
+            }) => {
+                resident.ack_result_notice(&request_id, terminal);
+                if let Some(index) = result_outbox.iter().position(|item| {
+                    matches!(&item.notice, ResidentNotice::Outcome(_))
+                        && notice_request_id(&item.notice) == request_id
+                }) {
+                    result_outbox.remove(index);
                 }
                 heartbeat_misses = 0;
             }
@@ -925,10 +1108,14 @@ mod tests {
             hello_ack(),
             CoreToBridgeMsg::Dispatch {
                 request_id: "R1".into(),
+                wire_seq: 1,
                 target: serde_json::json!({"account":"a","kind":"private","peer":"p"}),
                 text: "hi".into(),
             },
-            CoreToBridgeMsg::EventAck { event_seq: 7, suppressed: false },
+            CoreToBridgeMsg::EventAck {
+                event_seq: 7,
+                suppressed: false,
+            },
         ];
         let mut merged = Vec::new();
         for m in &msgs {

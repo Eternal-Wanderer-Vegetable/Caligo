@@ -60,8 +60,13 @@ pub enum RegisterError {
 /// `complete` 的分类结果(每个到达的回调都有明确去向)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Completion {
+    /// 服务 ACK 已确认,但 native identity 尚缺;保留登记继续等待后续证据。
+    AcceptedUnconfirmed { request_id: String },
     /// 首次终结:请求到达终局,交给上层。
-    Terminated { request_id: String, outcome: ResponseOutcome },
+    Terminated {
+        request_id: String,
+        outcome: ResponseOutcome,
+    },
     /// 已终态后的迟到/重复回调:只审计,不翻案(T13/T08 口径)。
     DuplicateIgnored { request_id: String },
     /// 旧代次到达:只审计(代次失效后结果不改变新代次状态)。
@@ -77,6 +82,8 @@ struct Registration {
     request_id: String,
     host_generation: u64,
     session_generation: u64,
+    accepted_unconfirmed: bool,
+    wire_seq: Option<u32>,
 }
 
 /// cookie 键控响应账本。
@@ -120,10 +127,16 @@ impl ResponseLedger {
     }
 
     /// 发起前预登记(计划 §5-2:不能"先发送,后注册消费者")。
-    pub fn register(
+    pub fn register(&mut self, request_id: &str, cookie: Cookie) -> Result<(), RegisterError> {
+        self.register_with_wire_seq(request_id, cookie, None)
+    }
+
+    /// 登记由 core 持久分配的 client_seq，供诊断与后续强身份关联使用。
+    pub fn register_with_wire_seq(
         &mut self,
         request_id: &str,
         cookie: Cookie,
+        wire_seq: Option<u32>,
     ) -> Result<(), RegisterError> {
         if cookie.is_zero() {
             return Err(RegisterError::ZeroCookie);
@@ -141,6 +154,8 @@ impl ResponseLedger {
                 request_id: request_id.to_string(),
                 host_generation: self.current_host_generation,
                 session_generation: self.current_session_generation,
+                accepted_unconfirmed: false,
+                wire_seq,
             },
             None,
         ));
@@ -159,14 +174,33 @@ impl ResponseLedger {
             || reg.session_generation != self.current_session_generation
         {
             self.audit.stale_generation = self.audit.stale_generation.saturating_add(1);
-            return Completion::StaleGeneration { request_id: reg.request_id.clone() };
+            return Completion::StaleGeneration {
+                request_id: reg.request_id.clone(),
+            };
         }
         if slot.is_some() {
             self.audit.duplicate_ignored = self.audit.duplicate_ignored.saturating_add(1);
-            return Completion::DuplicateIgnored { request_id: reg.request_id.clone() };
+            return Completion::DuplicateIgnored {
+                request_id: reg.request_id.clone(),
+            };
+        }
+        if matches!(&outcome, ResponseOutcome::BusinessAccepted) {
+            if reg.accepted_unconfirmed {
+                self.audit.duplicate_ignored = self.audit.duplicate_ignored.saturating_add(1);
+                return Completion::DuplicateIgnored {
+                    request_id: reg.request_id.clone(),
+                };
+            }
+            reg.accepted_unconfirmed = true;
+            return Completion::AcceptedUnconfirmed {
+                request_id: reg.request_id.clone(),
+            };
         }
         *slot = Some(outcome.clone());
-        Completion::Terminated { request_id: reg.request_id.clone(), outcome }
+        Completion::Terminated {
+            request_id: reg.request_id.clone(),
+            outcome,
+        }
     }
 
     /// 当前未终态请求(诊断/超时扫描用;调用方只读)。
@@ -177,6 +211,14 @@ impl ResponseLedger {
             .filter(|(_, _, o)| o.is_none())
             .map(|(c, r, _)| (*c, r.request_id.clone()))
             .collect()
+    }
+
+    pub fn wire_seq_for_request(&self, request_id: &str) -> Option<u32> {
+        self.by_cookie
+            .0
+            .iter()
+            .find(|(_, registration, _)| registration.request_id == request_id)
+            .and_then(|(_, registration, _)| registration.wire_seq)
     }
 
     /// 终态取走(上层经此把结果交给 core;取走后条目移除,迟到回调转为
@@ -265,14 +307,35 @@ mod tests {
         l.set_generations(1, 1);
         l.register("req-1", cookie(1)).unwrap();
         // inline:submit 返回前响应已到。
-        let c1 = l.complete(&cookie(1), ResponseOutcome::BusinessSuccess { native_id: "nat-1".into() });
+        let c1 = l.complete(
+            &cookie(1),
+            ResponseOutcome::BusinessSuccess {
+                native_id: "nat-1".into(),
+            },
+        );
         assert_eq!(
             c1,
-            Completion::Terminated { request_id: "req-1".into(), outcome: ResponseOutcome::BusinessSuccess { native_id: "nat-1".into() } }
+            Completion::Terminated {
+                request_id: "req-1".into(),
+                outcome: ResponseOutcome::BusinessSuccess {
+                    native_id: "nat-1".into()
+                }
+            }
         );
         // 迟到重复:只审计,不翻案。
-        let c2 = l.complete(&cookie(1), ResponseOutcome::BusinessRejected { ret_code: 1, err: "late".into() });
-        assert_eq!(c2, Completion::DuplicateIgnored { request_id: "req-1".into() });
+        let c2 = l.complete(
+            &cookie(1),
+            ResponseOutcome::BusinessRejected {
+                ret_code: 1,
+                err: "late".into(),
+            },
+        );
+        assert_eq!(
+            c2,
+            Completion::DuplicateIgnored {
+                request_id: "req-1".into()
+            }
+        );
         assert_eq!(l.audit.duplicate_ignored, 1);
     }
 
@@ -285,22 +348,88 @@ mod tests {
             l.register(&format!("req-{i}"), cookie(*cid)).unwrap();
         }
         assert!(matches!(
-            l.complete(&cookie(1), ResponseOutcome::BusinessSuccess { native_id: "m1".into() }),
+            l.complete(
+                &cookie(1),
+                ResponseOutcome::BusinessSuccess {
+                    native_id: "m1".into()
+                }
+            ),
             Completion::Terminated { .. }
         ));
         assert!(matches!(
-            l.complete(&cookie(2), ResponseOutcome::BusinessRejected { ret_code: -1, err: "e".into() }),
+            l.complete(
+                &cookie(2),
+                ResponseOutcome::BusinessRejected {
+                    ret_code: -1,
+                    err: "e".into()
+                }
+            ),
             Completion::Terminated { .. }
         ));
         assert!(matches!(
-            l.complete(&cookie(3), ResponseOutcome::TransportFailed { reason: "t".into() }),
+            l.complete(
+                &cookie(3),
+                ResponseOutcome::TransportFailed { reason: "t".into() }
+            ),
             Completion::Terminated { .. }
         ));
         let done = l.take_terminal();
         assert_eq!(done.len(), 3);
         assert!(matches!(done[0].1, ResponseOutcome::BusinessSuccess { .. }));
         // 交付后迟到 → UnknownCookie 审计(条目已移除)。
-        assert_eq!(l.complete(&cookie(1), ResponseOutcome::BusinessSuccess { native_id: "x".into() }), Completion::UnknownCookie);
+        assert_eq!(
+            l.complete(
+                &cookie(1),
+                ResponseOutcome::BusinessSuccess {
+                    native_id: "x".into()
+                }
+            ),
+            Completion::UnknownCookie
+        );
+    }
+
+    #[test]
+    fn business_acceptance_stays_pending_until_strong_identity_arrives() {
+        let mut ledger = ResponseLedger::new();
+        ledger.set_generations(1, 7);
+        ledger.register("R-identity", cookie(14)).unwrap();
+        assert_eq!(
+            ledger.complete(&cookie(14), ResponseOutcome::BusinessAccepted),
+            Completion::AcceptedUnconfirmed {
+                request_id: "R-identity".into()
+            },
+        );
+        assert_eq!(ledger.pending(), vec![(cookie(14), "R-identity".into())]);
+        assert_eq!(
+            ledger.complete(&cookie(14), ResponseOutcome::BusinessAccepted),
+            Completion::DuplicateIgnored {
+                request_id: "R-identity".into()
+            },
+        );
+        assert_eq!(
+            ledger.complete(
+                &cookie(14),
+                ResponseOutcome::BusinessSuccess {
+                    native_id: "N-14".into()
+                }
+            ),
+            Completion::Terminated {
+                request_id: "R-identity".into(),
+                outcome: ResponseOutcome::BusinessSuccess {
+                    native_id: "N-14".into()
+                },
+            },
+        );
+        assert_eq!(
+            ledger.take_terminal(),
+            vec![(
+                "R-identity".into(),
+                ResponseOutcome::BusinessSuccess {
+                    native_id: "N-14".into()
+                },
+            )]
+        );
+        assert!(ledger.pending().is_empty());
     }
 
     /// T08:旧代次回调只审计;登记绑定发起时代次。
@@ -311,8 +440,15 @@ mod tests {
         l.register("old", cookie(9)).unwrap();
         l.set_generations(1, 6); // 会话代次推进
         assert_eq!(
-            l.complete(&cookie(9), ResponseOutcome::BusinessSuccess { native_id: "m".into() }),
-            Completion::StaleGeneration { request_id: "old".into() }
+            l.complete(
+                &cookie(9),
+                ResponseOutcome::BusinessSuccess {
+                    native_id: "m".into()
+                }
+            ),
+            Completion::StaleGeneration {
+                request_id: "old".into()
+            }
         );
         assert_eq!(l.audit.stale_generation, 1);
         // 旧代次结果不得翻案:pending 仍含 old?—— 否:登记绑定旧代次,
@@ -325,7 +461,13 @@ mod tests {
     fn unknown_cookie_audited() {
         let mut l = ResponseLedger::new();
         l.set_generations(1, 1);
-        assert_eq!(l.complete(&cookie(42), ResponseOutcome::TransportFailed { reason: "r".into() }), Completion::UnknownCookie);
+        assert_eq!(
+            l.complete(
+                &cookie(42),
+                ResponseOutcome::TransportFailed { reason: "r".into() }
+            ),
+            Completion::UnknownCookie
+        );
         assert_eq!(l.audit.unknown_cookie, 1);
     }
 
@@ -336,9 +478,18 @@ mod tests {
         l.set_generations(1, 1);
         l.register("a", cookie(1)).unwrap();
         l.register("b", cookie(2)).unwrap();
-        l.complete(&cookie(1), ResponseOutcome::BusinessRejected { ret_code: 5, err: "x".into() });
+        l.complete(
+            &cookie(1),
+            ResponseOutcome::BusinessRejected {
+                ret_code: 5,
+                err: "x".into(),
+            },
+        );
         let drained = l.drain("bridge closing");
-        assert_eq!(drained, vec![("b".to_string(), "bridge closing".to_string())]);
+        assert_eq!(
+            drained,
+            vec![("b".to_string(), "bridge closing".to_string())]
+        );
         assert_eq!(l.audit.drained_unknown, 1);
         assert!(l.pending().is_empty());
         // 已终态(a)不被 drain 二次表达。
@@ -350,9 +501,18 @@ mod tests {
         let mut l = ResponseLedger::new();
         l.set_generations(1, 1);
         l.register("r1", cookie(1)).unwrap();
-        assert_eq!(l.register("r2", cookie(1)), Err(RegisterError::DuplicateCookie));
-        assert_eq!(l.register("r1", cookie(2)), Err(RegisterError::DuplicateRequest));
-        assert_eq!(l.register("r3", Cookie([0u8; 16])), Err(RegisterError::ZeroCookie));
+        assert_eq!(
+            l.register("r2", cookie(1)),
+            Err(RegisterError::DuplicateCookie)
+        );
+        assert_eq!(
+            l.register("r1", cookie(2)),
+            Err(RegisterError::DuplicateRequest)
+        );
+        assert_eq!(
+            l.register("r3", Cookie([0u8; 16])),
+            Err(RegisterError::ZeroCookie)
+        );
     }
 
     /// T09:持久化先于交付;持久化失败不前进、不交付(调用方不得发起)。

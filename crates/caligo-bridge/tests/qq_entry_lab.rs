@@ -51,7 +51,8 @@ impl FakeQq {
         let idata = isolate_data.as_mut_ptr() as usize;
         let isolate = isolate_inner as usize;
         // 新鲜度门:env[0] = qqnt_base + 主 vtable RVA。
-        let vfptr = (qqnt_base as u64).wrapping_add(caligo_bridge::exec::EXPECTED_VTABLE_RVA as u64);
+        let vfptr =
+            (qqnt_base as u64).wrapping_add(caligo_bridge::exec::EXPECTED_VTABLE_RVA as u64);
         env_mem[0..8].copy_from_slice(&vfptr.to_le_bytes());
         // env+0xA0 = isolate;env+0xB0 = IsolateData*;IsolateData+0x11E8 = loop。
         env_mem[0xA0..0xA8].copy_from_slice(&(isolate as u64).to_le_bytes());
@@ -209,9 +210,17 @@ fn staged_bootstrap_wake_and_owner_pump() {
     let _g = TEST_LOCK.lock().unwrap();
     lab_reset();
     let (_qq, qqnt_base, env, _loop) = FakeQq::new();
-    let cfg = EntryConfig { qqnt_base, env, report_path: report_path("full") };
+    let cfg = EntryConfig {
+        qqnt_base,
+        env,
+        report_path: report_path("full"),
+    };
     let handle = bootstrap(&cfg, &fake_symbols()).unwrap();
-    assert_eq!(FAKE_INIT_CALLS.load(Ordering::Relaxed), 1, "uv_async_init 恰一次(常驻)");
+    assert_eq!(
+        FAKE_INIT_CALLS.load(Ordering::Relaxed),
+        1,
+        "uv_async_init 恰一次(常驻)"
+    );
     assert_eq!(FAKE_RI_CALLS.load(Ordering::Relaxed), 1);
     assert!(!handle.quarantine());
 
@@ -232,7 +241,11 @@ fn close_completes_via_pump_and_close_callback() {
     let _g = TEST_LOCK.lock().unwrap();
     lab_reset();
     let (_qq, qqnt_base, env, _loop) = FakeQq::new();
-    let cfg = EntryConfig { qqnt_base, env, report_path: report_path("close") };
+    let cfg = EntryConfig {
+        qqnt_base,
+        env,
+        report_path: report_path("close"),
+    };
     // bootstrap 在"owner 线程"上执行(假宿主同步首入 → ENTRY.tid = 该线程);
     // 之后轮转点也必须由同一线程驱动(pump 的 owner 断言是机器契约)。
     let (tx_handle, rx_handle) = std::sync::mpsc::channel();
@@ -264,7 +277,11 @@ fn zero_current_context_aborts_before_any_host_api() {
     lab_reset();
     let (_qq, qqnt_base, env, _loop) = FakeQq::new();
     FAKE_CURRENT.store(0, Ordering::Release); // 零 current:不得放行
-    let cfg = EntryConfig { qqnt_base, env, report_path: report_path("zerocur") };
+    let cfg = EntryConfig {
+        qqnt_base,
+        env,
+        report_path: report_path("zerocur"),
+    };
     let err = bootstrap(&cfg, &fake_symbols()).unwrap_err();
     assert_eq!(err, EntryError::InterruptNoCurrentContext);
     assert_eq!(
@@ -272,7 +289,10 @@ fn zero_current_context_aborts_before_any_host_api() {
         0,
         "零 current 下不得 init 任何宿主资源"
     );
-    FAKE_CURRENT.store(FAKE_EXPECTED_ISOLATE.load(Ordering::Acquire), Ordering::Release);
+    FAKE_CURRENT.store(
+        FAKE_EXPECTED_ISOLATE.load(Ordering::Acquire),
+        Ordering::Release,
+    );
 }
 
 #[test]
@@ -285,10 +305,18 @@ fn stale_env_fails_freshness_gate_before_interrupt() {
     unsafe {
         *(env as *mut u64) ^= 0xFF;
     }
-    let cfg = EntryConfig { qqnt_base, env, report_path: report_path("stale") };
+    let cfg = EntryConfig {
+        qqnt_base,
+        env,
+        report_path: report_path("stale"),
+    };
     let err = bootstrap(&cfg, &fake_symbols()).unwrap_err();
     assert_eq!(err, EntryError::EnvNotFresh);
-    assert_eq!(FAKE_RI_CALLS.load(Ordering::Relaxed), 0, "新鲜度门先于 RequestInterrupt");
+    assert_eq!(
+        FAKE_RI_CALLS.load(Ordering::Relaxed),
+        0,
+        "新鲜度门先于 RequestInterrupt"
+    );
 }
 
 #[test]
@@ -297,8 +325,15 @@ fn adapter_listener_ops_via_v8_ladder_and_resident_full_mode() {
     lab_reset();
     install_fake_v8();
     let (_qq, qqnt_base, env, _loop) = FakeQq::new();
-    fake_v8::CURRENT.store(FAKE_EXPECTED_ISOLATE.load(Ordering::Acquire), Ordering::Release);
-    let cfg = EntryConfig { qqnt_base, env, report_path: report_path("adapter") };
+    fake_v8::CURRENT.store(
+        FAKE_EXPECTED_ISOLATE.load(Ordering::Acquire),
+        Ordering::Release,
+    );
+    let cfg = EntryConfig {
+        qqnt_base,
+        env,
+        report_path: report_path("adapter"),
+    };
     let handle = bootstrap(&cfg, &fake_symbols()).unwrap();
     let mut adapter = QqOwnerAdapter::new(handle);
     assert_eq!(
@@ -315,14 +350,22 @@ fn adapter_listener_ops_via_v8_ladder_and_resident_full_mode() {
     );
     // 对称移除:STOPPED 确认。
     assert_eq!(
-        adapter.native_op(HostOp::ListenerRemove { token: 17 }).unwrap(),
+        adapter
+            .native_op(HostOp::ListenerRemove { token: 17 })
+            .unwrap(),
         HostOpResult::ListenerRemoved
     );
     // D9 发送:显式拒绝(未接线,不冒充)。
     // D9 发送已接线:装了假 V8 符号 → 阶梯执行 send 脚本 → 假机无应答队列
     // 返回 NOT_ARMED(err 字段)→ 宿主明确失败 Native{3}(NOT_ARMED = 未接线)。
     assert!(matches!(
-        adapter.native_op(HostOp::SendText { chat_type: 1, peer_uid: "p".into(), text: "x".into() }),
+        adapter.native_op(HostOp::SendText {
+            request_id: "LAB-request".into(),
+            wire_seq: 1,
+            chat_type: 1,
+            peer_uid: "p".into(),
+            text: "x".into()
+        }),
         Err(HostError::Native { code: 3 })
     ));
 
@@ -360,7 +403,10 @@ mod fake_v8 {
         LOCALS.lock().unwrap()[h - 1].clone()
     }
 
-    pub unsafe extern "C" fn scope_ctor(this: *mut core::ffi::c_void, _i: *mut core::ffi::c_void) -> *mut core::ffi::c_void {
+    pub unsafe extern "C" fn scope_ctor(
+        this: *mut core::ffi::c_void,
+        _i: *mut core::ffi::c_void,
+    ) -> *mut core::ffi::c_void {
         SCOPE_CALLS.fetch_add(1, Ordering::Relaxed);
         this
     }
@@ -376,13 +422,24 @@ mod fake_v8 {
         *sret = 0;
         let _ = i;
     }
-    pub unsafe extern "C" fn new_from_utf8(sret: *mut usize, _i: *mut core::ffi::c_void, data: *const u8, _ty: i32, len: i32) {
+    pub unsafe extern "C" fn new_from_utf8(
+        sret: *mut usize,
+        _i: *mut core::ffi::c_void,
+        data: *const u8,
+        _ty: i32,
+        len: i32,
+    ) {
         // SAFETY: 调用方保证 data/len 有效。
         let bytes = unsafe { core::slice::from_raw_parts(data, len as usize) };
         let h = push_local(String::from_utf8_lossy(bytes).into_owned());
         *sret = h as usize;
     }
-    pub unsafe extern "C" fn compile(sret: *mut usize, _ctx: usize, src: usize, _origin: *mut core::ffi::c_void) {
+    pub unsafe extern "C" fn compile(
+        sret: *mut usize,
+        _ctx: usize,
+        src: usize,
+        _origin: *mut core::ffi::c_void,
+    ) {
         let s = get_local(src);
         *LAST_SRC.lock().unwrap() = s.clone();
         let h = push_local(format!("SCRIPT::{}", s));
@@ -390,7 +447,10 @@ mod fake_v8 {
     }
     pub unsafe extern "C" fn run(this: usize, sret: *mut usize, _ctx: usize, _data: usize) {
         let script = get_local(this);
-        let src = script.strip_prefix("SCRIPT::").unwrap_or(&script).to_string();
+        let src = script
+            .strip_prefix("SCRIPT::")
+            .unwrap_or(&script)
+            .to_string();
         let mut q = RESPONSES.lock().unwrap();
         let result = if !q.is_empty() {
             q.remove(0)
@@ -406,17 +466,30 @@ mod fake_v8 {
         *sret = h as usize;
     }
     // Utf8Value:this 前 8 字节 = 结果句柄。
-    pub unsafe extern "C" fn utf8_ctor(this: *mut core::ffi::c_void, _i: *mut core::ffi::c_void, value: usize) -> *mut core::ffi::c_void {
+    pub unsafe extern "C" fn utf8_ctor(
+        this: *mut core::ffi::c_void,
+        _i: *mut core::ffi::c_void,
+        value: usize,
+    ) -> *mut core::ffi::c_void {
         (this as *mut usize).write(value);
         this
     }
     pub unsafe extern "C" fn utf8_dtor(_this: *mut core::ffi::c_void) {}
     pub unsafe extern "C" fn ctx_enter(_this: *mut core::ffi::c_void) {}
     pub unsafe extern "C" fn ctx_exit(_this: *mut core::ffi::c_void) {}
-    pub unsafe extern "C" fn tc_ctor(_this: *mut core::ffi::c_void, _i: *mut core::ffi::c_void) -> *mut core::ffi::c_void { _this }
+    pub unsafe extern "C" fn tc_ctor(
+        _this: *mut core::ffi::c_void,
+        _i: *mut core::ffi::c_void,
+    ) -> *mut core::ffi::c_void {
+        _this
+    }
     pub unsafe extern "C" fn tc_dtor(_this: *mut core::ffi::c_void) {}
-    pub unsafe extern "C" fn tc_caught(_this: *const core::ffi::c_void) -> bool { false }
-    pub unsafe extern "C" fn tc_exc(_this: *const core::ffi::c_void, sret: *mut usize) { *sret = 0; }
+    pub unsafe extern "C" fn tc_caught(_this: *const core::ffi::c_void) -> bool {
+        false
+    }
+    pub unsafe extern "C" fn tc_exc(_this: *const core::ffi::c_void, sret: *mut usize) {
+        *sret = 0;
+    }
     pub unsafe extern "C" fn utf8_deref(this: *mut core::ffi::c_void) -> *const u8 {
         let h = (this as *const usize).read();
         let s = get_local(h);
@@ -426,18 +499,28 @@ mod fake_v8 {
 }
 
 fn install_fake_v8() {
-    type FScopeCtor = unsafe extern "C" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+    type FScopeCtor = unsafe extern "C" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> *mut core::ffi::c_void;
     type FScopeDtor = unsafe extern "C" fn(*mut core::ffi::c_void);
     type FGetCurrent = unsafe extern "C" fn() -> *mut core::ffi::c_void;
     type FCtx = unsafe extern "C" fn(*mut core::ffi::c_void, *mut usize);
     type FNewUtf8 = unsafe extern "C" fn(*mut usize, *mut core::ffi::c_void, *const u8, i32, i32);
     type FCompile = unsafe extern "C" fn(*mut usize, usize, usize, *mut core::ffi::c_void);
     type FRun = unsafe extern "C" fn(usize, *mut usize, usize, usize);
-    type FUtf8Ctor = unsafe extern "C" fn(*mut core::ffi::c_void, *mut core::ffi::c_void, usize) -> *mut core::ffi::c_void;
+    type FUtf8Ctor = unsafe extern "C" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        usize,
+    ) -> *mut core::ffi::c_void;
     type FUtf8Dtor = unsafe extern "C" fn(*mut core::ffi::c_void);
     type FUtf8Deref = unsafe extern "C" fn(*mut core::ffi::c_void) -> *const u8;
     type FCtxEE = unsafe extern "C" fn(*mut core::ffi::c_void);
-    type FTcCtor = unsafe extern "C" fn(*mut core::ffi::c_void, *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+    type FTcCtor = unsafe extern "C" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> *mut core::ffi::c_void;
     type FTcDtor = unsafe extern "C" fn(*mut core::ffi::c_void);
     type FTcCaught = unsafe extern "C" fn(*const core::ffi::c_void) -> bool;
     type FTcExc = unsafe extern "C" fn(*const core::ffi::c_void, *mut usize);
@@ -459,9 +542,23 @@ fn install_fake_v8() {
     let p16: FTcCaught = fake_v8::tc_caught;
     let p17: FTcExc = fake_v8::tc_exc;
     caligo_bridge::qq_v8::store_symbols_raw(caligo_bridge::qq_v8::V8Symbols::from_raw([
-        p1 as usize, p2 as usize, p3 as usize, p4 as usize, p5 as usize, p6 as usize,
-        p7 as usize, p8 as usize, p9 as usize, p10 as usize, p11 as usize, p12 as usize,
-        p13 as usize, p14 as usize, p15 as usize, p16 as usize, p17 as usize,
+        p1 as usize,
+        p2 as usize,
+        p3 as usize,
+        p4 as usize,
+        p5 as usize,
+        p6 as usize,
+        p7 as usize,
+        p8 as usize,
+        p9 as usize,
+        p10 as usize,
+        p11 as usize,
+        p12 as usize,
+        p13 as usize,
+        p14 as usize,
+        p15 as usize,
+        p16 as usize,
+        p17 as usize,
     ]));
 }
 
@@ -476,7 +573,11 @@ fn d8_v8_ladder_arm_and_stop_flow() {
         Ordering::Release,
     );
 
-    let cfg = EntryConfig { qqnt_base, env, report_path: report_path("d8arm") };
+    let cfg = EntryConfig {
+        qqnt_base,
+        env,
+        report_path: report_path("d8arm"),
+    };
     let handle = bootstrap(&cfg, &fake_symbols()).unwrap();
     let mut adapter = caligo_bridge::qq_entry::QqOwnerAdapter::new(handle);
 
@@ -487,7 +588,10 @@ fn d8_v8_ladder_arm_and_stop_flow() {
         caligo_bridge::host_adapter::HostOpResult::ListenerAdded { token: 17 }
     );
     assert!(
-        fake_v8::LAST_SRC.lock().unwrap().contains("addKernelMsgListener"),
+        fake_v8::LAST_SRC
+            .lock()
+            .unwrap()
+            .contains("addKernelMsgListener"),
         "阶梯执行的是监听器注册脚本"
     );
 
@@ -496,8 +600,13 @@ fn d8_v8_ladder_arm_and_stop_flow() {
     assert!(json.contains("NOT_ARMED") || json.contains("items"));
 
     // 对称移除。
-    let r = adapter.native_op(HostOp::ListenerRemove { token: 17 }).unwrap();
-    assert_eq!(r, caligo_bridge::host_adapter::HostOpResult::ListenerRemoved);
+    let r = adapter
+        .native_op(HostOp::ListenerRemove { token: 17 })
+        .unwrap();
+    assert_eq!(
+        r,
+        caligo_bridge::host_adapter::HostOpResult::ListenerRemoved
+    );
 }
 
 #[test]
@@ -510,7 +619,11 @@ fn d8_zero_current_refuses_v8_ladder_before_scope() {
         FAKE_EXPECTED_ISOLATE.load(Ordering::Acquire),
         Ordering::Release,
     );
-    let cfg = EntryConfig { qqnt_base, env, report_path: report_path("d8zero") };
+    let cfg = EntryConfig {
+        qqnt_base,
+        env,
+        report_path: report_path("d8zero"),
+    };
     let _handle = bootstrap(&cfg, &fake_symbols()).unwrap();
 
     // 安静轮转点:current = 0 但 entered ctx 有效 → 阶梯可进入(K2-03 r3 语义)。

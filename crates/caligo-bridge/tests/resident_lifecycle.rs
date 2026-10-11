@@ -2,25 +2,74 @@
 //!
 //! 自建宿主 = [`SharedMockHost`]:可控 owner 线程标识、env 有效性、
 //! current 上下文、假会话服务语义(计数型)。全部用例零 QQ 依赖;
-//! 进程内分配由计数分配器监控(L17 资源平衡)。
+//! 当前测试线程的分配由计数分配器监控(L17 资源平衡)，不把并行测试的
+//! 临时分配混入本用例的快照。
 //!
 //! 注意:本测试二进制安装了自己的 `#[global_allocator]`(计数分配器),
 //! 仅用于本文件的资源增长断言。
 
+use std::cell::Cell;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use caligo_bridge::host_adapter::{HostAdapter, HostError, HostOp, HostOpResult};
 use caligo_bridge::resident::{
-
-    CloseReport, OwnedEvent, OwnedRequest, Resident, ResidentLimits, SubmitVerdict,
-    SendOutcome,
+    CloseReport, OwnedEvent, OwnedRequest, Resident, ResidentLimits, SendOutcome, SubmitVerdict,
 };
 
 // ---- 计数分配器(L17:分配不随调度次数增长 / 关闭后回基线) ----
 
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static TOTAL: AtomicUsize = AtomicUsize::new(0);
+struct AllocationStats {
+    enabled: Cell<bool>,
+    live: Cell<usize>,
+    total: Cell<usize>,
+}
+
+thread_local! {
+    static ALLOCATION_STATS: AllocationStats = const {
+        AllocationStats {
+            enabled: Cell::new(false),
+            live: Cell::new(0),
+            total: Cell::new(0),
+        }
+    };
+}
+
+struct AllocationTracking;
+
+impl AllocationTracking {
+    fn start() -> Self {
+        ALLOCATION_STATS.with(|stats| {
+            stats.live.set(0);
+            stats.total.set(0);
+            stats.enabled.set(true);
+        });
+        Self
+    }
+}
+
+impl Drop for AllocationTracking {
+    fn drop(&mut self) {
+        ALLOCATION_STATS.with(|stats| stats.enabled.set(false));
+    }
+}
+
+fn record_alloc() {
+    let _ = ALLOCATION_STATS.try_with(|stats| {
+        if stats.enabled.get() {
+            stats.live.set(stats.live.get() + 1);
+            stats.total.set(stats.total.get() + 1);
+        }
+    });
+}
+
+fn record_dealloc() {
+    let _ = ALLOCATION_STATS.try_with(|stats| {
+        if stats.enabled.get() {
+            stats.live.set(stats.live.get().saturating_sub(1));
+        }
+    });
+}
 
 struct CountingAlloc;
 
@@ -29,15 +78,14 @@ unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
         // SAFETY: 前置转发到系统分配器。
         let p = unsafe { std::alloc::System.alloc(layout) };
         if !p.is_null() {
-            LIVE.fetch_add(1, Ordering::Relaxed);
-            TOTAL.fetch_add(1, Ordering::Relaxed);
+            record_alloc();
         }
         p
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
         // SAFETY: 前置转发到系统分配器。
         unsafe { std::alloc::System.dealloc(ptr, layout) };
-        LIVE.fetch_sub(1, Ordering::Relaxed);
+        record_dealloc();
     }
 }
 
@@ -45,7 +93,11 @@ unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
 static ALLOC: CountingAlloc = CountingAlloc;
 
 fn live_allocs() -> usize {
-    LIVE.load(Ordering::Relaxed)
+    ALLOCATION_STATS.with(|stats| stats.live.get())
+}
+
+fn total_allocs() -> usize {
+    ALLOCATION_STATS.with(|stats| stats.total.get())
 }
 
 // ---- SharedMockHost:自建假宿主(测试夹具,无 QQ) ----
@@ -103,7 +155,12 @@ impl SharedControl {
         self.inner.lock().unwrap().unknown_ops += 1;
     }
     fn all_native_on_owner(&self) -> bool {
-        self.inner.lock().unwrap().op_threads.iter().all(|t| *t == OWNER)
+        self.inner
+            .lock()
+            .unwrap()
+            .op_threads
+            .iter()
+            .all(|t| *t == OWNER)
     }
 }
 
@@ -119,7 +176,10 @@ impl SharedMockHost {
             ..Default::default()
         }));
         (
-            Self { inner: inner.clone(), owner_thread: OWNER },
+            Self {
+                inner: inner.clone(),
+                owner_thread: OWNER,
+            },
             SharedControl { inner },
         )
     }
@@ -174,7 +234,12 @@ impl HostAdapter for SharedMockHost {
                 Ok(HostOpResult::ListenerRemoved)
             }
             HostOp::Probe => Ok(HostOpResult::ProbeDone),
-            HostOp::SendText { .. } => Ok(HostOpResult::Sent { native_id: Some(format!("NM-{}", inner.native_calls)) }),
+            HostOp::SendText { text, .. } if text == "accepted-without-id" => {
+                Ok(HostOpResult::Sent { native_id: None })
+            }
+            HostOp::SendText { .. } => Ok(HostOpResult::Sent {
+                native_id: Some(format!("NM-{}", inner.native_calls)),
+            }),
         }
     }
 }
@@ -183,6 +248,131 @@ fn fixture() -> (Arc<Resident<SharedMockHost>>, SharedControl) {
     let (host, control) = SharedMockHost::new();
     let r = Arc::new(Resident::new(host, ResidentLimits::default()));
     (r, control)
+}
+
+struct CorrelationHost {
+    owner: u64,
+    pending: Arc<std::sync::Mutex<Option<String>>>,
+    response_id: Option<String>,
+}
+
+impl HostAdapter for CorrelationHost {
+    fn owner_thread_id(&self) -> u64 {
+        self.owner
+    }
+    fn current_thread_id(&self) -> u64 {
+        self.owner
+    }
+    fn env_valid(&self) -> bool {
+        true
+    }
+    fn current_context_ok(&self) -> bool {
+        true
+    }
+    fn native_op(&mut self, op: HostOp) -> Result<HostOpResult, HostError> {
+        Ok(match op {
+            HostOp::ListenerAdd => HostOpResult::ListenerDeferred,
+            HostOp::ListenerRemove { .. } => HostOpResult::ListenerRemoved,
+            HostOp::Probe => HostOpResult::ProbeDone,
+            HostOp::SendText { request_id, .. } => {
+                *self.pending.lock().unwrap() = Some(request_id);
+                HostOpResult::SendFired {
+                    mid: "MID-correlation".into(),
+                }
+            }
+        })
+    }
+    fn drain_send_responses(&mut self) -> Vec<(String, SendOutcome)> {
+        self.pending
+            .lock()
+            .unwrap()
+            .take()
+            .map(|request_id| {
+                vec![(
+                    self.response_id
+                        .clone()
+                        .unwrap_or_else(|| request_id.clone()),
+                    SendOutcome::Success {
+                        request_id: self.response_id.clone().unwrap_or(request_id),
+                        native_id: "NATIVE-correlation".into(),
+                    },
+                )]
+            })
+            .unwrap_or_default()
+    }
+}
+
+#[test]
+fn original_request_id_survives_async_response_correlation() {
+    let pending = Arc::new(std::sync::Mutex::new(None));
+    let resident = Resident::new(
+        CorrelationHost {
+            owner: OWNER,
+            pending: pending.clone(),
+            response_id: None,
+        },
+        ResidentLimits::default(),
+    );
+    resident.bootstrap().unwrap();
+    assert_eq!(
+        resident.submit(OwnedRequest::SendText {
+            request_id: "R-origin".into(),
+            wire_seq: 1,
+            chat_type: 2,
+            peer_uid: "123".into(),
+            text: "hello".into(),
+        }),
+        SubmitVerdict::Accepted
+    );
+
+    assert!(
+        resident.take_results().is_empty(),
+        "submit acceptance is not NativeStarted"
+    );
+    resident.drain().unwrap();
+    assert_eq!(*pending.lock().unwrap(), Some("R-origin".into()));
+    resident.drain_send_responses();
+    assert!(matches!(resident.take_results().as_slice(), [
+        caligo_bridge::resident::ResidentNotice::NativeStarted { request_id: started },
+        caligo_bridge::resident::ResidentNotice::Outcome(SendOutcome::Success {
+            request_id,
+            native_id,
+        }),
+    ] if started == "R-origin" && request_id == "R-origin" && native_id == "NATIVE-correlation"));
+}
+
+#[test]
+fn unknown_native_response_id_is_audited_and_not_forwarded() {
+    let pending = Arc::new(std::sync::Mutex::new(None));
+    let resident = Resident::new(
+        CorrelationHost {
+            owner: OWNER,
+            pending,
+            response_id: Some("N-inner".into()),
+        },
+        ResidentLimits::default(),
+    );
+    resident.bootstrap().unwrap();
+    assert_eq!(
+        resident.submit(OwnedRequest::SendText {
+            request_id: "R-origin".into(),
+            wire_seq: 1,
+            chat_type: 2,
+            peer_uid: "123".into(),
+            text: "hello".into(),
+        }),
+        SubmitVerdict::Accepted
+    );
+    resident.drain().unwrap();
+    assert_eq!(
+        resident.drain_send_responses(),
+        0,
+        "unknown identity is not associated"
+    );
+    assert!(matches!(resident.take_results().as_slice(), [
+        caligo_bridge::resident::ResidentNotice::NativeStarted { request_id }
+    ] if request_id == "R-origin"));
+    assert_eq!(resident.counters().orphan_results_ignored, 1);
 }
 
 // ---- 验收:bootstrap 一次;listener 注册在 owner;precheck 先于宿主 API ----
@@ -236,8 +426,20 @@ fn l07_foreign_thread_and_zero_context_rejected_before_any_host_api() {
 fn l16_close_protocol_and_late_callbacks() {
     let (r, ctl) = fixture();
     let tok = r.bootstrap().unwrap();
-    r.submit(OwnedRequest::SendText { request_id: "a".into(), chat_type: 1, peer_uid: "p".into(), text: "x".repeat(2) });
-    r.submit(OwnedRequest::SendText { request_id: "b".into(), chat_type: 1, peer_uid: "p".into(), text: "x".repeat(3) });
+    r.submit(OwnedRequest::SendText {
+        request_id: "a".into(),
+        wire_seq: 1,
+        chat_type: 1,
+        peer_uid: "p".into(),
+        text: "x".repeat(2),
+    });
+    r.submit(OwnedRequest::SendText {
+        request_id: "b".into(),
+        wire_seq: 2,
+        chat_type: 1,
+        peer_uid: "p".into(),
+        text: "x".repeat(3),
+    });
     assert_eq!(r.drain().unwrap(), 2);
 
     let report = r.close().unwrap();
@@ -252,7 +454,10 @@ fn l16_close_protocol_and_late_callbacks() {
         }
     );
     assert!(ctl.listener_token().is_none(), "监听器对称移除并确认");
-    assert_eq!(r.submit(OwnedRequest::Probe { id: 99 }), SubmitVerdict::Closed);
+    assert_eq!(
+        r.submit(OwnedRequest::Probe { id: 99 }),
+        SubmitVerdict::Closed
+    );
 
     // 迟到回调(已关闭):拒绝且零 native。
     let before = ctl.native_calls();
@@ -284,27 +489,52 @@ fn close_cancels_queued_and_reports_failure_vs_unknown() {
     r.bootstrap().unwrap();
     // native 服务明确报错(调用完成但失败)→ Failure 结果,不是 unknown。
     ctl.fail_next_native();
-    r.submit(OwnedRequest::SendText { request_id: "inflight".into(), chat_type: 1, peer_uid: "p".into(), text: "x".repeat(1) });
+    r.submit(OwnedRequest::SendText {
+        request_id: "inflight".into(),
+        wire_seq: 3,
+        chat_type: 1,
+        peer_uid: "p".into(),
+        text: "x".repeat(1),
+    });
     assert_eq!(r.drain().unwrap(), 1);
     assert_eq!(r.request_state("inflight"), Some("done"));
     let outcomes = r.take_results();
     assert_eq!(
         outcomes,
-        vec![caligo_bridge::resident::SendOutcome::Failure {
-            request_id: "inflight".into(),
-            reason: "native code 9".into(),
-        }]
+        vec![caligo_bridge::resident::ResidentNotice::Outcome(
+            caligo_bridge::resident::SendOutcome::Failure {
+                request_id: "inflight".into(),
+                reason: "native code 9".into(),
+            }
+        )]
     );
     // 操作级环境失效(precheck 过、执行中死)→ DeliveryUnknown,不冒充失败。
     ctl.fail_next_op_unknown();
-    r.submit(OwnedRequest::SendText { request_id: "ghost".into(), chat_type: 1, peer_uid: "p".into(), text: "x".repeat(1) });
+    r.submit(OwnedRequest::SendText {
+        request_id: "ghost".into(),
+        wire_seq: 4,
+        chat_type: 1,
+        peer_uid: "p".into(),
+        text: "x".repeat(1),
+    });
     assert_eq!(r.drain().unwrap(), 1);
     assert_eq!(r.request_state("ghost"), Some("delivery_unknown"));
     let outcomes = r.take_results();
     assert_eq!(outcomes.len(), 1);
-    assert!(matches!(outcomes[0], caligo_bridge::resident::SendOutcome::Unknown { .. }));
+    assert!(matches!(
+        outcomes[0],
+        caligo_bridge::resident::ResidentNotice::Outcome(
+            caligo_bridge::resident::SendOutcome::Unknown { .. }
+        )
+    ));
     // 排队未执行项随 close 取消。
-    r.submit(OwnedRequest::SendText { request_id: "queued".into(), chat_type: 1, peer_uid: "p".into(), text: "x".repeat(1) });
+    r.submit(OwnedRequest::SendText {
+        request_id: "queued".into(),
+        wire_seq: 5,
+        chat_type: 1,
+        peer_uid: "p".into(),
+        text: "x".repeat(1),
+    });
     let report = r.close().unwrap();
     assert_eq!(report.cancelled_unsent, 1);
     assert_eq!(r.request_state("queued"), Some("cancelled_unsent"));
@@ -329,22 +559,27 @@ fn listener_removal_failure_quarantines_instead_of_fake_success() {
 
 #[test]
 fn l17_ten_thousand_probes_no_growth_and_counters_balance() {
+    let _tracking = AllocationTracking::start();
     let (r, ctl) = fixture();
     r.bootstrap().unwrap();
-    assert_eq!(r.counters().native_ops_total, 1, "bootstrap 的 ListenerAdd 计入 native 总数");
+    assert_eq!(
+        r.counters().native_ops_total,
+        1,
+        "bootstrap 的 ListenerAdd 计入 native 总数"
+    );
     // 预热(排除首次建表的一次性分配)。
     for i in 0..500u64 {
         r.submit(OwnedRequest::Probe { id: i });
         assert_eq!(r.drain().unwrap(), 1);
     }
     let warm_live = live_allocs();
-    let warm_total = TOTAL.load(Ordering::Relaxed);
+    let warm_total = total_allocs();
 
     for i in 500..10_500u64 {
         r.submit(OwnedRequest::Probe { id: i });
         assert_eq!(r.drain().unwrap(), 1);
     }
-    let total_delta = TOTAL.load(Ordering::Relaxed) - warm_total;
+    let total_delta = total_allocs() - warm_total;
     // 稳态:每调度 ≤ 2 次分配(排队元组),且 live 不随轮数增长。
     assert!(
         total_delta <= 2 * 10_000 + 1_000,
@@ -367,6 +602,7 @@ fn l17_ten_thousand_probes_no_growth_and_counters_balance() {
 
 #[test]
 fn l17_hundred_close_rebuild_cycles_return_to_baseline() {
+    let _tracking = AllocationTracking::start();
     let live_before = live_allocs();
     for cycle in 0..100u64 {
         let (r, ctl) = fixture();
@@ -431,11 +667,19 @@ fn bounded_queues_reject_explicitly_and_drain_batches() {
     // 队列上限(40)> 单轮批次(16):验证分批与"不依赖新消息唤醒"。
     let r = Arc::new(Resident::new(
         host,
-        ResidentLimits { ingress_max: 40, events_max: 256, drain_batch: 16 },
+        ResidentLimits {
+            ingress_max: 40,
+            events_max: 256,
+            results_max: 256,
+            drain_batch: 16,
+        },
     ));
     r.bootstrap().unwrap();
     for i in 0..40u64 {
-        assert_eq!(r.submit(OwnedRequest::Probe { id: i }), SubmitVerdict::Accepted);
+        assert_eq!(
+            r.submit(OwnedRequest::Probe { id: i }),
+            SubmitVerdict::Accepted
+        );
     }
     assert_eq!(
         r.submit(OwnedRequest::Probe { id: 9999 }),
@@ -455,7 +699,13 @@ fn bounded_queues_reject_explicitly_and_drain_batches() {
 fn duplicate_send_request_id_is_not_redispatched() {
     let (r, ctl) = fixture();
     r.bootstrap().unwrap();
-    let req = OwnedRequest::SendText { request_id: "dup".into(), chat_type: 1, peer_uid: "p".into(), text: "x".repeat(5) };
+    let req = OwnedRequest::SendText {
+        request_id: "dup".into(),
+        wire_seq: 6,
+        chat_type: 1,
+        peer_uid: "p".into(),
+        text: "x".repeat(5),
+    };
     assert_eq!(r.submit(req.clone()), SubmitVerdict::Accepted);
     assert_eq!(
         r.submit(req),
@@ -468,6 +718,111 @@ fn duplicate_send_request_id_is_not_redispatched() {
     assert_eq!(r.request_state("dup"), Some("done"));
     r.drain().unwrap();
     assert_eq!(ctl.native_calls(), calls, "第二次 drain 不会再次执行 dup");
+}
+
+#[test]
+fn result_notice_capacity_is_reserved_until_core_ack() {
+    let (r, _) = fixture();
+    r.bootstrap().unwrap();
+    let mut notices = Vec::new();
+    for n in 0..128 {
+        let request_id = format!("bounded-{n}");
+        assert_eq!(
+            r.submit(OwnedRequest::SendText {
+                request_id,
+                wire_seq: n + 1,
+                chat_type: 1,
+                peer_uid: "p".into(),
+                text: "x".into(),
+            }),
+            SubmitVerdict::Accepted
+        );
+        assert_eq!(r.drain().unwrap(), 1);
+        notices.extend(r.take_results()); // ACK 故意延迟,模拟断线
+    }
+    assert_eq!(notices.len(), 256, "每个动作预留 started/result 两个槽");
+    let overflow = OwnedRequest::SendText {
+        request_id: "bounded-overflow".into(),
+        wire_seq: 500,
+        chat_type: 1,
+        peer_uid: "p".into(),
+        text: "x".into(),
+    };
+    assert_eq!(r.submit(overflow.clone()), SubmitVerdict::QueueFull);
+
+    for notice in notices {
+        match notice {
+            caligo_bridge::resident::ResidentNotice::NativeStarted { request_id } => {
+                assert!(r.ack_notice(&request_id, true));
+            }
+            caligo_bridge::resident::ResidentNotice::Outcome(outcome) => {
+                let request_id = match outcome {
+                    SendOutcome::Success { request_id, .. }
+                    | SendOutcome::AcceptedUnconfirmed { request_id }
+                    | SendOutcome::Failure { request_id, .. }
+                    | SendOutcome::Unknown { request_id } => request_id,
+                };
+                assert!(r.ack_result_notice(&request_id, true));
+            }
+        }
+    }
+    assert_eq!(r.submit(overflow), SubmitVerdict::Accepted);
+}
+
+#[test]
+fn accepted_unconfirmed_ack_keeps_terminal_capacity_and_never_redispatches() {
+    let (r, ctl) = fixture();
+    r.bootstrap().unwrap();
+    for n in 0..255u32 {
+        let request_id = format!("accepted-{n}");
+        let req = OwnedRequest::SendText {
+            request_id: request_id.clone(),
+            wire_seq: n + 1,
+            chat_type: 2,
+            peer_uid: "group".into(),
+            text: "accepted-without-id".into(),
+        };
+        assert_eq!(r.submit(req.clone()), SubmitVerdict::Accepted);
+        assert_eq!(r.drain().unwrap(), 1);
+        assert_eq!(r.request_state(&request_id), Some("identity_pending"));
+        let notices = r.take_results();
+        assert_eq!(notices.len(), 2);
+        for notice in notices {
+            match notice {
+                caligo_bridge::resident::ResidentNotice::NativeStarted { request_id } => {
+                    assert!(r.ack_notice(&request_id, true));
+                }
+                caligo_bridge::resident::ResidentNotice::Outcome(
+                    SendOutcome::AcceptedUnconfirmed { request_id },
+                ) => {
+                    assert!(r.ack_result_notice(&request_id, false));
+                }
+                other => panic!("unexpected notice: {other:?}"),
+            }
+        }
+        assert_eq!(
+            r.submit(req),
+            SubmitVerdict::Accepted,
+            "相同 request id 只查询，不重派发"
+        );
+    }
+    let overflow = OwnedRequest::SendText {
+        request_id: "accepted-overflow".into(),
+        wire_seq: 256,
+        chat_type: 2,
+        peer_uid: "group".into(),
+        text: "accepted-without-id".into(),
+    };
+    assert_eq!(
+        r.submit(overflow),
+        SubmitVerdict::QueueFull,
+        "中间态 ACK 不释放终态槽"
+    );
+    assert_eq!(
+        ctl.native_calls(),
+        256,
+        "仅 bootstrap + 255 次首次 dispatch"
+    );
 }
 
 // ---- env 销毁后:业务调度拒绝且零 native(仅 bootstrap 的 1 次存在) ----
@@ -532,12 +887,17 @@ impl HostAdapter for ReentrantHost {
                         peer_uid: "peer".into(),
                         peer_uin: "peer".into(),
                         sender_uin: "sender".into(),
-                        native_id: format!("NM-R-{}", REENTRANT_SENDS.fetch_add(1, Ordering::Relaxed)),
+                        native_id: format!(
+                            "NM-R-{}",
+                            REENTRANT_SENDS.fetch_add(1, Ordering::Relaxed)
+                        ),
                         text: "inline".into(),
                         msg_time: None,
                     },
                 );
-                Ok(HostOpResult::Sent { native_id: Some("NM-INLINE".into()) })
+                Ok(HostOpResult::Sent {
+                    native_id: Some("NM-INLINE".into()),
+                })
             }
             HostOp::ListenerRemove { .. } => {
                 if self.remove_reenters {
@@ -570,7 +930,10 @@ impl HostAdapter for ReentrantHost {
 fn inline_callback_reentrancy_no_deadlock() {
     let slot: Arc<OnceLock<Arc<Resident<ReentrantHost>>>> = Arc::new(OnceLock::new());
     let resident = Arc::new(Resident::new(
-        ReentrantHost { resident: Arc::clone(&slot), remove_reenters: false },
+        ReentrantHost {
+            resident: Arc::clone(&slot),
+            remove_reenters: false,
+        },
         ResidentLimits::default(),
     ));
     slot.set(Arc::clone(&resident)).ok().unwrap();
@@ -578,6 +941,7 @@ fn inline_callback_reentrancy_no_deadlock() {
     assert_eq!(
         resident.submit(OwnedRequest::SendText {
             request_id: "R-INLINE".into(),
+            wire_seq: 7,
             chat_type: 1,
             peer_uid: "peer".into(),
             text: "x".into(),
@@ -590,7 +954,9 @@ fn inline_callback_reentrancy_no_deadlock() {
     let outcomes = resident.take_results();
     assert!(matches!(
         outcomes.as_slice(),
-        [SendOutcome::Success { request_id, .. }] if request_id == "R-INLINE"
+        [caligo_bridge::resident::ResidentNotice::NativeStarted { request_id: started },
+         caligo_bridge::resident::ResidentNotice::Outcome(SendOutcome::Success { request_id, .. })]
+            if started == "R-INLINE" && request_id == "R-INLINE"
     ));
     let events = resident.take_events();
     assert_eq!(events.len(), 1, "内联回调经重入面板送达");
@@ -602,7 +968,10 @@ fn inline_callback_reentrancy_no_deadlock() {
 fn close_listener_remove_allows_reentrant_callback() {
     let slot: Arc<OnceLock<Arc<Resident<ReentrantHost>>>> = Arc::new(OnceLock::new());
     let resident = Arc::new(Resident::new(
-        ReentrantHost { resident: Arc::clone(&slot), remove_reenters: true },
+        ReentrantHost {
+            resident: Arc::clone(&slot),
+            remove_reenters: true,
+        },
         ResidentLimits::default(),
     ));
     slot.set(Arc::clone(&resident)).ok().unwrap();
@@ -639,7 +1008,9 @@ fn send_pending_classified_unknown_on_close() {
                 HostOp::ListenerAdd => HostOpResult::ListenerAdded { token: 1 },
                 HostOp::ListenerRemove { .. } => HostOpResult::ListenerRemoved,
                 HostOp::Probe => HostOpResult::ProbeDone,
-                HostOp::SendText { .. } => HostOpResult::SendFired { mid: "MID-1".into() },
+                HostOp::SendText { .. } => HostOpResult::SendFired {
+                    mid: "MID-1".into(),
+                },
             })
         }
     }
@@ -648,6 +1019,7 @@ fn send_pending_classified_unknown_on_close() {
     assert!(matches!(
         resident.submit(OwnedRequest::SendText {
             request_id: "R-PENDING".into(),
+            wire_seq: 8,
             chat_type: 1,
             peer_uid: "peer".into(),
             text: "x".into(),
@@ -657,6 +1029,12 @@ fn send_pending_classified_unknown_on_close() {
     let _ = resident.drain().unwrap();
     assert_eq!(resident.request_state("R-PENDING"), Some("send_pending"));
     let report = resident.close().unwrap();
-    assert!(report.marked_unknown >= 1, "SendPending 必须计入 marked_unknown");
-    assert_eq!(resident.request_state("R-PENDING"), Some("delivery_unknown"));
+    assert!(
+        report.marked_unknown >= 1,
+        "SendPending 必须计入 marked_unknown"
+    );
+    assert_eq!(
+        resident.request_state("R-PENDING"),
+        Some("delivery_unknown")
+    );
 }

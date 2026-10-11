@@ -83,6 +83,7 @@ fn main() {
         expect_client_pid: args.expect_pid,
         runtime: Default::default(),
         test_fault_break_bridge_after_hello: false,
+        test_fault_break_bridge_after_result: false,
     };
     // 凭据:token-file 优先(重启连续性;文件 user-only,不进 argv/日志)。
     // Daemon::start 自身生成随机 token —— token-file 模式下用文件内容覆盖。

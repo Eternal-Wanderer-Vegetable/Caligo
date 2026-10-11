@@ -38,7 +38,7 @@ offset 0x18 : qword 托管对象指针（73CFA6 写入 param_2）
   3. 取对象 `+0x18` 存的控制块指针；`LOCK` 递减 `*(int*)(ctrlblk+0x10)`（**弱计数**）；
   4. 旧值为 0 → 调用控制块 vtable **slot3**（`+0x18`）= 控制块自删除。
 
-即：**弱计数归零 → 控制块自删**。强计数归零 → 销毁托管对象的调用点**不在析构体内**，而是发生在 pair 释放辅助（`1DB2`/`2632` 家族）内部 [inferred，辅助函数本体未逐一闭合]。
+即：**弱计数归零 → 控制块自删**。强计数递减由 `1DB2` 完成（§3.4）；其前值为零时调用 control-block vtable `+0x08` 并进入 QQ deallocator。该虚函数与偏置/拥有者计数如何共同销毁托管对象仍未闭合；`2632` 是另一条 callback-manager dispose 路径。
 
 ### 3.2 获取（递增）位点全集 [verified]
 
@@ -53,7 +53,21 @@ offset 0x18 : qword 托管对象指针（73CFA6 写入 param_2）
 ### 3.3 pair 移动/复制语义 [verified]
 
 - `31C5F8(dst, src)`：非逐字段复制——调用 src 的 manager（`+0x10`）operation=0，然后把 src `+0x18` 改为空 `236A`、src `+0x10` 改为空 `2338`（move-like 管理协议；R2 §3 已证）。
-- `D32E5A` 是 pair 的**强引用复制**（copy + 源清理）；`3FAA`/`1DB2`/`2632` 是释放侧家族（出现频率极高，本帧内未逐一闭合其强/弱分支 [unknown，列为本合同下一增量]）。
+- `D32E5A` 是 pair 的**强引用复制**（copy + 源清理）；`1DB2` 的强计数释放 ABI 见 §3.4；`2632` 是 callback manager operation-3 dispose，二者不是同一 pair-release 家族。
+
+### 3.4 `1DB2` getter pair release [fixed-hash disassembly]
+
+固定文件 `D:\Program Files\Tencent\QQNT\versions\9.9.33-52230\resources\app\wrapper.node` SHA-256 为 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。只读复核的关键字节为：
+
+```
+RVA 0x1DB2: 48 8B 49 08 48 85 C9 0F 85 BD 08 00 00 C3
+RVA 0x267C: ... B8 FF FF FF FF F0 0F C1 41 08 85 C0 74 06 ...
+RVA 0x2695: 48 89 CE 48 8B 01 FF 50 08 ... E9 E5 86 75 00
+```
+
+`0x1DB2` 读取 `[pair+8]` 作为 control block；非空时进入 `0x267C`，对 `[ctrl+8]` 执行原子 `xadd(-1)`。`test eax,eax; je 0x2695` 的前值为零分支调用 control-block vtable `+0x08`，随后跳到 QQ deallocator `0xB75AD90`。因此 `1DB2` 的入参是 `{obj,ctrl}` pair 地址，签名可绑定为 `void(pair*)`；这是 getter pair 的释放辅助，不是 `0x2632` 的 manager operation-3 disposer。
+
+构造点 `73CFA6` 将 `ctrl+8/+0x10` 初始化为零，getter `72DE38` 对 `ctrl+8` 加一。由此只能按 observed counter operation 成对调用 `1DB2`，不能把其末支简单解释为“本次 getter release 必然析构服务对象”，也不能读写控制块计数。固定 hash 上的 disassembly 与 getter/call-site 一致性支持 ABI 形状；它不证明 service shutdown 与异步 callback 已静止。
 
 ## 4. 执行器单例的寿命观察 [verified]
 
@@ -77,7 +91,7 @@ offset 0x18 : qword 托管对象指针（73CFA6 写入 param_2）
 
 R2 的三条 getter 使用审计（`1760`/`15C0`/`4C40` 只取首 qword、不释放）在本轮机制下即：**取得 `+8` 强引用后永不递减**。对象侧析构链完整存在（§3/§4），因此缺口确在 SnowLuma 调用侧纪律，而非 QQ 对象不可释放。Caligo 自有实现取 pair 后必须：
 1. 保存完整 `{obj, ctrlblk}`；
-2. 用 QQ 侧的释放家族（`1DB2`/`2632`，具体函数在 P4 ABI 冻结时逐一定证）释放；
+2. 已证 getter pair 可通过 `1DB2(pair*)` 成对释放；`2632` 属于 callback manager op3，不可替代 pair release；
 3. 不以自有 allocator 释放 QQ 分配的控制块（`B75029` 是 QQ 的 free 包装）。
 
 ## 7. 已闭合 / 仍开放
@@ -85,16 +99,26 @@ R2 的三条 getter 使用审计（`1760`/`15C0`/`4C40` 只取首 qword、不释
 **闭合**：控制块布局与 0x28 几何；强/弱两位点分离；五类获取位点；删除析构包装形态（`7378A4`/`74A156`/`9C2C6C`/`1F280` 同构）；析构体的 vptr 重置签名动作；弱归零→slot3 自删；LoginRequestImpl 弱成员与锁定式通知；TLS pair 强引用安装。
 
 **开放（下一增量，均列计划未决问题）**：
-1. `1DB2`/`2632`/`2632` 家族的强/弱分支与"强归零→销毁托管对象"的确切调用点（P4 冻结 ABI 时闭合）；
-2. 控制块 vtable slot1（`59F40`）与 slot2 转型目标的运行时语义；
-3. callback manager 的 `2338/236A` 空 manager/invoker 对与销毁路径（`7328EA` 计数递减）完整表（R2 §3 未竟部分）；
+1. control-block vtable slot1（`59F40`）的完整托管对象析构/弱计数关系，以及 pair counter 的完整拥有者模型；
+2. callback manager `op=0` 的 clone、move wrapper 源清空及 `2632→op=3` dispose 有静态调用证据；`7328EA` 会销毁 nested callback 并递减 metadata strong count。op=1 的调用者/准确语义、其它 op 与重入/失败分支尚未穷尽；
+3. `73BD6C` 到用户 invoker 是同步直接调用，thread contract §10 将现场 callback 归于 QQ worker/dispatcher；目标实例的当前线程身份仍需按新会话核实；
 4. 观察者注册方（谁构造 LoginRequestImpl、以何观察者 pair）——session-ready 充分条件；
-5. `this+0x60` 安装来源（thread contract §6 候选淘汰表 + 受控观测方案）。
+5. dispatcher consumer 的 stop/cancel/drain、join/quiescence；没有证明断开/销毁后不再迟到回调。
+
+### 7.1 Caligo callback code 的驻留边界（2026-10-11 离线实现）
+
+- 在任何 Caligo callback context 可发布前，`consumer_probe::leak_ctx` 通过 `GetModuleHandleExW(FROM_ADDRESS | PIN, consumer_invoke)` 固定包含 delegate 函数指针的 bridge image；失败则返回不可用，调用方在 native submit 前停止。
+- PIN 由 Windows loader 保证模块保持映射直到宿主进程终止，即使收到 `FreeLibrary`；调用不保存或释放返回句柄。[Microsoft API contract](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandleexw)
+- `caligo_native_resident_run` 与 `caligo_g3_send_run` 都先经该 context gate 再构造 callback delegate。常驻 generation 停止时先封闭回调准入，等待已进入的回调离开；之后的迟到 callback 只增加 `late_callbacks_rejected` 审计计数，不读取错误/跨度指针，也不进入 256 项响应槽。没有已登记 generation 的回调按 orphan 计数，也不进入共享槽。对应离线测试验证上述隔离行为。
+- `native_resident_run` 保留 pump、receive 与 daemon worker 句柄；stop 后有界 join，超时写失败阶段并返回非零。此项只证明 Caligo 自有 worker 的停止结果，不能证明 QQ consumer 已停止、不能取消 QQ 已排队工作，也不证明最终结果已持久交付。
+- 这些改动只消除了 bridge 被卸载后 callback 指针悬空、停止后的持续迟到调用占满共享响应槽，以及把固定 sleep 当作自有 worker 已退出的风险。等待的是 Caligo 已准入回调并 join 自有 worker，不是 QQ dispatcher quiescence；owner thread、op 完整性、原生 stop/cancel/drain/join/quiescence 与历史 AV 继续开放。不得把 PIN/本地准入栅栏解释成 G-THREAD 或现场准入通过。
 
 ## 8. 对实现的硬约束
 
 1. Rust FFI 声明只能引用本文 `[verified]` 的几何与函数地址；`[inferred]` 项进入实现前必须先闭合。
-2. 一切从 QQ 返回的 pair 按不可透传的 opaque 处理：禁止解引用控制块内部计数、禁止复制布局到 Rust 结构。
+2. 一切从 QQ 返回的 pair 按 opaque 处理：只在 FFI 边界用两个 pointer-width words 保存 `{obj,ctrl}` 并原样传给 `1DB2`；禁止解引用/修改控制块内部计数或把其布局当作稳定 C++ 类型。
 3. 释放必须走 QQ 侧函数；禁止跨 allocator。
-4. callback 内复制的截止点维持 R2 结论：reason/body 只在回调调用期内有效，进入 Rust 前完成拥有复制。
-5. 本文件全部结论基于静态固定样本；不构成任何现场准入门（G1–G4）的通过证据。
+4. `732A80` 同步深复制 `[begin,end)` body；本侧 body input 可在函数返回后经配对 `B75029` 释放。callback reason/body 仍只在 callback 调用期内有效，进入 Rust 前完成拥有复制。
+5. 已取 pair 在尚未 submit 且 attach 失败时可走 `1DB2`；尝试过任何 native submit 后，不在 adapter Drop 中释放，直到 callback/dispatcher quiescence 有证据。
+6. 任何向 QQ 注册 Caligo callback 的路线都必须先 pin bridge image 到进程终止；pin 失败时在 native submit 前拒绝。没有 callback quiescence 证据时，不恢复热卸载。
+7. 本文件全部结论基于静态固定样本与所列离线实现；不构成任何现场准入门（G1–G4）的通过证据。

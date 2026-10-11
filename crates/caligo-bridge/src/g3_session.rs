@@ -3,10 +3,7 @@
 //! 研究构建专用;注入纪律(manifest + 指定实例)与 g2 同。
 
 use crate::g3_ops::G3NativeOps;
-use crate::native_session::NativeOps;
-use crate::native_receive::{
-    collect_record_fields, scan_cpb_objects_inproc, RpmSelfReader, SeenRecords,
-};
+use crate::native_receive::{collect_record_fields, scan_cpb_objects_inproc, SeenRecords};
 use crate::native_response::SeqAllocator;
 use crate::native_session::NativeSession;
 
@@ -32,7 +29,11 @@ fn stage(path: *const u16, stage_name: &str, ok: bool, detail: &str) {
         "ts": ts, "tid": tid, "stage": stage_name, "ok": ok, "detail": detail
     });
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p)
+    {
         let _ = f.write_all(line.to_string().as_bytes());
         let _ = f.write_all(b"\n");
     }
@@ -93,17 +94,9 @@ pub unsafe fn g3_session_run(ctx: *const G3SessionCtx) -> u32 {
         String::from_utf16_lossy(std::slice::from_raw_parts((*ctx).text_ptr, len))
     };
 
-    // ① attach(probe_ready;零副作用)。
+    // ① 固定服务 pair lease。
     let mut ops = G3NativeOps::new(wb);
-    if let Err(e) = ops.probe_ready(0) {
-        stage(report_path, "n3_attach", false, &format!("{e:?}"));
-        return 1;
-    }
-    stage(report_path, "n3_attach", true, "probe_ready PASS");
-
-    // ② 会话 + CPB 基线。
-    // 服务对象地址 = getter 租约 + 锚点核对的真实产物(probe_service);
-    // ops.submit 每次调用自行重新租约,此地址仅作 proof 证据登记。
+    // 服务对象地址来自被 ops 持有的 getter lease；后续探针与 submit 复用它。
     let service_addr = match ops.probe_service() {
         Ok(a) => a,
         Err(e) => {
@@ -111,19 +104,36 @@ pub unsafe fn g3_session_run(ctx: *const G3SessionCtx) -> u32 {
             return 2;
         }
     };
-    let mut session: NativeSession<SeqAllocator<Box<dyn FnMut(u64) -> Result<(), std::io::Error>>>> =
-        NativeSession::new(SeqAllocator::new(1, Box::new(|_| Ok(()))));
-    if let Err(e) = session.attach(&mut ops, crate::native_session::AttachProof {
-        module_baseline: "qq-9.9.33-52230".into(),
-        anchor_candidates: 1,
-        service_addr,
-        host_generation: 1,
-        session_generation: 1,
-    }) {
+    let mut session: NativeSession<
+        SeqAllocator<Box<dyn FnMut(u64) -> Result<(), std::io::Error>>>,
+    > = NativeSession::new(SeqAllocator::new(
+        1,
+        Box::new(|_| {
+            Err(std::io::Error::other(
+                "research session has no durable wire-sequence journal; refusing native send",
+            ))
+        }),
+    ));
+    if let Err(e) = session.attach(
+        &mut ops,
+        crate::native_session::AttachProof {
+            module_baseline: "qq-9.9.33-52230".into(),
+            anchor_candidates: 1,
+            service_addr,
+            host_generation: 1,
+            session_generation: 1,
+        },
+    ) {
+        ops.release_unsubmitted_service_pair();
         stage(report_path, "n3_session_attach", false, &format!("{e:?}"));
         return 2;
     }
-    stage(report_path, "n3_session_attach", true, &format!("Ready svc={service_addr:#x}"));
+    stage(
+        report_path,
+        "n3_session_attach",
+        true,
+        &format!("Ready svc={service_addr:#x}"),
+    );
 
     // CPB 基线。
     let rd = crate::native_receive::RpmSelfReader;
@@ -131,7 +141,12 @@ pub unsafe fn g3_session_run(ctx: *const G3SessionCtx) -> u32 {
     let base_recs = collect_record_fields(&rd, &base_objs, 8192);
     let mut seen = SeenRecords::new();
     seen.absorb(&base_recs);
-    stage(report_path, "n3_baseline", true, &format!("cpb={} records={}", base_objs.len(), base_recs.len()));
+    stage(
+        report_path,
+        "n3_baseline",
+        true,
+        &format!("cpb={} records={}", base_objs.len(), base_recs.len()),
+    );
 
     // ③ enqueue_send(已证形状;wire body 由 N3 sink 形状编码)。
     let body = match encode_group(&text, group_code) {
@@ -141,7 +156,12 @@ pub unsafe fn g3_session_run(ctx: *const G3SessionCtx) -> u32 {
             return 3;
         }
     };
-    stage(report_path, "n3_encode", true, &format!("len={}", body.len()));
+    stage(
+        report_path,
+        "n3_encode",
+        true,
+        &format!("len={}", body.len()),
+    );
     let cookie_val = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
@@ -151,7 +171,12 @@ pub unsafe fn g3_session_run(ctx: *const G3SessionCtx) -> u32 {
     cookie.0[8..16].copy_from_slice(&(cookie_val.wrapping_mul(0x5DEECE66D)).to_le_bytes());
     match session.enqueue_send(&mut ops, "n3-verify-1", cookie, &body) {
         crate::native_session::SendAcceptance::Dispatched { seq, .. } => {
-            stage(report_path, "n3_dispatched", true, &format!("seq={seq} body_len={}", body.len()));
+            stage(
+                report_path,
+                "n3_dispatched",
+                true,
+                &format!("seq={seq} body_len={}", body.len()),
+            );
         }
         other => {
             stage(report_path, "n3_dispatched", false, &format!("{other:?}"));
@@ -169,15 +194,26 @@ pub unsafe fn g3_session_run(ctx: *const G3SessionCtx) -> u32 {
     let after_objs = scan_cpb_objects_inproc(wb as u64);
     let after_recs = collect_record_fields(&rd, &after_objs, 8192);
     let fresh = seen.absorb(&after_recs);
-    stage(report_path, "n3_fresh", true, &format!("cpb={} fresh={}", after_objs.len(), fresh.len()));
+    stage(
+        report_path,
+        "n3_fresh",
+        true,
+        &format!("cpb={} fresh={}", after_objs.len(), fresh.len()),
+    );
 
     // ⑥ 写报告。
     let mut found = false;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&rp) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&rp)
+    {
         use std::io::Write;
         for (obj, rf) in &fresh {
             let hit = rf.text.as_deref() == Some(text.as_str());
-            if hit { found = true; }
+            if hit {
+                found = true;
+            }
             let entry = serde_json::json!({
                 "kind": "n3_record",
                 "obj": obj,
@@ -191,6 +227,15 @@ pub unsafe fn g3_session_run(ctx: *const G3SessionCtx) -> u32 {
             let _ = writeln!(f, "{entry}");
         }
     }
-    stage(report_path, "n3_done", found, &format!("fresh={} text_found={found}", fresh.len()));
-    if found { 0 } else { 5 }
+    stage(
+        report_path,
+        "n3_done",
+        found,
+        &format!("fresh={} text_found={found}", fresh.len()),
+    );
+    if found {
+        0
+    } else {
+        5
+    }
 }

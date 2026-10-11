@@ -1,0 +1,2 @@
+# Keep the Git Bash entrypoint runnable after Windows checkouts.
+/init.sh text eol=lf

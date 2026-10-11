@@ -1,0 +1,119 @@
+{
+  "$schema": ".agents/skills/harness-creator/templates/feature-list.schema.json",
+  "updated": "2026-10-11",
+  "baseline_commit": "0f5b483",
+  "active_feature": null,
+  "status_basis": "产品 status 反映完成门，implemented/wired/lab/field 分开描述。历史执行台账是证据，状态更新不能替代现场验收。",
+  "features": [
+    {
+      "id": "feat-001",
+      "name": "本仓库 harness 与文档规范化",
+      "description": "按用户指定命令安装 harness-creator，建立短入口、按需专题、状态/交接和可执行验证。",
+      "plan_steps": [],
+      "dependencies": [],
+      "status": "done",
+      "evidence": "2026-10-11 安装成功，9 份维护中文档的链接/预算/状态检查通过，结构审计 100/100；PowerShell/Git Bash 入口验证成功。普通测试 176 通过；research 首次崩溃，bridge 串行 58 及全仓复查 202 通过。首次失败保留，文档完成不声明 Rust 稳定性或现场通过。",
+      "evidence_paths": ["skills-lock.json", ".agents/skills/harness-creator/SKILL.md", "AGENTS.md", "docs/README.md", "progress.md"],
+      "done_criteria": ["skill 在仓库内安装并锁定来源", "入口与四份专题按触发条件路由，历史文档不改写", "文档链接/预算/状态检查及验证入口实际执行，结果记录", "现有验收边界和下一会话入口可查"]
+    },
+    {
+      "id": "feat-002",
+      "name": "N0 离线基线修复",
+      "description": "修复旧参数/门控断言并登记默认及 research 回归基线。",
+      "plan_steps": ["N0"],
+      "dependencies": [],
+      "status": "done",
+      "evidence": "2026-10-09 N0 台账记录默认 152/research 173 用例通过及无 QQ 操作；这是历史 N0 通过，当前全仓检查另见 progress。",
+      "evidence_paths": ["docs/execution/2026-10-09-snowluma-parity/ledger.md"],
+      "done_criteria": ["参数与门控回归修复", "两种构建离线回归有命令与结果", "旧现场成果与证据保留"]
+    },
+    {
+      "id": "feat-003",
+      "name": "N1 共享文本 wire 与完整接收",
+      "description": "已有共享 codec 与接收实现/研究证据；完整身份/时间/方向及正式矩阵仍须逐条验收。",
+      "plan_steps": ["N1"],
+      "dependencies": ["feat-002"],
+      "status": "in-progress",
+      "evidence": "N1 shared codec/golden 已归档，后续 CPB 与事件上行有现场记录；raw hits、seq 命名与事件计数不能独自替代 T04/T05。",
+      "evidence_paths": ["crates/caligo-model/src/qq_wire/send.rs", "crates/caligo-model/tests/qq_wire_golden.rs", "crates/caligo-bridge/src/native_resident.rs", "docs/execution/2026-10-09-snowluma-parity/ledger.md"],
+      "done_criteria": ["两种普通文本 wire 与黄金样本一致", "sender/peer/平台时间/native ID/正文可独立对应同条记录", "重复正文不误去重，未知类型不串会话"]
+    },
+    {
+      "id": "feat-004",
+      "name": "N2 响应消费者与业务关联",
+      "description": "cookie 消费者、结果槽与账本已接线；稳定消息身份和结果层级仍需核对。",
+      "plan_steps": ["N2"],
+      "dependencies": ["feat-002"],
+      "status": "in-progress",
+      "evidence": "N4-R1 离线实现将 AcceptedUnconfirmed 与强 ID 成功分离，request_id/started/outcome 与旧 Success(None) replay 已覆盖；R2 callback 局部收敛。CPB→native identity 强关联仍 unsupported，QQ ABI/线程/释放和现场回程未验收，保持 in-progress。",
+      "evidence_paths": ["crates/caligo-bridge/src/consumer_probe.rs", "crates/caligo-bridge/src/native_response.rs", "crates/caligo-core/src/runtime.rs", "docs/execution/2026-10-11-n4-response-recovery.md", "docs/execution/2026-10-09-snowluma-parity/ledger.md"],
+      "done_criteria": ["预登记先于 native 调用", "inline/重复/旧代次回调只终结一次", "拒绝码保留，接受与稳定身份成功区分", "超时/排空保持 unknown 且不自动重发"]
+    },
+    {
+      "id": "feat-005",
+      "name": "N3 常驻 native 链路验收",
+      "description": "常驻桥/core 现场贯通至 NativeStarted；响应回程和稳定存活未闭合。",
+      "plan_steps": ["N3", "N4-response-wiring"],
+      "dependencies": ["feat-003", "feat-004"],
+      "status": "blocked",
+      "evidence": "原现场证据 0f5b483/台账（四十一）仍硬停。N4-R1 离线修复和 fake IPC/journal 响应回程测试通过，N4-R2 callback capture、固定-hash 1DB2 pair release/body input ownership、context 发布前 PIN bridge image、resident stop generation quarantine/in-flight callback gate/本地 worker join 与 N4-R3 durable sequence/歧义保守 fixture 有本机证据。2026-10-11 follow-up 移除 CPB seq 合成的 cpbseq 假 native ID；decoder 缺稳定 native ID 与 sender UID→UIN 映射时不再发布业务事件。callback manager 完整 ABI、QQ线程/drain/quiescence、stable identity 与现场回程仍未闭合，未做新现场验收，继续 blocked。",
+      "evidence_paths": ["docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md", "docs/execution/2026-10-11-n4-response-recovery.md", "docs/research/qq-native-lifetime-contract.md", "crates/caligo-bridge/src/consumer_probe.rs", "crates/caligo-bridge/src/g3_ops.rs", "crates/caligo-bridge/src/resident.rs", "crates/caligo-bridge/src/native_resident.rs", "docs/execution/2026-10-09-snowluma-parity/ledger.md"],
+      "done_criteria": ["同一常驻链路响应回程可观测并与请求关联", "正式私聊/群聊矩阵有完整记录", "单桥、恢复、停止/隔离与宿主存活有验收"]
+    },
+    {
+      "id": "feat-006",
+      "name": "N4 OneBot V11 文本 MVP",
+      "description": "动作解析、事件转换、HTTP 和消息索引组件已有代码；完整 transport 与真实下游互通待验收。",
+      "plan_steps": ["N4"],
+      "dependencies": ["feat-005"],
+      "status": "blocked",
+      "evidence": "N4-R5 的 typed target、拒绝假成功动作层、有界分片 HTTP parser 与 durable MessageStore 已实现；onebot_http_lab 覆盖 HTTP send→fake daemon→store reopen→get_msg。core 接线现已将 MessageStore 装配进数值 account 的 Daemon/AccountActor，显式 projection 在 journal 与 ACK 之间落盘、恢复时幂等重建，pipe 集成测试直接走 Daemon StoreReader 和 OneBot get_msg action。当前 bridge projection 仍为 None，普通 caligod HTTP listener、私聊 peerUID、HTTP POST event/WS/反向 WS 与真实应用互通未验收，继续 blocked。",
+      "evidence_paths": ["docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md", "docs/execution/2026-10-11-n4-response-recovery.md", "crates/caligo-core/tests/onebot_http_lab.rs", "crates/caligo-core/tests/daemon_chain.rs", "crates/caligo-core/tests/recovery_contract.rs", "crates/caligo-core/src/daemon.rs", "crates/caligo-core/src/runtime.rs", "crates/caligo-core/src/onebot.rs", "crates/caligo-core/src/onebot_http.rs", "crates/caligo-core/src/message_store.rs", "docs/plans/2026-10-09-gitnexus-plan-caligo-snowluma-capability-parity.md"],
+      "done_criteria": ["身份与持久 OneBot ID 查询一致", "目标 HTTP/WS transport 有标准协议测试", "真实应用普通文本收发/get_msg 及慢连接有同链证据"]
+    },
+    {
+      "id": "feat-007",
+      "name": "N5 持续运行与发布验收",
+      "description": "按 N5 发布门逐项证明恢复、版本拒绝与长时间运行。",
+      "plan_steps": ["N5"],
+      "dependencies": ["feat-006"],
+      "status": "not-started",
+      "evidence": "已有恢复组件与局部研究观察；完整 N5 矩阵、2h/24h 运行和发布验收尚无闭合证据。",
+      "evidence_paths": ["docs/plans/2026-10-09-gitnexus-plan-caligo-snowluma-capability-parity.md"],
+      "done_criteria": ["正常入口无需每消息交互", "core/QQ 重启、断链/慢客户端矩阵通过", "未知版本零 native 调用，停止边界如实", "24h 单账号验收及启动包证据齐全"]
+    },
+    {
+      "id": "feat-008",
+      "name": "N6 消息段与媒体",
+      "description": "@ 有研究编码与负结果；回复、图片及其他媒体按能力独立准入。",
+      "plan_steps": ["N6a", "N6b", "N6c"],
+      "dependencies": ["feat-006"],
+      "status": "in-progress",
+      "evidence": "N 台账（三十九）保留 legacy-path @ 1006501/无 ack 结果；原因假设不升级为已证明服务端机制，第三方对照不算自有支持。",
+      "evidence_paths": ["docs/execution/2026-10-09-snowluma-parity/ledger.md", "docs/plans/2026-10-09-gitnexus-plan-caligo-snowluma-capability-parity.md"],
+      "done_criteria": ["@/reply 目标正确、真实渲染且回执关联", "媒体上传/发送/资源寿命分别验收", "每项不支持能力显式拒绝，不丢段假成功"]
+    },
+    {
+      "id": "feat-009",
+      "name": "N7 查询、通知与管理",
+      "description": "查询、notice/request、权限管理动作逐项交付。",
+      "plan_steps": ["N7a", "N7b"],
+      "dependencies": ["feat-006"],
+      "status": "not-started",
+      "evidence": "计划定义目标；未找到对应 native backend 全套验收。",
+      "evidence_paths": ["docs/plans/2026-10-09-gitnexus-plan-caligo-snowluma-capability-parity.md"],
+      "done_criteria": ["query registry 有真实数据及错误", "通知订阅与动作权限有证据", "无权限/失败不返回空列表假成功"]
+    },
+    {
+      "id": "feat-010",
+      "name": "N8 多账号与开发者入口",
+      "description": "多账号隔离、管理 API/WebUI 与 SDK/MCP 使用共享动作层。",
+      "plan_steps": ["N8a", "N8b"],
+      "dependencies": ["feat-007"],
+      "status": "not-started",
+      "evidence": "已有 actor/IPC 作用域基础；多账号与界面全套验收未闭合。",
+      "evidence_paths": ["docs/plans/2026-10-09-gitnexus-plan-caligo-snowluma-capability-parity.md"],
+      "done_criteria": ["双账号同时工作且凭据/状态/存储独立", "一个账号退出不影响另一个", "管理与 SDK/MCP 经共享 registry，不旁路 QQ"]
+    }
+  ]
+}

@@ -17,8 +17,8 @@
 //!   监听器存在,回调不可能到达,双锁持有序仍遵守 adapter→core。
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 pub use crate::host_adapter::{HostAdapter, HostError, HostOp, HostOpResult, NoHostAdapter};
 
@@ -29,6 +29,9 @@ pub struct ResidentLimits {
     pub ingress_max: usize,
     /// 出站事件队列上限。
     pub events_max: usize,
+    /// 已接受发送可占用的未确认生命周期通知槽上限(每个请求预留
+    /// started 与 terminal 两槽;core ACK 后归还)。
+    pub results_max: usize,
     /// 单次宿主 drain 上限;有剩余则由调用方继续调度。
     pub drain_batch: usize,
 }
@@ -38,6 +41,7 @@ impl Default for ResidentLimits {
         Self {
             ingress_max: 32,
             events_max: 256,
+            results_max: 256,
             drain_batch: 32,
         }
     }
@@ -52,6 +56,7 @@ pub enum OwnedRequest {
     /// 登记"已见请求"防重复派发。
     SendText {
         request_id: String,
+        wire_seq: u32,
         chat_type: u32,
         peer_uid: String,
         text: String,
@@ -114,12 +119,25 @@ pub enum SubmitVerdict {
 /// 派发结果(worker 经 take_results 取走并回传 core;§6.6 receipt 三分类)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendOutcome {
-    /// native 成功;native_id 缺失时上层按"未关联"处理,不得冒充成功。
-    Success { request_id: String, native_id: Option<String> },
+    /// native 成功且具有稳定 native identity。
+    Success {
+        request_id: String,
+        native_id: String,
+    },
+    /// 服务已受理但响应没有稳定 native identity。
+    AcceptedUnconfirmed { request_id: String },
     /// 宿主侧明确失败(如 native 服务报错)。
     Failure { request_id: String, reason: String },
     /// 结果不确定(env 失效/未知错误):执行与否不可证明。
     Unknown { request_id: String },
+}
+
+/// 与 daemon 有序传递的发送生命周期事件。NativeStarted 必须排在同一
+/// 请求的任何终态结果之前,包括 native 调用内联触发的 callback。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResidentNotice {
+    NativeStarted { request_id: String },
+    Outcome(SendOutcome),
 }
 
 /// 关闭报告(计数回基线的验收数据)。
@@ -150,12 +168,16 @@ pub struct ResidentCounters {
     pub marked_unknown: u64,
     pub quarantine_events: u64,
     pub events_gap_dropped: u64,
+    /// adapter 返回未知 request_id / 不再处于 SendPending 的响应被隔离。
+    pub orphan_results_ignored: u64,
 }
 
 struct ReqRecord {
     state: ReqState,
-    /// SendPending 阶段的候选消息 ID(fired mid;receipt 关联键)。
+    /// V8 Promise 路线的本地调用键；native CPB 文本候选不写入此字段。
     pending_mid: Option<String>,
+    /// bit 0 = NativeStarted 未确认, bit 1 = terminal result 未确认。
+    unacked_notice_mask: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +186,8 @@ enum ReqState {
     NativeStarted,
     /// 原生调用已发出、Promise 未回(mid 已生成;§6.6 非终态)。
     SendPending,
+    /// 收到业务接受但没有稳定身份；继续等待强身份或 unknown。
+    IdentityPending,
     Done,
     CancelledUnsent,
     DeliveryUnknown,
@@ -177,7 +201,8 @@ struct Core<A: HostAdapter> {
     ingress: VecDeque<(OwnedRequest, LifecycleToken)>,
     requests: HashMap<String, ReqRecord>,
     events: VecDeque<(OwnedEvent, LifecycleToken)>,
-    results_out: VecDeque<SendOutcome>,
+    results_out: VecDeque<ResidentNotice>,
+    pending_notice_slots: usize,
     listener_token: Option<u64>,
     counters: ResidentCounters,
     late_rejections: usize,
@@ -206,6 +231,7 @@ impl<A: HostAdapter> Resident<A> {
                 requests: HashMap::new(),
                 events: VecDeque::new(),
                 results_out: VecDeque::new(),
+                pending_notice_slots: 0,
                 listener_token: None,
                 counters: ResidentCounters::default(),
                 late_rejections: 0,
@@ -256,18 +282,31 @@ impl<A: HostAdapter> Resident<A> {
                 return SubmitVerdict::Closed;
             }
         }
-        // 已见请求防重复派发(计划 §6.6:相同 ID 不再次执行)。
+        // 先做所有容量检查,避免 QueueFull 留下不可重试的 request 记录。
         if let OwnedRequest::SendText { request_id, .. } = &req {
             if c.requests.contains_key(request_id) {
                 return SubmitVerdict::Accepted; // 查询语义:不重复入队
             }
-            c.requests.insert(
-                request_id.clone(),
-                ReqRecord { state: ReqState::Queued, pending_mid: None },
-            );
         }
         if c.ingress.len() >= c.limits.ingress_max {
             return SubmitVerdict::QueueFull;
+        }
+        let is_send = matches!(&req, OwnedRequest::SendText { .. });
+        if is_send && c.pending_notice_slots.saturating_add(2) > c.limits.results_max {
+            return SubmitVerdict::QueueFull;
+        }
+        // 已见请求防重复派发(计划 §6.6:相同 ID 不再次执行)。两个通知槽
+        // 从 submit 起一直保留到 core 分别 ACK,使 worker 的断线 outbox 有界。
+        if let OwnedRequest::SendText { request_id, .. } = &req {
+            c.requests.insert(
+                request_id.clone(),
+                ReqRecord {
+                    state: ReqState::Queued,
+                    pending_mid: None,
+                    unacked_notice_mask: 0b11,
+                },
+            );
+            c.pending_notice_slots += 2;
         }
         let tok = c.token;
         c.ingress.push_back((req, tok));
@@ -305,7 +344,7 @@ impl<A: HostAdapter> Resident<A> {
             if processed >= batch_limit {
                 break;
             }
-            // ---- claim(core 锁):弹出 + 快照 + 登记 NativeStarted ----
+            // ---- claim(core 锁):弹出 + 快照;尚未开始 native 调用 ----
             let (req, op) = {
                 let mut c = self.core.lock().unwrap();
                 if !matches!(c.state, ResidentState::Ready | ResidentState::Stopping) {
@@ -321,20 +360,23 @@ impl<A: HostAdapter> Resident<A> {
                 }
                 let op = match &req {
                     OwnedRequest::Probe { .. } => HostOp::Probe,
-                    OwnedRequest::SendText { request_id, chat_type, peer_uid, text } => {
-                        if let Some(rec) = c.requests.get_mut(request_id) {
-                            rec.state = ReqState::NativeStarted;
-                        }
-                        HostOp::SendText {
-                            chat_type: *chat_type,
-                            peer_uid: peer_uid.clone(),
-                            text: text.clone(),
-                        }
-                    }
+                    OwnedRequest::SendText {
+                        request_id,
+                        wire_seq,
+                        chat_type,
+                        peer_uid,
+                        text,
+                    } => HostOp::SendText {
+                        request_id: request_id.clone(),
+                        wire_seq: *wire_seq,
+                        chat_type: *chat_type,
+                        peer_uid: peer_uid.clone(),
+                        text: text.clone(),
+                    },
                 };
                 (req, op)
             }; // core 锁释放:native 调用期间回调可重入。
-            // ---- invoke(adapter 锁;precheck 仍先于第一个宿主 API)----
+               // ---- invoke(adapter 锁;precheck 仍先于第一个宿主 API)----
             let r = {
                 let mut adapter = self.adapter.lock().unwrap();
                 // 计数器更新需 core 锁:锁序 adapter→core(全局合同)。
@@ -343,17 +385,10 @@ impl<A: HostAdapter> Resident<A> {
                     precheck(&mut *adapter, &mut c.counters)
                 };
                 if let Err(e) = pre {
-                    // 与原语义一致:首项失败 → Err;非首项 → 已处理数返回,
-                    // 请求退回队首(未执行,状态回退)。
+                    // 首项失败 → Err;非首项 → 已处理数返回,
+                    // 请求退回队首(未执行,不会产生 NativeStarted)。
                     let mut c = self.core.lock().unwrap();
                     let tok = c.token;
-                    if let OwnedRequest::SendText { request_id, .. } = &req {
-                        if let Some(rec) = c.requests.get_mut(request_id) {
-                            if rec.state == ReqState::NativeStarted {
-                                rec.state = ReqState::Queued;
-                            }
-                        }
-                    }
                     c.ingress.push_front((req, tok));
                     drop(c);
                     if processed == 0 {
@@ -367,56 +402,100 @@ impl<A: HostAdapter> Resident<A> {
             {
                 let mut c = self.core.lock().unwrap();
                 c.counters.native_ops_total += 1;
-            match &r {
-                Ok(HostOpResult::Sent { native_id }) => {
-                    c.counters.dispatched_total += 1;
+                let started = matches!(
+                    &r,
+                    Ok(HostOpResult::Sent { .. } | HostOpResult::SendFired { .. })
+                );
+                if started {
                     if let OwnedRequest::SendText { request_id, .. } = &req {
                         if let Some(rec) = c.requests.get_mut(request_id) {
-                            rec.state = ReqState::Done;
+                            rec.state = ReqState::NativeStarted;
                         }
-                        c.results_out.push_back(SendOutcome::Success {
-                            request_id: request_id.clone(),
-                            native_id: native_id.clone(),
-                        });
-                    }
-                }
-                // fired 非终态:mid 挂账,Promise 结果经 poll sendResults 回收。
-                Ok(HostOpResult::SendFired { mid }) => {
-                    c.counters.dispatched_total += 1;
-                    if let OwnedRequest::SendText { request_id, .. } = &req {
-                        if let Some(rec) = c.requests.get_mut(request_id) {
-                            rec.state = ReqState::SendPending;
-                            rec.pending_mid = Some(mid.clone());
-                        }
-                    }
-                }
-                Ok(_) => {
-                    c.counters.dispatched_total += 1;
-                }
-                Err(HostError::Native { code }) => {
-                    // 宿主明确报错:执行了但失败(Failure),不是 unknown。
-                    if let OwnedRequest::SendText { request_id, .. } = &req {
-                        if let Some(rec) = c.requests.get_mut(request_id) {
-                            rec.state = ReqState::Done;
-                        }
-                        c.results_out.push_back(SendOutcome::Failure {
-                            request_id: request_id.clone(),
-                            reason: format!("native code {code}"),
-                        });
-                    }
-                }
-                Err(_) => {
-                    // env 失效/线程/上下文问题:执行与否不确定。
-                    if let OwnedRequest::SendText { request_id, .. } = &req {
-                        if let Some(rec) = c.requests.get_mut(request_id) {
-                            rec.state = ReqState::DeliveryUnknown;
-                        }
-                        c.results_out.push_back(SendOutcome::Unknown {
+                        c.results_out.push_back(ResidentNotice::NativeStarted {
                             request_id: request_id.clone(),
                         });
                     }
                 }
-            }
+                if !started {
+                    if let OwnedRequest::SendText { request_id, .. } = &req {
+                        release_notice_slot(&mut c, request_id, 0b01);
+                    }
+                }
+                match &r {
+                    Ok(HostOpResult::Sent { native_id }) => {
+                        c.counters.dispatched_total += 1;
+                        if let OwnedRequest::SendText { request_id, .. } = &req {
+                            if let Some(rec) = c.requests.get_mut(request_id) {
+                                rec.state = ReqState::Done;
+                            }
+                            let outcome = match native_id.as_deref().filter(|id| !id.is_empty()) {
+                                Some(native_id) => SendOutcome::Success {
+                                    request_id: request_id.clone(),
+                                    native_id: native_id.to_string(),
+                                },
+                                None => {
+                                    if let Some(rec) = c.requests.get_mut(request_id) {
+                                        rec.state = ReqState::IdentityPending;
+                                    }
+                                    SendOutcome::AcceptedUnconfirmed {
+                                        request_id: request_id.clone(),
+                                    }
+                                }
+                            };
+                            c.results_out.push_back(ResidentNotice::Outcome(outcome));
+                        }
+                    }
+                    // fired 非终态:mid 挂账,Promise 结果经 poll sendResults 回收。
+                    Ok(HostOpResult::SendFired { mid }) => {
+                        c.counters.dispatched_total += 1;
+                        if let OwnedRequest::SendText { request_id, .. } = &req {
+                            if let Some(rec) = c.requests.get_mut(request_id) {
+                                rec.state = ReqState::SendPending;
+                                rec.pending_mid = Some(mid.clone());
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        c.counters.dispatched_total += 1;
+                        if let OwnedRequest::SendText { request_id, .. } = &req {
+                            if let Some(rec) = c.requests.get_mut(request_id) {
+                                rec.state = ReqState::DeliveryUnknown;
+                            }
+                            c.results_out.push_back(ResidentNotice::Outcome(
+                                SendOutcome::Unknown {
+                                    request_id: request_id.clone(),
+                                },
+                            ));
+                        }
+                    }
+                    Err(HostError::Native { code }) => {
+                        // 宿主明确报错:执行了但失败(Failure),不是 unknown。
+                        if let OwnedRequest::SendText { request_id, .. } = &req {
+                            if let Some(rec) = c.requests.get_mut(request_id) {
+                                rec.state = ReqState::Done;
+                            }
+                            c.results_out.push_back(ResidentNotice::Outcome(
+                                SendOutcome::Failure {
+                                    request_id: request_id.clone(),
+                                    reason: format!("native code {code}"),
+                                },
+                            ));
+                        }
+                    }
+                    Err(_) => {
+                        // env 失效/线程/上下文问题:执行与否不确定。
+                        if let OwnedRequest::SendText { request_id, .. } = &req {
+                            if let Some(rec) = c.requests.get_mut(request_id) {
+                                rec.state = ReqState::DeliveryUnknown;
+                            }
+                            c.results_out.push_back(ResidentNotice::Outcome(
+                                SendOutcome::Unknown {
+                                    request_id: request_id.clone(),
+                                },
+                            ));
+                        }
+                    }
+                }
                 processed += 1;
             }
         }
@@ -429,50 +508,85 @@ impl<A: HostAdapter> Resident<A> {
         c.events.drain(..).map(|(ev, _)| ev).collect()
     }
 
-    /// D9:Promise 结果回收 —— 按 fired mid 关联 request_id 并产出终态。
-    /// `done`: (mid, native_id);`rejected`: (mid, reason)。
-    pub fn complete_sends(
-        &self,
-        done: &[(String, String)],
-        rejected: &[(String, String)],
-    ) {
+    /// 消费派发结果(worker 回传 core;先落账后 ACK 由 core 负责)。
+    pub fn take_results(&self) -> Vec<ResidentNotice> {
         let mut c = self.core.lock().unwrap();
-        // 先按 mid 匹配 request(不可变),再统一落账(可变)—— 避免双借。
-        let mut outcomes: Vec<SendOutcome> = Vec::new();
-        let mut state_updates: Vec<(String, ReqState)> = Vec::new();
-        for (rid, rec) in c.requests.iter() {
-            if rec.state != ReqState::SendPending {
+        c.results_out.drain(..).collect()
+    }
+
+    /// V8 Promise 的本地 mid 已由调用路径保留；仅其明确 done/msgId
+    /// 可完成关联。CPB peer+text 候选不得调用此方法。
+    pub fn complete_sends(&self, done: &[(String, String)], rejected: &[(String, String)]) {
+        let mut c = self.core.lock().unwrap();
+        let mut outcomes = Vec::new();
+        let mut updates = Vec::new();
+        for (request_id, record) in &c.requests {
+            if !matches!(
+                record.state,
+                ReqState::SendPending | ReqState::IdentityPending
+            ) {
                 continue;
             }
-            let Some(mid) = &rec.pending_mid else { continue };
-            if let Some((_, nid)) = done.iter().find(|(m, _)| m == mid) {
-                outcomes.push(SendOutcome::Success {
-                    request_id: rid.clone(),
-                    native_id: Some(nid.clone()),
-                });
-                state_updates.push((rid.clone(), ReqState::Done));
-            } else if let Some((_, why)) = rejected.iter().find(|(m, _)| m == mid) {
-                outcomes.push(SendOutcome::Failure {
-                    request_id: rid.clone(),
-                    reason: why.clone(),
-                });
-                state_updates.push((rid.clone(), ReqState::Done));
+            let Some(mid) = record.pending_mid.as_deref() else {
+                continue;
+            };
+            if let Some((_, native_id)) = done.iter().find(|(candidate, _)| candidate == mid) {
+                let (state, outcome) = if native_id.is_empty() {
+                    (
+                        ReqState::IdentityPending,
+                        SendOutcome::AcceptedUnconfirmed {
+                            request_id: request_id.clone(),
+                        },
+                    )
+                } else {
+                    (
+                        ReqState::Done,
+                        SendOutcome::Success {
+                            request_id: request_id.clone(),
+                            native_id: native_id.clone(),
+                        },
+                    )
+                };
+                outcomes.push(ResidentNotice::Outcome(outcome));
+                updates.push((request_id.clone(), state));
+            } else if let Some((_, reason)) =
+                rejected.iter().find(|(candidate, _)| candidate == mid)
+            {
+                outcomes.push(ResidentNotice::Outcome(SendOutcome::Failure {
+                    request_id: request_id.clone(),
+                    reason: reason.clone(),
+                }));
+                updates.push((request_id.clone(), ReqState::Done));
             }
-            // 仍在 pending:等下一个 poll(deadline 由 core 侧把守)。
         }
-        for (rid, st) in state_updates {
-            if let Some(rec) = c.requests.get_mut(&rid) {
-                rec.state = st;
-                rec.pending_mid = None;
+        for (request_id, state) in updates {
+            if let Some(record) = c.requests.get_mut(&request_id) {
+                record.state = state;
+                if state == ReqState::Done {
+                    record.pending_mid = None;
+                }
             }
         }
         c.results_out.extend(outcomes);
     }
 
-    /// 消费派发结果(worker 回传 core;先落账后 ACK 由 core 负责)。
-    pub fn take_results(&self) -> Vec<SendOutcome> {
+    /// core durable ACK 后归还 NativeStarted 通知槽。重复 ACK 幂等。
+    pub fn ack_notice(&self, request_id: &str, started: bool) -> bool {
         let mut c = self.core.lock().unwrap();
-        c.results_out.drain(..).collect()
+        release_notice_slot(&mut c, request_id, if started { 0b01 } else { 0b10 })
+    }
+
+    /// 中间态 ACK 移除当前 outbox 项，但保留终态结果槽，等待强身份或 unknown。
+    pub fn ack_result_notice(&self, request_id: &str, terminal: bool) -> bool {
+        let mut c = self.core.lock().unwrap();
+        if terminal {
+            release_notice_slot(&mut c, request_id, 0b10)
+        } else {
+            c.requests
+                .get(request_id)
+                .map(|rec| rec.unacked_notice_mask & 0b10 != 0)
+                .unwrap_or(false)
+        }
     }
 
     /// 排空异步发送响应消费槽(adapter → 账本终局 → core 结果通道)。
@@ -487,14 +601,32 @@ impl<A: HostAdapter> Resident<A> {
             return 0;
         }
         let mut c = self.core.lock().unwrap();
-        let n = done.len();
+        let mut accepted = 0usize;
         for (request_id, outcome) in done {
-            if let Some(rec) = c.requests.get_mut(&request_id) {
-                rec.state = ReqState::Done;
+            let outcome_id = send_outcome_request_id(&outcome);
+            let valid = outcome_id == request_id
+                && c.requests
+                    .get(&request_id)
+                    .map(|rec| {
+                        matches!(rec.state, ReqState::SendPending | ReqState::IdentityPending)
+                    })
+                    .unwrap_or(false);
+            if !valid {
+                c.counters.orphan_results_ignored =
+                    c.counters.orphan_results_ignored.saturating_add(1);
+                continue;
             }
-            c.results_out.push_back(outcome);
+            if let Some(rec) = c.requests.get_mut(&request_id) {
+                rec.state = if matches!(&outcome, SendOutcome::AcceptedUnconfirmed { .. }) {
+                    ReqState::IdentityPending
+                } else {
+                    ReqState::Done
+                };
+            }
+            c.results_out.push_back(ResidentNotice::Outcome(outcome));
+            accepted += 1;
         }
-        n
+        accepted
     }
 
     /// 宿主(pump/D8 排空)注入 owned 事件;有界窗口满 → 计数丢弃(不静默)。
@@ -554,7 +686,10 @@ impl<A: HostAdapter> Resident<A> {
         // **含 SendPending**(C7:fired 未回执在关闭时同样不可证明已送达)。
         let mut unknown_now: u64 = 0;
         for rec in c.requests.values_mut() {
-            if matches!(rec.state, ReqState::NativeStarted | ReqState::SendPending) {
+            if matches!(
+                rec.state,
+                ReqState::NativeStarted | ReqState::SendPending | ReqState::IdentityPending
+            ) {
                 rec.state = ReqState::DeliveryUnknown;
                 unknown_now += 1;
             }
@@ -622,10 +757,37 @@ impl<A: HostAdapter> Resident<A> {
             ReqState::Queued => "queued",
             ReqState::NativeStarted => "native_started",
             ReqState::SendPending => "send_pending",
+            ReqState::IdentityPending => "identity_pending",
             ReqState::Done => "done",
             ReqState::CancelledUnsent => "cancelled_unsent",
             ReqState::DeliveryUnknown => "delivery_unknown",
         })
+    }
+}
+
+fn release_notice_slot<A: HostAdapter>(c: &mut Core<A>, request_id: &str, bit: u8) -> bool {
+    let released = if let Some(rec) = c.requests.get_mut(request_id) {
+        if rec.unacked_notice_mask & bit != 0 {
+            rec.unacked_notice_mask &= !bit;
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if released {
+        c.pending_notice_slots = c.pending_notice_slots.saturating_sub(1);
+    }
+    released
+}
+
+fn send_outcome_request_id(outcome: &SendOutcome) -> &str {
+    match outcome {
+        SendOutcome::Success { request_id, .. }
+        | SendOutcome::AcceptedUnconfirmed { request_id }
+        | SendOutcome::Failure { request_id, .. }
+        | SendOutcome::Unknown { request_id } => request_id,
     }
 }
 

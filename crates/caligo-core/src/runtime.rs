@@ -15,10 +15,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use crate::journal::{Journal, JournalError, JournalRecord, RequestRecord, GapRecord, SyncMode};
+use crate::journal::{GapRecord, Journal, JournalError, JournalRecord, RequestRecord, SyncMode};
+use crate::message_store::MessageStore;
+use crate::onebot::StoreReader;
 use caligo_model::{
-    ActionState, ConnectionIdentity, Direction, EventSource, HostIdentity, MsgEvent, NativeMessageId,
-    Phase, RejectReason, SendTextRequest, SessionIdentity, SessionKey, SessionKind,
+    ActionState, ConnectionIdentity, Direction, EventSource, HostIdentity, MsgEvent,
+    NativeMessageId, Phase, RejectReason, SendTextRequest, SessionIdentity, SessionKey,
+    SessionKind,
 };
 
 /// 运行时参数(计划 §6.4/§6.6 建议初值;实测后于 D11 报告固定)。
@@ -50,12 +53,14 @@ impl Default for RuntimeConfig {
 #[derive(Debug)]
 pub enum OpenError {
     Journal(JournalError),
+    MessageStore(String),
 }
 
 impl core::fmt::Display for OpenError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             OpenError::Journal(e) => write!(f, "{e}"),
+            OpenError::MessageStore(e) => write!(f, "message store: {e}"),
         }
     }
 }
@@ -76,10 +81,15 @@ pub struct OpenReport {
 /// bridge 上报的 native 结果(计划 §6.6 receipt 契约的三分类)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeResult {
-    /// QQ 服务明确成功;`native_id` 为实际原生消息身份 —— **拿不到关联时
-    /// 不得上报 Success**(契约:仅 Promise/生成 ID 不构成成功)。
-    Success { native_id: Option<NativeMessageId> },
-    Failure { reason: String },
+    /// QQ 服务明确成功;`native_id` 是实际原生消息身份。
+    Success {
+        native_id: NativeMessageId,
+    },
+    /// 业务已受理但响应没有稳定 native identity。
+    AcceptedUnconfirmed,
+    Failure {
+        reason: String,
+    },
     /// 结果丢失/不确定:dispatch 窗口崩溃等。
     Unknown,
 }
@@ -125,6 +135,7 @@ pub struct RuntimeCounters {
     pub dispatch_intents: u64,
     pub native_started: u64,
     pub results_success: u64,
+    pub results_unconfirmed: u64,
     pub results_failure: u64,
     pub results_unknown: u64,
     pub requests_duplicate_query: u64,
@@ -137,6 +148,7 @@ pub struct RuntimeCounters {
     pub receipts_audited_only: u64,
     pub transition_anomalies: u64,
     pub journal_failures: u64,
+    pub onebot_store_failures: u64,
 }
 
 /// 折叠后的请求条目。
@@ -147,6 +159,7 @@ struct RequestEntry {
     session_generation: u64,
     target: SessionKey,
     deadline_ms: u64,
+    wire_seq: Option<u32>,
     history: Vec<(String, u64)>,
 }
 
@@ -177,6 +190,38 @@ fn session_to_dto_value(key: &SessionKey) -> serde_json::Value {
     .unwrap_or(serde_json::Value::Null)
 }
 
+fn event_from_record(e: &crate::journal::EventRecord) -> Result<MsgEvent, String> {
+    let dto: SessionKeyDto = serde_json::from_value(e.session.clone())
+        .map_err(|err| format!("stored event session is invalid: {err}"))?;
+    let kind = match dto.kind.as_str() {
+        "private" => SessionKind::Private,
+        "group" => SessionKind::Group,
+        other => return Err(format!("stored event has unknown session kind {other:?}")),
+    };
+    Ok(MsgEvent {
+        event_seq: e.event_seq,
+        session_generation: e.session_generation,
+        session: SessionKey::new(dto.account, kind, dto.peer),
+        direction: match e.direction.as_str() {
+            "self_sent" => Direction::SelfSent,
+            "incoming" => Direction::Incoming,
+            other => return Err(format!("stored event has unknown direction {other:?}")),
+        },
+        sender: e.sender.clone(),
+        native_id: NativeMessageId(e.native_id.clone()),
+        text: e.text.clone(),
+        platform_time: e.platform_time,
+        onebot_projection: e.onebot_projection.clone(),
+        observed_at_unix_ms: e.observed_at_unix_ms,
+        source: match e.source.as_str() {
+            "recv" => EventSource::Recv,
+            "update" => EventSource::Update,
+            "history_backfill" => EventSource::HistoryBackfill,
+            other => return Err(format!("stored event has unknown source {other:?}")),
+        },
+    })
+}
+
 /// 请求查询摘要(QueryRequest 的 core 侧载荷)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestSummary {
@@ -204,6 +249,8 @@ pub struct AccountActor {
     events_out: VecDeque<MsgEvent>,
     events_out_bytes: usize,
     event_seq_next: u64,
+    /// 下一个 wire client_seq；从 journal 中所有已分配值恢复，不回绕。
+    next_wire_seq: u64,
     delivered_cursor: u64,
     seen_native: HashSet<String>,
     seen_updates: HashSet<String>,
@@ -211,6 +258,9 @@ pub struct AccountActor {
     dedup_capacity: usize,
     receipt_audits: VecDeque<ReceiptAuditEntry>,
     gaps: VecDeque<GapRecord>,
+    message_store: Option<MessageStore>,
+    /// Events persisted to the core journal but awaiting a durable OneBot ID.
+    pending_message_store: HashMap<String, MsgEvent>,
     pub counters: RuntimeCounters,
     degraded_reason: Option<String>,
     config: RuntimeConfig,
@@ -222,6 +272,25 @@ impl AccountActor {
     pub fn open(
         journal_path: impl Into<std::path::PathBuf>,
         config: RuntimeConfig,
+    ) -> Result<(Self, OpenReport), OpenError> {
+        Self::open_inner(journal_path.into(), config, None)
+    }
+
+    /// Open the actor with the durable OneBot message index attached.
+    /// Existing journal rows are reconciled idempotently before the actor is
+    /// returned, so a crash between event journaling and index append is safe.
+    pub fn open_with_message_store(
+        journal_path: impl Into<std::path::PathBuf>,
+        config: RuntimeConfig,
+        message_store: MessageStore,
+    ) -> Result<(Self, OpenReport), OpenError> {
+        Self::open_inner(journal_path.into(), config, Some(message_store))
+    }
+
+    fn open_inner(
+        journal_path: std::path::PathBuf,
+        config: RuntimeConfig,
+        message_store: Option<MessageStore>,
     ) -> Result<(Self, OpenReport), OpenError> {
         let (journal, recovery) =
             Journal::open(journal_path, config.journal_max_bytes, config.journal_sync)
@@ -236,6 +305,7 @@ impl AccountActor {
             events_out: VecDeque::new(),
             events_out_bytes: 0,
             event_seq_next: 1,
+            next_wire_seq: 1,
             delivered_cursor: 0,
             seen_native: HashSet::new(),
             seen_updates: HashSet::new(),
@@ -243,6 +313,8 @@ impl AccountActor {
             dedup_capacity: config.dedup_capacity,
             receipt_audits: VecDeque::new(),
             gaps: VecDeque::new(),
+            message_store,
+            pending_message_store: HashMap::new(),
             counters: RuntimeCounters::default(),
             degraded_reason: None,
             config,
@@ -258,6 +330,14 @@ impl AccountActor {
                 }
                 JournalRecord::Event(e) => {
                     report.recovered_events += 1;
+                    if e.onebot_projection.is_some() {
+                        if let Some(store) = actor.message_store.as_mut() {
+                            let event = event_from_record(&e).map_err(OpenError::MessageStore)?;
+                            store
+                                .insert_event(&event)
+                                .map_err(OpenError::MessageStore)?;
+                        }
+                    }
                     actor.fold_event(e);
                 }
                 JournalRecord::EventDelivered { event_seq } => {
@@ -290,7 +370,10 @@ impl AccountActor {
     }
 
     fn fold_request(&mut self, r: RequestRecord, report: &mut OpenReport) {
-        let mut state = match state_from_name(&r.state) {
+        if let Some(wire_seq) = r.wire_seq {
+            self.next_wire_seq = self.next_wire_seq.max(u64::from(wire_seq) + 1);
+        }
+        let state = match state_from_record(&r) {
             Some(s) => s,
             None => {
                 self.counters.transition_anomalies += 1;
@@ -298,12 +381,6 @@ impl AccountActor {
                 return;
             }
         };
-        // 折叠时还原实际原生消息身份(ConfirmedSuccess 的关联是契约字段)。
-        if let ActionState::ConfirmedSuccess { native_id } = &mut state {
-            if native_id.is_none() {
-                *native_id = r.native_id.clone().map(NativeMessageId);
-            }
-        }
         match self.requests.get_mut(&r.request_id) {
             None => {
                 // 首见即终态的审计型记录(DeliveryUnknown / CancelledUnsent)
@@ -317,6 +394,7 @@ impl AccountActor {
                         session_generation: r.session_generation,
                         target: SessionKey::new("", SessionKind::Private, ""), // 折叠时目标不还原(不参与判定)
                         deadline_ms: 0,
+                        wire_seq: r.wire_seq,
                         history: vec![(r.state.clone(), r.at_unix_ms)],
                     },
                 );
@@ -331,6 +409,9 @@ impl AccountActor {
                     return;
                 }
                 entry.history.push((r.state.clone(), r.at_unix_ms));
+                if r.wire_seq.is_some() {
+                    entry.wire_seq = r.wire_seq;
+                }
                 let was_terminal = entry.state.is_terminal();
                 entry.state = state;
                 if entry.state.is_terminal() {
@@ -421,7 +502,10 @@ impl AccountActor {
 
     /// 停止入口(计划 §6.7):关新动作准入;可证明未执行的排队项取消。
     pub fn stop(&mut self) -> Result<usize, RejectReason> {
-        if matches!(self.phase, Phase::Stopping | Phase::Closed | Phase::Quarantined) {
+        if matches!(
+            self.phase,
+            Phase::Stopping | Phase::Closed | Phase::Quarantined
+        ) {
             return Ok(0);
         }
         self.phase = Phase::Stopping;
@@ -461,7 +545,10 @@ impl AccountActor {
         let ids: Vec<String> = self.pending.iter().cloned().collect();
         let mut marked = 0;
         for id in ids {
-            if self.transition(&id, ActionState::DeliveryUnknown, None).is_ok() {
+            if self
+                .transition(&id, ActionState::DeliveryUnknown, None)
+                .is_ok()
+            {
                 marked += 1;
             }
         }
@@ -504,6 +591,7 @@ impl AccountActor {
             session_generation: req.session_identity.session_generation,
             target: req.target.clone(),
             deadline_ms: req.deadline_ms,
+            wire_seq: None,
             history: vec![("Queued".into(), now_ms())],
         };
         self.requests.insert(req.request_id.clone(), entry);
@@ -514,15 +602,26 @@ impl AccountActor {
 
     /// 派发起点:持久记录 dispatch_intent 后调用方才把动作交给 bridge。
     /// —— "意图已记录、桥确认未收到"的窗口由此显式化(计划 §6.6)。
-    pub fn dispatch_begin(&mut self, request_id: &str) -> Result<(), RejectReason> {
+    pub fn dispatch_begin(&mut self, request_id: &str) -> Result<u32, RejectReason> {
         self.require_mutable(request_id)?;
-        self.transition(request_id, ActionState::DispatchIntent, None)
-            .map_err(|e| {
-                self.counters.transition_anomalies += 1;
-                e
+        let sequence =
+            u32::try_from(self.next_wire_seq).map_err(|_| RejectReason::CapacityExhausted {
+                queue: "wire sequence",
             })?;
+        let next = self.next_wire_seq + 1;
+        self.transition_with_wire_seq(
+            request_id,
+            ActionState::DispatchIntent,
+            None,
+            Some(sequence),
+        )
+        .map_err(|e| {
+            self.counters.transition_anomalies += 1;
+            e
+        })?;
+        self.next_wire_seq = next;
         self.counters.dispatch_intents += 1;
-        Ok(())
+        Ok(sequence)
     }
 
     /// bridge 确认已进入 native 调用(native_started)。
@@ -544,6 +643,7 @@ impl AccountActor {
             NativeResult::Success { native_id } => ActionState::ConfirmedSuccess {
                 native_id: native_id.clone(),
             },
+            NativeResult::AcceptedUnconfirmed => ActionState::AcceptedUnconfirmed,
             NativeResult::Failure { reason } => ActionState::ConfirmedFailure {
                 reason: reason.clone(),
             },
@@ -551,7 +651,12 @@ impl AccountActor {
         };
         let Some(entry) = self.requests.get(request_id) else {
             // 未知请求的回执:仅审计。
-            self.audit_receipt(request_id, 0, format!("late receipt for unknown request: {new_state:?}"), now);
+            self.audit_receipt(
+                request_id,
+                0,
+                format!("late receipt for unknown request: {new_state:?}"),
+                now,
+            );
             self.counters.receipts_audited_only += 1;
             return Ok(ReceiptOutcome::AuditedOnly);
         };
@@ -562,7 +667,17 @@ impl AccountActor {
                 self.counters.receipts_duplicate_ignored += 1;
                 Ok(ReceiptOutcome::DuplicateIgnored)
             }
-            (ActionState::DeliveryUnknown, s) if matches!(s, ActionState::ConfirmedSuccess { .. } | ActionState::ConfirmedFailure { .. }) =>
+            (ActionState::AcceptedUnconfirmed, ActionState::AcceptedUnconfirmed) => {
+                self.counters.receipts_duplicate_ignored += 1;
+                Ok(ReceiptOutcome::DuplicateIgnored)
+            }
+            (ActionState::DeliveryUnknown, s)
+                if matches!(
+                    s,
+                    ActionState::ConfirmedSuccess { .. }
+                        | ActionState::AcceptedUnconfirmed
+                        | ActionState::ConfirmedFailure { .. }
+                ) =>
             {
                 // 明确迟到回执:更正"当前已知结果",不重开、不重发。
                 self.persist_state(request_id, gen, &new_state, native_of(&new_state))
@@ -572,7 +687,14 @@ impl AccountActor {
                     })?;
                 let entry = self.requests.get_mut(request_id).unwrap();
                 entry.state = new_state.clone();
-                entry.history.push((state_name(&entry.state).to_string(), now));
+                entry
+                    .history
+                    .push((state_name(&entry.state).to_string(), now));
+                if entry.state.is_terminal() {
+                    self.pending.retain(|id| id != request_id);
+                } else if !self.pending.iter().any(|id| id == request_id) {
+                    self.pending.push_back(request_id.to_string());
+                }
                 self.counters.receipts_corrected += 1;
                 self.match_result_counter(&new_state);
                 Ok(ReceiptOutcome::CorrectedFromUnknown)
@@ -595,9 +717,13 @@ impl AccountActor {
                     })?;
                 let entry = self.requests.get_mut(request_id).unwrap();
                 entry.state = new_state.clone();
-                entry.history.push((state_name(&entry.state).to_string(), now));
+                entry
+                    .history
+                    .push((state_name(&entry.state).to_string(), now));
                 if entry.state.is_terminal() {
                     self.pending.retain(|id| id != request_id);
+                } else if !self.pending.iter().any(|id| id == request_id) {
+                    self.pending.push_back(request_id.to_string());
                 }
                 self.match_result_counter(&new_state);
                 Ok(ReceiptOutcome::Applied)
@@ -633,10 +759,7 @@ impl AccountActor {
         })
     }
 
-    pub fn request_history(
-        &self,
-        request_id: &str,
-    ) -> Option<Vec<(String, u64)>> {
+    pub fn request_history(&self, request_id: &str) -> Option<Vec<(String, u64)>> {
         self.requests.get(request_id).map(|e| e.history.clone())
     }
 
@@ -660,31 +783,44 @@ impl AccountActor {
         let is_current = current_gen == Some(ev.session_generation);
         if !is_current {
             // 旧代次证据:持久化(审计),不进入当前业务链。
+            ev.onebot_projection = None;
             let seq = self.alloc_seq();
             ev.event_seq = seq;
-            self.persist_event(&ev)
-                .map_err(|e| {
-                    self.journal_failure(e);
-                    RejectReason::JournalFailure
-                })?;
+            self.persist_event(&ev).map_err(|e| {
+                self.journal_failure(e);
+                RejectReason::JournalFailure
+            })?;
             self.counters.events_old_generation_audited += 1;
             return Ok(EventReceipt::AuditedOldGeneration { event_seq: seq });
         }
 
         let dup_native = self.seen_native.contains(&ev.native_id.0);
-        match ev.source {
+        let duplicate = match ev.source {
             EventSource::Recv | EventSource::HistoryBackfill => {
                 if dup_native {
-                    self.counters.events_duplicate_suppressed += 1;
-                    return Ok(EventReceipt::DuplicateSuppressed);
+                    true
+                } else {
+                    false
                 }
             }
             EventSource::Update => {
                 if self.seen_updates.contains(&ev.native_id.0) {
-                    self.counters.events_duplicate_suppressed += 1;
-                    return Ok(EventReceipt::DuplicateSuppressed);
+                    true
+                } else {
+                    false
                 }
             }
+        };
+        if duplicate {
+            if let Some(pending) = self.pending_message_store.get(&ev.native_id.0).cloned() {
+                self.persist_message_projection(&pending)?;
+                self.enqueue_persisted_event(pending)?;
+                self.pending_message_store.remove(&ev.native_id.0);
+            } else {
+                self.persist_message_projection(&ev)?;
+            }
+            self.counters.events_duplicate_suppressed += 1;
+            return Ok(EventReceipt::DuplicateSuppressed);
         }
 
         // 交付队列限额(items/bytes 任一到达 → Gap + 拒绝;bridge 依契约保留
@@ -704,23 +840,62 @@ impl AccountActor {
 
         let seq = self.alloc_seq();
         ev.event_seq = seq;
-        self.persist_event(&ev)
-            .map_err(|e| {
-                self.journal_failure(e);
-                RejectReason::JournalFailure
-            })?;
-        // 持久化成功后才登记去重与入队(= ACK 前移点)。
+        self.persist_event(&ev).map_err(|e| {
+            self.journal_failure(e);
+            RejectReason::JournalFailure
+        })?;
+        // Core journal is durable before the OneBot mapping. Mark the event
+        // seen before the second append so a bridge replay retries the mapping
+        // instead of writing another journal row.
         self.seen_native.insert(ev.native_id.0.clone());
         let is_update = ev.source == EventSource::Update;
         if is_update {
             self.seen_updates.insert(ev.native_id.0.clone());
         }
-        self.dedup_fifo.push_back((is_update, ev.native_id.0.clone()));
+        self.dedup_fifo
+            .push_back((is_update, ev.native_id.0.clone()));
         self.evict_dedup_if_needed();
+        if ev.onebot_projection.is_some() && ev.source != EventSource::Update {
+            self.pending_message_store
+                .insert(ev.native_id.0.clone(), ev.clone());
+            self.persist_message_projection(&ev)?;
+            self.pending_message_store.remove(&ev.native_id.0);
+        }
         self.events_out.push_back(ev);
         self.events_out_bytes += ev_bytes;
         self.counters.events_persisted += 1;
         Ok(EventReceipt::Published { event_seq: seq })
+    }
+
+    fn persist_message_projection(&mut self, ev: &MsgEvent) -> Result<(), RejectReason> {
+        let result = self
+            .message_store
+            .as_mut()
+            .map(|store| store.insert_event(ev));
+        if let Some(Err(error)) = result {
+            self.counters.onebot_store_failures += 1;
+            self.degrade(format!("OneBot message store append failed: {error}"));
+            return Err(RejectReason::JournalFailure);
+        }
+        Ok(())
+    }
+
+    fn enqueue_persisted_event(&mut self, ev: MsgEvent) -> Result<(), RejectReason> {
+        let ev_bytes = ev.text.len() + ev.sender.len() + ev.native_id.0.len() + 128;
+        if self.events_out.len() + 1 > self.config.event_queue_max_items
+            || self.events_out_bytes + ev_bytes > self.config.event_queue_max_bytes
+        {
+            self.record_gap(
+                ev.event_seq,
+                None,
+                "event queue overflow while completing message-store replay",
+            )?;
+            self.degrade("event queue overflow");
+            return Err(RejectReason::CapacityExhausted { queue: "events" });
+        }
+        self.events_out.push_back(ev);
+        self.events_out_bytes += ev_bytes;
+        Ok(())
     }
 
     /// 下游(测试客户端/后续 OneBot)拉取事件:取出即持久化交付游标。
@@ -729,7 +904,8 @@ impl AccountActor {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
             if let Some(ev) = self.events_out.pop_front() {
-                self.events_out_bytes -= ev.text.len() + ev.sender.len() + ev.native_id.0.len() + 128;
+                self.events_out_bytes -=
+                    ev.text.len() + ev.sender.len() + ev.native_id.0.len() + 128;
                 self.delivered_cursor = self.delivered_cursor.max(ev.event_seq);
                 let _ = self.journal.append(&JournalRecord::EventDelivered {
                     event_seq: ev.event_seq,
@@ -793,10 +969,26 @@ impl AccountActor {
         new_state: ActionState,
         native_id: Option<NativeMessageId>,
     ) -> Result<(), RejectReason> {
+        self.transition_with_wire_seq(request_id, new_state, native_id, None)
+            .map(|_| ())
+    }
+
+    fn transition_with_wire_seq(
+        &mut self,
+        request_id: &str,
+        new_state: ActionState,
+        native_id: Option<NativeMessageId>,
+        allocated_wire_seq: Option<u32>,
+    ) -> Result<Option<u32>, RejectReason> {
         let gen = match self.requests.get(request_id) {
             Some(e) => e.session_generation,
             None => return Err(RejectReason::SessionStale),
         };
+        let wire_seq = allocated_wire_seq.or_else(|| {
+            self.requests
+                .get(request_id)
+                .and_then(|entry| entry.wire_seq)
+        });
         let old_name;
         {
             let entry = self.requests.get(request_id).unwrap();
@@ -806,19 +998,32 @@ impl AccountActor {
                 return Err(RejectReason::RequestIdPayloadConflict);
             }
         }
-        self.persist_state(request_id, gen, &new_state, native_id.clone())
-            .map_err(|e| {
-                self.journal_failure(e);
-                RejectReason::JournalFailure
-            })?;
+        self.persist_state_full(
+            request_id,
+            self.requests
+                .get(request_id)
+                .map(|e| e.payload_hash)
+                .unwrap_or(0),
+            gen,
+            &new_state,
+            native_id.clone(),
+            wire_seq,
+        )
+        .map_err(|e| {
+            self.journal_failure(e);
+            RejectReason::JournalFailure
+        })?;
         let entry = self.requests.get_mut(request_id).unwrap();
         entry.state = new_state;
-        entry.history.push((state_name(&entry.state).to_string(), now_ms()));
+        entry.wire_seq = wire_seq;
+        entry
+            .history
+            .push((state_name(&entry.state).to_string(), now_ms()));
         if entry.state.is_terminal() {
             self.pending.retain(|id| id != request_id);
         }
         let _ = old_name;
-        Ok(())
+        Ok(wire_seq)
     }
 
     fn persist_request(
@@ -834,6 +1039,7 @@ impl AccountActor {
             req.session_identity.session_generation,
             state,
             native_id,
+            None,
         )
     }
 
@@ -849,7 +1055,11 @@ impl AccountActor {
             .get(request_id)
             .map(|e| e.payload_hash)
             .unwrap_or(0);
-        self.persist_state_full(request_id, hash, gen, state, native_id)
+        let wire_seq = self
+            .requests
+            .get(request_id)
+            .and_then(|entry| entry.wire_seq);
+        self.persist_state_full(request_id, hash, gen, state, native_id, wire_seq)
     }
 
     fn persist_state_full(
@@ -859,6 +1069,7 @@ impl AccountActor {
         gen: u64,
         state: &ActionState,
         native_id: Option<NativeMessageId>,
+        wire_seq: Option<u32>,
     ) -> Result<(), JournalError> {
         self.journal.append(&JournalRecord::Request(RequestRecord {
             v: 1,
@@ -868,12 +1079,13 @@ impl AccountActor {
             native_id: native_id.map(|n| n.0),
             at_unix_ms: now_ms(),
             session_generation: gen,
+            wire_seq,
         }))
     }
 
     fn persist_event(&mut self, ev: &MsgEvent) -> Result<(), JournalError> {
-        self.journal.append(&JournalRecord::Event(
-            crate::journal::EventRecord {
+        self.journal
+            .append(&JournalRecord::Event(crate::journal::EventRecord {
                 v: 1,
                 event_seq: ev.event_seq,
                 session_generation: ev.session_generation,
@@ -886,6 +1098,7 @@ impl AccountActor {
                 native_id: ev.native_id.0.clone(),
                 text: ev.text.clone(),
                 platform_time: ev.platform_time,
+                onebot_projection: ev.onebot_projection.clone(),
                 observed_at_unix_ms: ev.observed_at_unix_ms,
                 source: match ev.source {
                     EventSource::Recv => "recv",
@@ -893,8 +1106,7 @@ impl AccountActor {
                     EventSource::HistoryBackfill => "history_backfill",
                 }
                 .into(),
-            },
-        ))
+            }))
     }
 
     fn record_gap(
@@ -931,15 +1143,15 @@ impl AccountActor {
             detail,
             at_unix_ms: at,
         };
-        let _ = self
-            .journal
-            .append(&JournalRecord::ReceiptAudit(crate::journal::ReceiptAuditRecord {
+        let _ = self.journal.append(&JournalRecord::ReceiptAudit(
+            crate::journal::ReceiptAuditRecord {
                 v: 1,
                 request_id: entry.request_id.clone(),
                 session_generation: entry.session_generation,
                 detail: entry.detail.clone(),
                 at_unix_ms: entry.at_unix_ms,
-            }));
+            },
+        ));
         self.receipt_audits.push_back(entry);
         if self.receipt_audits.len() > 1024 {
             self.receipt_audits.pop_front();
@@ -955,6 +1167,7 @@ impl AccountActor {
     fn match_result_counter(&mut self, s: &ActionState) {
         match s {
             ActionState::ConfirmedSuccess { .. } => self.counters.results_success += 1,
+            ActionState::AcceptedUnconfirmed => self.counters.results_unconfirmed += 1,
             ActionState::ConfirmedFailure { .. } => self.counters.results_failure += 1,
             ActionState::DeliveryUnknown => self.counters.results_unknown += 1,
             _ => {}
@@ -963,7 +1176,13 @@ impl AccountActor {
 }
 
 /// HostIdentity 便捷构造(测试/接线用;nonce 由调用方提供 OS 随机值)。
-pub fn host_identity(pid: u32, created_utc: &str, baseline: &str, build: &str, nonce: u64) -> HostIdentity {
+pub fn host_identity(
+    pid: u32,
+    created_utc: &str,
+    baseline: &str,
+    build: &str,
+    nonce: u64,
+) -> HostIdentity {
     HostIdentity {
         pid,
         process_created_utc: created_utc.to_string(),
@@ -980,19 +1199,28 @@ fn state_name(s: &ActionState) -> &'static str {
         ActionState::DispatchIntent => "DispatchIntent",
         ActionState::NativeStarted => "NativeStarted",
         ActionState::ConfirmedSuccess { .. } => "ConfirmedSuccess",
+        ActionState::AcceptedUnconfirmed => "AcceptedUnconfirmed",
         ActionState::ConfirmedFailure { .. } => "ConfirmedFailure",
         ActionState::CancelledUnsent => "CancelledUnsent",
         ActionState::DeliveryUnknown => "DeliveryUnknown",
     }
 }
 
-fn state_from_name(name: &str) -> Option<ActionState> {
-    match name {
+fn state_from_record(record: &RequestRecord) -> Option<ActionState> {
+    match record.state.as_str() {
         "Accepted" => Some(ActionState::Accepted),
         "Queued" => Some(ActionState::Queued),
         "DispatchIntent" => Some(ActionState::DispatchIntent),
         "NativeStarted" => Some(ActionState::NativeStarted),
-        "ConfirmedSuccess" => Some(ActionState::ConfirmedSuccess { native_id: None }),
+        // 历史版把无 ID 的 ACK 写作 ConfirmedSuccess(None)。保留原始
+        // RequestRecord,只在恢复态中降为 AcceptedUnconfirmed。
+        "ConfirmedSuccess" => match record.native_id.as_deref().filter(|id| !id.is_empty()) {
+            Some(id) => Some(ActionState::ConfirmedSuccess {
+                native_id: NativeMessageId(id.into()),
+            }),
+            None => Some(ActionState::AcceptedUnconfirmed),
+        },
+        "AcceptedUnconfirmed" => Some(ActionState::AcceptedUnconfirmed),
         "ConfirmedFailure" => Some(ActionState::ConfirmedFailure {
             reason: String::new(),
         }),
@@ -1004,7 +1232,7 @@ fn state_from_name(name: &str) -> Option<ActionState> {
 
 fn native_of(s: &ActionState) -> Option<NativeMessageId> {
     match s {
-        ActionState::ConfirmedSuccess { native_id } => native_id.clone(),
+        ActionState::ConfirmedSuccess { native_id } => Some(native_id.clone()),
         _ => None,
     }
 }
@@ -1020,13 +1248,33 @@ fn transition_valid(from: &ActionState, to: &ActionState) -> bool {
             | (Queued, CancelledUnsent)
             | (DispatchIntent, NativeStarted)
             | (DispatchIntent, ConfirmedSuccess { .. })
+            | (DispatchIntent, AcceptedUnconfirmed)
             | (DispatchIntent, ConfirmedFailure { .. })
             | (DispatchIntent, DeliveryUnknown)
             | (NativeStarted, ConfirmedSuccess { .. })
+            | (NativeStarted, AcceptedUnconfirmed)
             | (NativeStarted, ConfirmedFailure { .. })
             | (NativeStarted, DeliveryUnknown)
+            | (AcceptedUnconfirmed, ConfirmedSuccess { .. })
+            | (AcceptedUnconfirmed, ConfirmedFailure { .. })
+            | (AcceptedUnconfirmed, DeliveryUnknown)
             // 迟到明确回执更正未知结果(不重开动作)。
             | (DeliveryUnknown, ConfirmedSuccess { .. })
+            | (DeliveryUnknown, AcceptedUnconfirmed)
             | (DeliveryUnknown, ConfirmedFailure { .. })
     )
+}
+
+impl StoreReader for AccountActor {
+    fn get_msg(&self, message_id: i32) -> Option<caligo_model::onebot_traits::StoredMessageView> {
+        self.message_store.as_ref()?.get_msg(message_id)
+    }
+
+    fn login_info(&self) -> Option<(u64, String)> {
+        self.message_store.as_ref()?.login_info()
+    }
+
+    fn online_status(&self) -> Option<bool> {
+        Some(self.phase == Phase::Active)
+    }
 }

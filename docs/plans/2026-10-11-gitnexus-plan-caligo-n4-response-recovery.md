@@ -4,6 +4,8 @@
 > Evidence verified at commit `0f5b4834dc17534083a0c503b2a0223ab44e3451`；GitNexus 本轮 `analyze --index-only --pdg` 已刷新。开始时存在用户未提交的文档 harness，Rust 未修改。
 > Evidence provenance schema 2；global dirty digest `298284fa9c9bade8a54b6baccf9cb982f6f5d27d399b2cac701604f3d82daeff`；cited-path manifest 39 个排序条目；仅本计划路径排除在全局 digest 外。
 > 本文是计划。2026-10-11 的现场硬停、未知构建拒绝、unknown 不重发及未证寿命不卸载继续有效。
+>
+> 执行进度与已验证结果另记于[执行记录](../execution/2026-10-11-n4-response-recovery.md)；计划写作时的源状态与反例仍作为历史证据保留。
 
 ## 1. 目标与本轮范围
 
@@ -100,7 +102,7 @@ PDG 是函数内切片，不证明 C++ ABI、QQ 分配器、实际线程或跨 I
 | native/观察结果 | core 表达 | OneBot 表达 |
 |---|---|---|
 | pre-call 明确拒绝，native 未执行 | 未派发/明确拒绝，保留原因 | failed，说明未受理/未执行 |
-| callback errCode=0，但没有稳定消息身份 | AcceptedUnconfirmed（拟新增可恢复事实），继续等身份或最终 unknown | 标准同步发送不返回 ok；显式 _async 接受后 status=async、retcode=1、data=null |
+| callback errCode=0，但没有稳定消息身份 | AcceptedUnconfirmed（拟新增可恢复事实），继续等身份或最终 unknown | 标准同步发送不返回 ok；若提供 `*_async`，须标为 Caligo 扩展（非 OneBot V11 公共动作），并返回 status=async、retcode=1、data=null |
 | 证实成功且强关联稳定 native ID | ConfirmedSuccess，native ID 必填非空 | 持久映射提交后 ok，message_id 是 int32 |
 | 证实业务拒绝 | ConfirmedFailure，保留码/来源 | failed；不能从所有非零码推断服务器拒绝 |
 | 本地 timeout、断链、slot overflow、进程退出、身份歧义 | DeliveryUnknown，保存已有接受事实 | 超时扩展说明未知，不伪造成功，不自动重发 |
@@ -133,7 +135,7 @@ message_store.rs / MessageStore：以 account+chat type+peer+native identity 为
 
 onebot_traits.rs / SendPayload：保留明确私聊 user_id 或类型化 Target::PrivateUin/ResolvedUid；onebot.rs / handle_action 不丢目标。UID 解析只在已证明账号/session 对应关系下执行，不能把 UIN 当 UID。未实现常驻私聊时返回显式 unsupported，不能返回 async 假受理。
 
-标准 send_private_msg/send_group_msg/send_msg 等待真实结果与持久 ID，显式 `_async` 变体才做标准异步返回；超时用已文档化扩展 wording/诊断键表示 unknown。ActionResponse 不能因 Option=None 把标准应有的 data:null 省略。get_login_info/get_status 从真实 actor 身份与会话读取，get_version_info 含 app_version；get_msg 按标准返回 message_type/message_id/real_id/sender/message/time。接收事件同样缺真实必需字段时内部诊断，不输出伪字段。
+标准 send_private_msg/send_group_msg/send_msg 等待真实结果与持久 ID；代码中的显式 `*_async` 动作是 Caligo 扩展，不是 OneBot V11 公共动作。超时用已文档化扩展 wording/诊断键表示 unknown。ActionResponse 不能因 Option=None 把标准应有的 data:null 省略。get_login_info/get_status 从真实 actor 身份与会话读取，get_version_info 含 app_version；get_msg 按标准返回 message_type/message_id/real_id/sender/message/time。接收事件同样缺真实必需字段时内部诊断，不输出伪字段。
 
 onebot_http.rs / serve_one：先界定 header_end，再校验 Content-Length/容量，读到 header_end+body_len；用 checked arithmetic，按完整正文边界解析。处理断开、慢读、超限、重复/非法长度、Content-Type、GET/query/form/JSON 与鉴权状态。不能用 `(buf.len()-cl).max(0)` 修补无符号下溢。可采用成熟 HTTP 库，但由离线依赖与现有架构评估，不为一个算术错误先重写全部网络框架。
 
@@ -1269,4 +1271,4 @@ git diff --check
 
 **N4完成门：**持久int32 ID与真实身份/查询一致，群/私聊目标与消息完整，原计划HTTP/HTTPPOST/WS/反向WS目标合同与真实应用同链验证通过，重启get_msg稳定，unknown不重发。N5生产稳定性仍单独验收。
 
-下一次执行从 **N4-R1** 开始。第一条新增测试应是“请求R经异步cookie回程仍回到R”，第一项代码修复应是 **HostOp贯通原request_id**。
+计划最初的执行起点是 **N4-R1**（第一条新增测试为“请求 R 经异步 cookie 回程仍回到 R”，首项修复为 HostOp 贯通原 `request_id`）。实际实现与后续 gate 见[执行记录](../execution/2026-10-11-n4-response-recovery.md)；R1 离线完成不代表 R2 native 寿命、R3 强身份、R4 现场或 R5/R6 产品 transport 完成。

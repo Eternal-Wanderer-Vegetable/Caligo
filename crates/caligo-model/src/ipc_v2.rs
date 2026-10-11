@@ -66,6 +66,8 @@ pub enum CoreToBridgeMsg {
     /// 派发参数化发送(带持久 request_id)。
     Dispatch {
         request_id: String,
+        /// 唯一序号 authority 在 core；已先落 journal 再进入 bridge。
+        wire_seq: u32,
         target: serde_json::Value,
         text: String,
     },
@@ -75,6 +77,16 @@ pub enum CoreToBridgeMsg {
     EventAck {
         event_seq: u64,
         suppressed: bool,
+    },
+    /// core 已将 NativeStarted 记入 actor 状态(bridge 可释放该通知槽)。
+    NativeStartedAck {
+        request_id: String,
+    },
+    /// core 已持久应用或审计 SendResult(bridge 可释放该通知槽)。
+    SendResultAck {
+        request_id: String,
+        /// false 仅确认 AcceptedUnconfirmed；bridge 必须保留未来终态槽。
+        terminal: bool,
     },
     Stopped {},
     Reject {
@@ -159,6 +171,9 @@ pub struct EventPayload {
     pub native_id: String,
     pub text: String,
     pub platform_time: Option<u64>,
+    /// Optional, explicitly resolved OneBot fields. Older bridge builds omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onebot_projection: Option<crate::OneBotMessageProjection>,
     pub observed_at_unix_ms: u64,
     pub source: String,
 }
@@ -168,8 +183,10 @@ pub struct EventPayload {
 #[serde(tag = "t", content = "d", rename_all = "snake_case")]
 pub enum OutcomePayload {
     Success {
-        native_id: Option<String>,
+        native_id: String,
     },
+    /// 已受理但没有稳定 native identity,不能当作成功。
+    AcceptedUnconfirmed,
     Failure {
         reason: String,
     },

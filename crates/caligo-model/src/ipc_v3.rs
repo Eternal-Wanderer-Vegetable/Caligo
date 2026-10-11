@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 
 /// IPC 语义协议 v3。v2 保持原定义供历史对照;不接受 v2/v1 握手降级。
 pub const PROTOCOL_VERSION_V3: u32 = 3;
+/// Bridge/core business receipt contract revision, independent of frame/IPC v3.
+pub const BUSINESS_PROTOCOL_REVISION: u32 = 1;
 
 pub use super::ipc_v2::{EventPayload, OutcomePayload, Role};
 
@@ -23,6 +25,8 @@ pub use super::ipc_v2::{EventPayload, OutcomePayload, Role};
 pub enum BridgeMsg {
     Hello {
         protocol_version: u32,
+        /// Business receipt/state contract; mismatches are rejected, no downgrade.
+        business_protocol_revision: u32,
         bridge_build: String,
         /// 认证凭据(hex;OS 随机,经 bootstrap 私有通道交付)。
         auth_token: String,
@@ -84,6 +88,7 @@ mod tests {
     fn v3_hello_with_host_identity_decodes() {
         let v3 = r#"{"t":"hello","d":{
             "protocol_version":3,
+            "business_protocol_revision":1,
             "bridge_build":"b",
             "auth_token":"tok",
             "role":"bridge",
@@ -95,11 +100,31 @@ mod tests {
         }}"#;
         let msg: BridgeMsg = serde_json::from_str(v3).unwrap();
         match msg {
-            BridgeMsg::Hello { host_nonce, host_process_created_utc, .. } => {
+            BridgeMsg::Hello {
+                host_nonce,
+                host_process_created_utc,
+                ..
+            } => {
                 assert_eq!(host_nonce, 123456789);
                 assert_eq!(host_process_created_utc, "2026-10-08T00:00:00Z");
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn old_v3_hello_without_business_revision_is_rejected() {
+        let old_v3 = r#"{"t":"hello","d":{
+            "protocol_version":3,
+            "bridge_build":"b",
+            "auth_token":"tok",
+            "role":"bridge",
+            "session_generation":1,
+            "account":"10001",
+            "module_baseline":"m",
+            "host_nonce":123456789,
+            "host_process_created_utc":"2026-10-08T00:00:00Z"
+        }}"#;
+        assert!(serde_json::from_str::<BridgeMsg>(old_v3).is_err());
     }
 }

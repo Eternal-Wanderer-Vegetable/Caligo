@@ -23,6 +23,10 @@ pub enum HostOp {
     Probe,
     /// 参数化发送(QQ 业务调用;LAB 由假会话服务应答)。
     SendText {
+        /// 贯穿 bridge/core/native response ledger 的原始业务身份。
+        request_id: String,
+        /// core 持久分配的 client_seq；adapter 不得另行分配或替换。
+        wire_seq: u32,
         chat_type: u32,
         peer_uid: String,
         text: String,
@@ -31,7 +35,9 @@ pub enum HostOp {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostOpResult {
-    ListenerAdded { token: u64 },
+    ListenerAdded {
+        token: u64,
+    },
     /// 该宿主代次暂无消息监听(D7 面向 Health/身份/停止;监听器属 D8)。
     /// resident 记录为延迟模式:关闭时不执行对称移除。
     ListenerDeferred,
@@ -39,10 +45,14 @@ pub enum HostOpResult {
     ProbeDone,
     /// 发送完成。`native_id` 为实际原生消息身份 —— **拿不到关联时为 None**,
     /// 上层(§6.6 receipt 契约)不得把 None 冒充成已关联成功。
-    Sent { native_id: Option<String> },
+    Sent {
+        native_id: Option<String>,
+    },
     /// 原生调用已发出(fired),结果由 Promise 异步完成 —— 非终态;
     /// `mid` 为本地生成的候选消息 ID(receipt 三分类的第一项)。
-    SendFired { mid: String },
+    SendFired {
+        mid: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
