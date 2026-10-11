@@ -904,3 +904,36 @@ N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。
   方式重启 bot(桌面正常启动)→ 新实例可注入后,单探针验证消费者通道
   (成功发送 → err_code=0 + msgUid;纪律 v2:不做故意重放,-1 超时路径
   不主动触发)。
+## 2026-10-11(二十九):消费者实验 r1 —— delegate 被调用但契约错位,实例死亡(第二次)
+
+### 事实
+- 用户停 bot 并以正常方式重启 → 新实例定位(17200,bot 1694717255,RPM 可达;
+  注意:昨日"8112 提权"诊断实为**十进制→hex 换算错误**,8112 当时可注入,
+  观察工具的地址算错;已修正方法论:进制转换必须程序化)。
+- 消费者探针(--g3-send-consumer 1,新鲜 rand,N3R30-CONSUMER):submit 时刻
+  delegate 即被调用(同毫秒),参数形态 = `(stack_obj, 0, ptr, 0x10, ptr)`
+  —— **管理器契约**(dest, op=0 克隆, src, size=0x10, ...),非响应回调;
+  数秒后实例死亡(无自愈,OneBot 下线)。
+
+### 契约破案(0x72D596 全反编译)
+- 0x72D596 **不是空函数** = std::function 式**管理器**:`(dest=rcx, op=edx, ...)`,
+  op 0/1 = 克隆/销毁(空实现向 dest 写 {manager, terminate} 对),op 2/3 =
+  no-op;0x72D5C8 = "调用空 function 即 terminate"哨兵(int3)。
+- cb 块 = 32B delegate,**布局 L1 = {storage0, storage1, manager, invoker}**;
+  空 delegate = {0, 0, 管理器, terminate}。门 3fbab2 检查 storage/管理器槽
+  非空;响应时经 dispatch+0x30(= cb[3] invoker)调用消费者,this =
+  delegate 起点。
+- **N3R30 崩溃根因**:我们把响应处理器放进了 manager 槽、no-op 放进
+  invoker 槽 —— QQ 在请求建立时克隆 delegate 调 manager(op=0,要求向
+  dest 复制),我们的函数做文件 I/O 不复制 → dest 残留垃圾 → 崩溃。
+  此前所有成功发送(N3R23/FIX1/2)不崩 = storage {0,0} 门关,invoker
+  从未被调 —— 全部自洽。
+
+### 修正(consumer_probe.rs 重写;n3res6 就绪)
+- cb = {storage0=ctx 指针, storage1=1, manager=consumer_manager,
+  invoker=consumer_invoke};
+- manager:op 0/1 → 向 dest 定长复制 4 qword(自身地址组 + 静态 ctx);
+  其他 op no-op;零读零分配;
+- invoker:ctx 从 this+0x10 取(魔数自检),字符串 RPM-self 读,JSONL 追加;
+- 全测试绿。**字段重试待用户明确批准**(今日已两实例死亡;修正后的
+  manager 语义与 L1 布局均有直接反汇编依据,但 3fce5e 门内部逻辑未全解)。

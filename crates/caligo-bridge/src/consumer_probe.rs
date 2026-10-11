@@ -1,19 +1,22 @@
 //! 响应消费者探针(N3 retCode 通道;research 构建)。
 //!
-//! 静态依据(2026-10-11 反汇编定案):
-//! - 732A80 内部 0x732e2e 构造响应 dispatch 对象(73bbf8),内嵌 32B delegate
-//!   (即我们传入的第 5 参 cb 块);
-//! - 响应到达 → 73bd6c(无条件记 errCode/errStr 日志)→ 门 3fbab2(检查
-//!   inner+0x10 非空)→ `(**(dispatch+0x30))(dispatch+0x18, 0x10, errCode,
-//!   errStr, msgUid)`;
-//! - dispatch+0x30 = cb[2](invoke)、dispatch+0x18 = cb 起点(ctx);
-//!   errCode 提取层级:transport 参数 → resp 空 = -1(超时;配置 180s)→
-//!   resp+0x40 → resp+0x60 → resp+0x64 → 0;msgUid = string@resp+0x38。
+//! 静态定案(2026-10-11;含 N3R30 现场教训):
+//! - cb 块 = 32B std::function 式 delegate,**布局 L1**:
+//!   `{storage0, storage1, manager, invoker}`;
+//!   空 delegate = {0, 0, 0x72D596(管理器), 0x72D5C8(terminate 哨兵)}。
+//! - 门 3fbab2 = 检查 **storage 非空**(inner+0x10 = cb[0])——空 → 响应
+//!   不调用;非空 → 响应时 `(**(dispatch+0x30))(delegate起点, 0x10,
+//!   errCode, errStr, msgUid)` = **cb[3](invoker)**,this = delegate 起点。
+//! - manager 契约(0x72D596 反编译):`(dest=rcx, op=edx, ...)`;op 0/1 =
+//!   克隆/销毁(空实现向 dest 写 {manager, invoker} 对;非空须复制全部
+//!   4 qword),op 2/3 = no-op。QQ 在请求建立时会克隆 delegate——manager
+//!   必须正确复制,否则 dest 残留垃圾 → 崩溃(**N3R30 教训:处理器误放
+//!   manager 槽,克隆损坏,实例死亡**)。
+//! - errCode 层级:transport 参数 → resp 空 = -1(180s 超时)→ resp+0x40
+//!   → +0x60 → +0x64 → 0;msgUid = string@resp+0x38。
 //!
-//! 实验:把 cb 从 QQ 空函数 delegate 换成我们的 {ctx, flag, invoke, dtor} —
-//! 若门开启,响应(或 180s 超时 -1)直接写入我们的 JSONL。
-//! 防御:invoke/dtor 全部经 RPM-self 安全读(参数布局误判也不崩);
-//! 本侧零 QQ 调用、零分配、不抛不绕(回调纪律与 g2 捕获同)。
+//! 防御:invoke/manager 全部 RPM-self 安全读 + 定长写(布局误判不崩);
+//! 回调纪律与 g2 捕获同(零 QQ 调用、零分配、不 unwind)。
 
 use core::ffi::c_void;
 
@@ -109,22 +112,60 @@ fn append_line(ctx: &ConsumerCtx, line: &str) {
     }
 }
 
-/// 消费者回调(被 QQ dispatcher 线程调用;契约 = (inner, 0x10, errCode,
-/// errStr*, msgUid*)。防御式:全部字段 RPM-self 读,布局误判不崩。
+/// delegate 析构/销毁臂(manager op 1;storage 为 leaked,no-op)。
+///
+/// # Safety
+/// QQ 线程调用;不得 unwind。
+pub unsafe extern "system" fn consumer_dtor(_ctx: *mut c_void) {}
+
+/// manager(QQ 在请求建立时以 op=0 克隆本 delegate;契约 = 0x72D596):
+/// `(dest=rcx, op=edx, ...)`。op 0/1 = 向 dest 复制完整 4 qword
+/// (manager/invoker/storage);其他 op = no-op。定长写,零读零分配。
+///
+/// # Safety
+/// QQ 线程调用;dest 必须为 QQ 提供的 ≥32B 缓冲;不得 unwind。
+pub unsafe extern "system" fn consumer_manager(
+    dest: *mut c_void,
+    op: u32,
+    _a3: *mut c_void,
+    _a4: usize,
+    _a5: *mut c_void,
+) {
+    if op > 1 || dest.is_null() {
+        return;
+    }
+    // SAFETY: dest 为 QQ 分配的 delegate 缓冲(≥32B,与空实现写 2 qword
+    // 同级别);我们写满 4 qword(本函数自身的地址组 + ctx 在 src 侧不变,
+    // 故直接重写本 delegate 的标准形态)。
+    unsafe {
+        let d = dest as *mut u64;
+        core::ptr::write(d, consumer_manager as usize as u64);
+        core::ptr::write(d.add(1), consumer_invoke as usize as u64);
+        // storage:ctx 指针 + 标记(与 build_cb 一致;从不可变来源取)。
+        let ctx = STORAGE_CTX.load(std::sync::atomic::Ordering::Acquire);
+        core::ptr::write(d.add(2), ctx);
+        core::ptr::write(d.add(3), 1);
+    }
+}
+
+static STORAGE_CTX: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 消费者回调(响应时被 QQ 调用;契约 = cb[3](delegate 起点, 0x10,
+/// errCode, errStr*, msgUid*)。防御式:ctx 从 this+0 取,字符串 RPM-self 读。
 ///
 /// # Safety
 /// QQ 线程调用;只读;不得调用 QQ API、不得 unwind。
 pub unsafe extern "system" fn consumer_invoke(
-    inner: *mut c_void,
+    this: *mut c_void,
     tag: u32,
     err_code: i32,
     err_str: *const c_void,
     msg_uid: *const c_void,
 ) {
-    // SAFETY: 回调纪律 — 全程 RPM-self 安全读 + JSONL 追加,无 QQ 调用。
+    // SAFETY: 回调纪律 — RPM-self 安全读 + JSONL 追加,无 QQ 调用。
     unsafe {
-        let inner_addr = inner as usize;
-        let ctx: &ConsumerCtx = resolve_ctx(inner_addr);
+        let this_addr = this as usize;
+        let ctx = resolve_ctx(this_addr);
         let err_str = read_cpp_string(err_str as usize)
             .unwrap_or_else(|| format!("<unreadable {:#x}>", err_str as usize));
         let msg_uid = read_cpp_string(msg_uid as usize)
@@ -136,7 +177,7 @@ pub unsafe extern "system" fn consumer_invoke(
         let line = serde_json::json!({
             "kind": "consumer_result",
             "ts": ts,
-            "inner": format!("{inner_addr:#x}"),
+            "this": format!("{this_addr:#x}"),
             "tag": tag,
             "err_code": err_code,
             "err_str": err_str,
@@ -146,28 +187,17 @@ pub unsafe extern "system" fn consumer_invoke(
     }
 }
 
-/// 从 invoke 首参恢复 ctx:接受直接指针或 delegate 对象(其 +0/+8 可能持
-/// ctx 指针);魔数自检失败则用进程级 fallback(最后一线程仍写诊断行)。
-unsafe fn resolve_ctx(inner_addr: usize) -> &'static ConsumerCtx {
+/// 从 invoker 首参(delegate 起点)恢复 ctx:读 this+0x10(storage0 =
+/// ctx 指针);魔数自检;失败用进程级 fallback。
+unsafe fn resolve_ctx(this_addr: usize) -> &'static ConsumerCtx {
     unsafe {
-        // 直接指针?
-        if inner_addr > 0x10000 {
-            if let Some(m) = safe_read_qword(inner_addr + 16) {
-                if m == CTX_MAGIC {
-                    return &*(inner_addr as *const ConsumerCtx);
-                }
-            }
-        }
-        // delegate 对象:+0/+8 持 ctx 指针?
-        for off in [0usize, 8] {
-            if inner_addr > 0x10000 {
-                if let Some(p) = safe_read_qword(inner_addr + off) {
-                    let p = p as usize;
-                    if p > 0x10000 {
-                        if let Some(m) = safe_read_qword(p + 16) {
-                            if m == CTX_MAGIC {
-                                return &*(p as *const ConsumerCtx);
-                            }
+        if this_addr > 0x10000 {
+            if let Some(p) = safe_read_qword(this_addr + 0x10) {
+                let p = p as usize;
+                if p > 0x10000 {
+                    if let Some(m) = safe_read_qword(p + 16) {
+                        if m == CTX_MAGIC {
+                            return &*(p as *const ConsumerCtx);
                         }
                     }
                 }
@@ -220,19 +250,17 @@ fn leak_ctx_fallback() -> &'static ConsumerCtx {
     Box::leak(Box::new(ctx))
 }
 
-/// delegate 析构(QQ 释放 dispatch 对象时调用;no-op —— ctx 为 leaked,
-/// 零释放动作)。
-///
-/// # Safety
-/// QQ 线程调用;不得 unwind。
-pub unsafe extern "system" fn consumer_dtor(_ctx: *mut c_void) {}
-
-/// cb 块构造:{ctx, flag, invoke, dtor}。
+/// delegate 构造(布局 L1):{storage0=ctx, storage1=1, manager, invoker}。
+/// storage0 非空 = 门开启;manager 正确克隆;invoker = 消费者。
 pub fn build_cb(ctx: &ConsumerCtx) -> [u64; 4] {
+    STORAGE_CTX.store(
+        ctx as *const ConsumerCtx as usize as u64,
+        std::sync::atomic::Ordering::Release,
+    );
     [
         ctx as *const ConsumerCtx as usize as u64,
         1,
+        consumer_manager as usize as u64,
         consumer_invoke as usize as u64,
-        consumer_dtor as usize as u64,
     ]
 }
