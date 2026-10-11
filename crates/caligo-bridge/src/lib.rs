@@ -71,6 +71,8 @@ pub mod g3_session;
 #[cfg(feature = "research")]
 pub mod consumer_probe;
 #[cfg(feature = "research")]
+pub mod wirecap;
+#[cfg(feature = "research")]
 pub mod native_resident;
 pub mod register;
 pub mod resident;

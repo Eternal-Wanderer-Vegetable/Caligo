@@ -868,27 +868,38 @@ fn encode_send_msg(
         )
         .unwrap_or_default();
     }
-    // ===== 群聊 @ 研究分支(r20–r28b 归档;全部静默拒,留作逆向证据)=====
-    // 入口保证 at_uid.is_some()。路由与 r18 相同(Grp varint,无 CH)。
+    // ===== 群聊 @ 研究分支(r20–r28b 归档;v6 = N3R37 真实记录对齐)=====
+    // 入口保证 at_uid.is_some()。
     let mut w = Vec::with_capacity(text.len() + 128);
     let mut routing = Vec::new();
     let mut grp = Vec::new();
-    pb_varint_field(&mut grp, 1, group_code);
+    if use_ch == 92 {
+        // v11(N3R47):路由串形式(r16 主账号 wire 捕获 = Grp{1: code 串};
+        // varint 形式 plain 已证可过,@ 未测 —— wirecap 已证 SnowLuma 不走
+        // 732A80,真实 @ wire 仍未见,串形式 = 最后未测结构差异)。
+        pb_len_field(&mut grp, 1, group_code.to_string().as_bytes());
+    } else {
+        pb_varint_field(&mut grp, 1, group_code);
+    }
     pb_len_field(&mut routing, 2, &grp);
     pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
     let mut rich = Vec::new();
-    // @ 元素构造(2026-10-09 真实 @Stella 消息字节级实证,wirecap/at-capture):
-    // Rich{2: text{1: "@段", 3: attr13B(00 01 <len_be32> 00 <uin_be32> 00 00),
-    // 12: {3: 2(atType), 4: uin, 5: 0, 9: peerUid, 11: 0}}},其余文本是
-    // 独立 text 元素。(r20 误为 {3: uid串} 被拒,此为修正。)
+    // @ 元素构造(v6;N3R37 SnowLuma 送达件堆转储 0x21ba203c387 字节级对齐):
+    // elem(text) = {1: {1: "@<显示名> "(含 @ 前缀 + 尾空格),
+    //   3: attr13B{00,01,len = at段 UTF-16 units,00,uin_be32,00,00},
+    //   12: {3: 2, 4: uin, 9: peerUid} —— 无 f5/f11(r20 版多加,已删)}}。
+    // 显示名 = 文本首词(调用方传被 @ 人昵称;服务器是否校验显示名待定)。
     let mut at_parts: Option<(Vec<u8>, Vec<u8>)> = None;
     if let Some(atuid) = at_uid {
         if let Some(sp) = text.find(' ') {
             let (at_name, rest) = text.split_at(sp);
+            let at_text = format!("@{at_name} ");
             let mut at_txt = Vec::new();
-            pb_len_field(&mut at_txt, 1, at_name.as_bytes());
+            pb_len_field(&mut at_txt, 1, at_text.as_bytes());
             let mut attr = vec![0u8, 1u8];
-            attr.extend_from_slice(&(at_name.len() as u32).to_be_bytes());
+            // len = at 段 UTF-16 code-unit 数(N3R37 实测:18 = 18 units,
+            // 字节数 42 ≠ 18;BMP 内 chars().count() == UTF-16 units)。
+            attr.extend_from_slice(&(at_text.chars().count() as u32).to_be_bytes());
             attr.push(0u8);
             attr.extend_from_slice(&at_uin.to_be_bytes());
             attr.extend_from_slice(&[0u8, 0u8]);
@@ -896,9 +907,7 @@ fn encode_send_msg(
             let mut f12 = Vec::new();
             pb_varint_field(&mut f12, 3, 2);
             pb_varint_field(&mut f12, 4, at_uin as u64);
-            pb_varint_field(&mut f12, 5, 0);
             pb_len_field(&mut f12, 9, atuid.as_bytes());
-            pb_varint_field(&mut f12, 11, 0);
             pb_len_field(&mut at_txt, 12, &f12);
             let mut rest_txt = Vec::new();
             pb_len_field(&mut rest_txt, 1, rest.as_bytes());
@@ -920,18 +929,32 @@ fn encode_send_msg(
             let mut f6 = Vec::new();
             pb_varint_field(&mut f6, 1, ts);
             pb_len_field(&mut w, 6, &f6);
-            return w;
-        }
+            return w;        }
     }
     if let Some((at_txt, rest_txt)) = &at_parts {
-        // r28 完整仿件(归档):Rich.Attr + AT_ELEM37(125B) + 元素9 + at + rest + 元素16。
-        // @ 消息要求 Rich.Attr(field1)——真实 @ 样本含 {1:0,2:ts,3:rand,4:0,5:10,6:0,7:134,8:2,9:"媒体"}
-        // (普通文本无 Attr 可过,@ 被拒两轮后回补;r22)。
+        // v9:CH = N3R37 记录实测 9 键 {1:82, 3:1, 4:divSeq, 5:seq, 6:ts,
+        // 7:1, 29:395247, 30:1, 32:r64} —— **有 f3:1、无 f12**(r16 老规格
+        // 的 f12/divSeq|1<<63 与"无 f3"均被真实件否定;f5 = 消息 seq)。
+        let div_seq = random as u64;
+        let mut ch = Vec::new();
+        pb_varint_field(&mut ch, 1, 82);
+        pb_varint_field(&mut ch, 3, 1);
+        pb_varint_field(&mut ch, 4, div_seq);
+        pb_varint_field(&mut ch, 5, client_seq as u64);
+        pb_varint_field(&mut ch, 6, ts);
+        pb_varint_field(&mut ch, 7, 1);
+        pb_varint_field(&mut ch, 29, 395247);
+        pb_varint_field(&mut ch, 30, 1);
+        let mut r64 = unsafe { core::arch::x86_64::_rdtsc() };
+        r64 ^= r64 >> 32;
+        pb_varint_field(&mut ch, 32, r64);
+        pb_len_field(&mut w, 2, &ch);
+        // Rich.Attr(真实 @ 件必有;f3 = divSeq 与真实件同源)。
         {
             let mut attr = Vec::new();
             pb_varint_field(&mut attr, 1, 0);
             pb_varint_field(&mut attr, 2, ts);
-            pb_varint_field(&mut attr, 3, random as u64);
+            pb_varint_field(&mut attr, 3, div_seq);
             pb_varint_field(&mut attr, 4, 0);
             pb_varint_field(&mut attr, 5, 10);
             pb_varint_field(&mut attr, 6, 0);
@@ -940,31 +963,28 @@ fn encode_send_msg(
             pb_len_field(&mut attr, 9, &[0xe5, 0xaa, 0x92, 0xe4, 0xbd, 0x93]);
             pb_len_field(&mut rich, 1, &attr);
         }
-        // @ 场景专用 elem37(125B 照抄):field81 形状不同({f2:17} vs 普通版
-        // {f1:2,f2:45}),疑似服务器按此分流消息类型(r28)。
+        // @ 场景 elem37(v7 = N3R37 真实 88B;替换 r28 125B 仿件 —— 其 f19
+        // 带 f1:6 与多余全零字段,与真实件结构不符)。
         const AT_ELEM37: &[u8] = &[
-            0xaa, 0x02, 0x7a, 0x08, 0x00, 0x50, 0x00, 0x60, 0x00, 0x68, 0x00, 0x80,
-            0x01, 0x00, 0x88, 0x01, 0x00, 0x9a, 0x01, 0x69, 0x08, 0x06, 0x20, 0xcb,
-            0x50, 0x78, 0x00, 0xc8, 0x01, 0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00,
-            0x90, 0x02, 0x00, 0xc8, 0x02, 0x00, 0x98, 0x03, 0x00, 0xa0, 0x03, 0x00,
-            0xb0, 0x03, 0x00, 0xb8, 0x03, 0x00, 0xc0, 0x03, 0x00, 0xd0, 0x03, 0x00,
-            0xe8, 0x03, 0x00, 0x8a, 0x04, 0x02, 0x10, 0x11, 0x90, 0x04, 0x80, 0x01,
-            0xb8, 0x04, 0x00, 0xc0, 0x04, 0x00, 0xca, 0x04, 0x00, 0xf8, 0x04, 0xcc,
-            0x84, 0x08, 0x80, 0x05, 0x4d, 0x88, 0x05, 0x00, 0x80, 0x06, 0x00, 0xb2,
-            0x06, 0x0a, 0x0a, 0x08, 0x08, 0x00, 0x10, 0x00, 0x18, 0x00, 0x20, 0x00,
-            0xd8, 0x06, 0x8b, 0x95, 0x18, 0xa0, 0x07, 0xcf, 0xfe, 0xe3, 0xc3, 0xee,
-            0xdd, 0xc9, 0xa1, 0xef, 0x01,
+            0xaa, 0x02, 0x55, 0x60, 0x07, 0x9a, 0x01, 0x50, 0x20, 0xcb,
+            0x50, 0xc8, 0x01, 0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00, 0x90, 0x02,
+            0x00, 0x98, 0x03, 0x00, 0xa0, 0x03, 0x00, 0xb0, 0x03, 0x00, 0xc0, 0x03,
+            0x00, 0xd0, 0x03, 0x00, 0x8a, 0x04, 0x04, 0x08, 0x02, 0x10, 0x27, 0x90,
+            0x04, 0x80, 0x01, 0xb8, 0x04, 0x00, 0xc0, 0x04, 0x00, 0xca, 0x04, 0x00,
+            0xf8, 0x04, 0xcc, 0x84, 0x08, 0x80, 0x05, 0x42, 0x88, 0x05, 0x00, 0xd2,
+            0x05, 0x00, 0xd8, 0x06, 0xe8, 0xb9, 0x18, 0xa0, 0x07, 0xbf, 0xba, 0xcf,
+            0x87, 0x9f, 0xf2, 0xd7, 0xba, 0x4d,
         ];
-        pb_len_field(&mut rich, 2, AT_ELEM37);
-        // 元素 9(6B 固定):真实 @ 消息在 elem37 后、@text 前携带
-        // (r25 试探;普通文本可省,疑似 @ 场景服务器要求)。
-        pb_len_field(&mut rich, 2, &[0x4a, 0x04, 0x08, 0x00, 0x40, 0x01]);
+        // v7 顺序(= N3R37 全元素):Attr → at → rest → 元素9 → elem37 → 元素16
+        // (本账号真实值 {2:"Stella",3:1,5:0,7:"AI朋友"};v6 误删元素16)。
         pb_len_field(&mut rich, 2, at_txt);
         pb_len_field(&mut rich, 2, rest_txt);
-        // 元素16(20B 照抄,真实 @ 样本链尾;{16:{2:"武舞",3:1,5:3,7:""}}):
-        pb_len_field(&mut rich, 2, &[
-            0x82, 0x01, 0x11, 0x12, 0x09, 0xe6, 0xad, 0xa6, 0xe8, 0x88,
-            0x9e, 0x18, 0x01, 0x28, 0x03, 0x3a, 0x00,
+        // 元素 9(6B 固定):真实 @ 消息携带(普通文本可省)。
+        pb_len_field(&mut rich, 2, &[0x4a, 0x04, 0x08, 0x00, 0x40, 0x01]);
+        pb_len_field(&mut rich, 2, AT_ELEM37);
+        pb_len_field(&mut rich, 16, &[
+            0x12, 0x06, 0x53, 0x74, 0x65, 0x6c, 0x6c, 0x61, 0x18, 0x01, 0x20, 0x00,
+            0x3a, 0x08, 0x41, 0x49, 0xe6, 0x9c, 0x8b, 0xe5, 0x8f, 0x8b,
         ]);
         let body_nested = pb_len_field_vec(PB_F_BODY_RICH, &rich);
         pb_len_field(&mut w, PB_F_BODY, &body_nested);
@@ -1017,6 +1037,11 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     let (wrapper_base, report_path, peer_uin, text_ptr, uid_ptr, group_code, client_seq, random) = unsafe {
         ((*ctx).wrapper_base, (*ctx).report_path, (*ctx).peer_uin, (*ctx).text_ptr, (*ctx).uid_ptr, (*ctx).group_code, (*ctx).client_seq, (*ctx).random)
     };
+    // v6 研究增补(research 构建,进程级幂等):wire 捕获钩子 —— 补丁 732A80
+    // 两个调用点,转储所有 732A80 调用的 (cmd, body)。用于抓原生路径
+    // (SnowLuma)的真实 @ wire body 与裸调形状逐字节对照。
+    #[cfg(feature = "research")]
+    crate::wirecap::install(wrapper_base, report_path);
     // random = 0 时现场生成(每消息新鲜值;真实客户端同语义,服务器不校验来源)。
     let random = if random == 0 {
         let mut t = unsafe { core::arch::x86_64::_rdtsc() };
