@@ -1072,3 +1072,65 @@ N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。
 - 纯离线轮:零注入零发送;实例 25072 存活(上轮三 DLL 驻留无活动);
 - 消费者/retCode 工作至此到达清晰边界:cb delegate 线路(排除)、
   响应分发层(全图)、任务容器层(定位)、剩余 = 任务构造与注册。
+## 2026-10-11(三十四):响应链全图闭环 —— 路由缺口根因 = patch 错层;v4 = arg5 自带回调,零 patch
+
+### 六门调用方反汇编完成(原"6 个"实为发送区限定;全量 xref ~140 处,门 = 通用 is-invocable 工具)
+- **[0x739c66](0x394B,result 处理器)全解**:签名 (this{cb@+0x10,writer=[+0]}, &ptr, &i32, box-move)。
+  result 记录 0x72a504(i32,*ptr) → {errCode@+0,resultType@+4,string@+8,f20,f30};
+  任务态字段 +0x20(串)/+0x60/+0x64(dword)/+0x80/+0xA8(byte);+0x90 向量(0x30 步长)
+  按名字串匹配 "qq-i18n-tip-msg"(0x479CDE0)取 i18n 提示;任务检查失败**不影响**门+invoke。
+  **invoke = 7 参**:[this+0x28](cb,0x10,errCode,resultType,writer=[rsi],&f20,&f30)。
+- **[0x73bd6c](0x390B,响应分发)全解**:this = 捕获块{writer@+8,**内层cb@+0x18**,flag@+0x38};
+  code 三级 fallback = box+0x40 → +0x60 → +0x64;errStr = box+0x48/+0x68;
+  **invoke = 6 参**:[this+0x30](cb,0x10,errCode,errStr,writer,&ctx+0x38串)——
+  与 r1 时代预测 (delegate,0x10,errCode,errStr,msgUid) 吻合。
+- 小调用方:0x3fb914 = 计数器[obj+0x100]++ + 门开则尾跳 [obj+0xF0](4 参 invoke);
+  0x6a7d0c = 门开+索引未超限才 invoke;0x54cdef = "门未开"谓词(xor al,1,查询不 invoke);
+  0x73ce0c = jmp 桩别名。**+584ms 单次 op4 无 invoke → 来源是谓词/收尾类,非 invoke 类**。
+
+### 决定性发现:732A80 自建响应回调,消费位置 = arg5(上层传入的内层 delegate)
+- 0x73bbf8(delegate 工厂,被 **732A80@0x732e2e** 调用):4D3588 = 0x75AF10 竞态分配器
+  包装,固定 remaining=0x10 < size 0x40 → **恒返 0 → 永远走后备分支**
+  {manager=0x73C2AA, invoker=0x73C34C};{0x73BC5C,0x73BD08} 为死分支。
+  两对 manager 的 op=2 都写 {0x72D5C8,0x72D596} —— 与 r1 manager 契约互证。
+- **0x73C34C(真 invoker)**:73bd6c 的 this = [closure] = 堆上 0x40 捕获块
+  {ctx@0, sp@8, **内层delegate@+0x18**(0x20B,0x31C5F8 移动), flag@0x38}。
+  73bd6c 门+invoke 的是**内层** delegate —— 外层 invoker 槽永不被响应路径调用!
+- **732A80 尾段(0x732dae-0x732eb9)全解**:capture{ctx(rdi), sp(rbp+0x150),
+  inner=[rbp+0x1E0]=**arg5**, flag(bl)} → 堆复制(0x73bb94 拷贝构造,0x24C0 分配)
+  → 外层 delegate {storage0=堆指针, manager=0x73C2AA, invoker=0x73C34C} →
+  **slot7 虚提交:r12=[ctx+0x60]->vtbl[+0x38](r12, &route串(ctx+0x1F0),
+  &payload_qword, &请求描述(word 0x20 标记), &token_out, &delegate)**。
+  KernelMsgService@wrapper vtbl@0x3F10458 slot7=0x320B5A → 转发
+  this+0x478 特性检查 → this+0xE0 成员 → 0x3E31BC。
+- token 语义闭环:slot7 返回 *out ^ &"msf" → perf(0x739590("perf") 是 perf 上报,
+  **非** registry;739c66/73bd6c/732A80 三处 xor &"msf" 同源)。响应侧 *arg2 = 该 token。
+- **路由缺口根因定案**:r1/r2/r3 我们 patch 的是外层 delegate 槽;manager 收到
+  clone/op4/op3(服务收尾路径:门查询+销毁)✓,但响应 invoke 走内层槽(原生
+  回调,无探针)→ 我们的 invoker 静默。裸发的响应**一直**被原生内层回调处理。
+- 容器键修正:容器 = API 路由表,键 = 复合路由串("APICaller-{} "(0x2b84d8)、
+  "{}-{} "(0x2b8650) 格式),25757ea 沿路由链逐前缀派发;值为 shared_ptr 服务对象
+  (node+0x38;3fb8=lower_bound 查找,4075=键比较,414e=try_emplace 原语)。
+  slot25(vtbl+0xC8)/2AA0D2(vtbl+0xB8) = 服务提交虚槽;4B3676(task,cmdId
+  0x93A0/0x93A1/0x950F,…) = 命令提交变体。0x3F2D4E0 =
+  "trpc.ecom.api_gateway.ApiGateway.SsoForward"(slot25 的命令名参数样例)。
+- RTTI 佐证:KernelMsgService@wrapper@nt、MsgService/SysMsgService/GuildMsgService
+  @im_core@nt、**BaseMsgWorker::SendMsgResult**(MsgScheduler lambda 签名
+  (int,string,shared_ptr<IPBMessage>) = (errCode,errStr,msg) —— 与 73bd6c invoke 吻合)。
+
+### v4 定稿(替代旧"任务构造"清单 —— 零 .text patch,消费位置正确)
+- **732A80(ctx, a2, a3, flag(r9b), response_delegate(arg5))**:arg5 = 0x20B
+  可移动 delegate(0x7333ac 传静态空回调 {0x2338,0x236a} 为证)。
+- v4 = 我们的 DLL 裸调 732A80,arg5 传自建 delegate(manager = r2/r3 已验证安全
+  的契约处理器;invoker = retCode 提取器 + FixedBuf JSONL + 文件锁)→
+  响应原生路由:服务 → 外层门(我们 manager op4 → 开)→ 0x73C34C → 73bd6c →
+  门(内层=我们的 manager)→ **invoke 我们的 invoker**(our_cb,0x10,errCode,
+  errStr,…) —— 消费者装在原生消费位。
+- 风险评估:manager 契约已三轮实测安全;invoker 只读 errStr(MSVC string SSO)
+  + 定长格式化;无容器/任务伪造,无 hook;密度纪律照旧(速率上限/不重放)。
+- 旧 v4 清单(任务布局/容器键/任务构造)被本路线**替代**,不再需要。
+
+### 状态
+- 纯离线轮:零注入零发送;实例 25072 未触碰;全部结论有反汇编地址锚点;
+- 下一步:consumer_probe.rs 改造(invoker = 6 参消费版 + arg5 注入路径),
+  现场 v4 实验(待用户批准注入)。
