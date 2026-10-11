@@ -1002,3 +1002,43 @@ N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。
   剩:响应路由到 73bd6c 的 upstream 注册。
 - 下一步:①六个门调用方反汇编定位 op=4 来源层;②182578e18 反编译找
   registry insert;③v4 = 手动注册 + 裸发(待布局确认后)。
+## 2026-10-11(三十二):cb delegate 定案 —— 非响应消费者;retCode 通道 = token registry
+
+### 决定性收敛(离线反汇编 + 三轮现场序列互证)
+- 732A80 尾段(0x732e33+)继续组装 delegate 对象(写 0x20 标记等)——
+  组装语义复杂,但结合三轮现场序列已可定案:
+- **delegate 完整生命周期(实测)**:submit 时 4 连克隆(栈→堆持久副本)
+  → 响应时 op=4 门查询(门开)→ op=3 销毁;**invoker 从未被调用**;
+- 与 g3.rs 既有注释互证:"MSF 层回调本就被 b7f6f6 置空,结果路由走
+  BaseMsgMgr token 注册表" —— **cb delegate 被当作普通 function 对象
+  搬移/查询/销毁,但响应调用的实际路径已被 732A80 内部置空**;
+- **定案:cb delegate ≠ 响应消费者。retCode 通道 = 向 BaseMsgMgr token
+  registry 注册消费者**(token/cookie → 消费者对象),即 scope 文档的
+  "消费者安装点重定位"任务本体 —— 不是 cb 块能替代的。
+
+### 今日消费者战线的完整收获(诚实盘点)
+1. **delegate 契约全解**(manager op 0/3/4 实测 + 0x72D596 反编译):
+   op=0 克隆(写 {manager, invoker} 对)、op=4 门查询(写非零即开门)、
+   op=3 销毁;布局/时序全部实测吻合;修正版 delegate 零崩溃
+   (N3R31/32/33 三轮全送达,实例存活);
+2. **排除法终局**:cb 块路线(64B 内嵌 delegate)被实测排除 ——
+   这本身是有价值的负结果(.scope 文档的"实现路径建议 1-4"中
+   "cb 即消费者"假设被否定,后续不再沿此路线投入);
+3. **门/消费者机制全图**:73bd6c(响应分发)+ [739c66](结果处理器)
+   双层,门 3fbab2/3fce5e 语义,6 个门调用方 —— retCode 最终流向
+   token registry 注册的消费者;
+4. 工具沉淀:pdata 函数边界(52.5 万函数)、PE 感知 xref、LEA 函数地址
+   扫描、sendtrace/dumpmem、mgr_call 序列观测(栈上零分配 JSONL)。
+
+### retCode 通道的剩余路径(下一工作块,纯离线起步)
+- 定位 token registry:182578e18(25757ea 与 732A80 之间的中层)反编译,
+  或 25757ea 族 9 个调用方中的注册调用;token = 发送探针时代已见的
+  i32 token_out(0x20B 面);
+- 注册调用定位后:v4 = 裸发 + 手动 registry 注册(cookie/token → 我们的
+  消费者对象 {retCode 提取 + JSONL})→ 响应闭环;
+- 该路径同时是 @ 重测的前提(需要 @ 的业务 retCode)。
+
+### 现场状态
+- 25072 存活,OneBot 正常;N3R31/32/33 全部送达;n3res7/8/9 驻留
+  (无活动线程)。今日现场探针总计:发送 ~10 次、注入 6 次、零不可逆损伤
+  (两次实例死亡分别由风控踢下线与 r1 契约错位导致,均已定案)。
