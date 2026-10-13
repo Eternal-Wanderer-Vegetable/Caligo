@@ -2,16 +2,16 @@
 
 ## Current Objective
 
-- 日期：2026-10-13（Asia/Shanghai）；计划源基线 `0f5b483`，本轮静态追查起点 HEAD `59b8146`，本次 follow-up 文档提交前 HEAD `4da7167`。恢复时重新读取当前 HEAD/status。
+- 日期：2026-10-14（Asia/Shanghai）；计划源基线 `0f5b483`，T5/observer 修正已作为后续 N4 切片提交；恢复时重读当前 HEAD/status。用户 `.agents/` harness 保留为未跟踪工作，现场原始只读证据在 local-evidence。
 - 用户请求执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)。
 - 当前 R6 已接入 HTTP POST event、正向 WS 与反向 WS；三者复用动作层/Daemon，HTTP POST quick operation 结束后再向 WS 扇出，caligod 等 POST 订阅就绪才启动 bridge 接收。离线协议合同通过；native receive projection 与真实应用矩阵尚未验收。此前 R1–R5 离线子块及详证见 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。
-- 产品仍 **NOT READY**；feat-005/006 仍 `blocked`。R2/R3 native 与 identity 门未闭合，因此 R4 不准入；本轮未对 QQ 实例发送或调用 native，也没有改变 SnowLuma 连接。
-- 本轮先完成固定磁盘 hash 的 manager op 0–3 静态映射，随后发现并修正 `73BD6C` 用户 invoker 的 5/6 参数不一致，证据与结果见 [寿命合同 §7.2–7.3](docs/research/qq-native-lifetime-contract.md#72-callback-manager-operation-dispatch-静态补充-2026-10-13) 和 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。定向回调测试 7/7 与 `init.ps1 -Mode all` 已通过。最新启动 QQ 实例经用户指定为候选测试账号，但因稳定 native identity 与 dispatcher/thread/quiescence 门未满足而未操作/发送；SnowLuma 只作参考。op=1/op=2 完整调用者/语义、当前 owner/consumer thread 与 QQ dispatcher quiescence 仍 open。
-- 本次继续静态确认 heap-fallback closure 的 0x40 分配/释放配对，并补强 `0x54CE00` assignment 中 op=1 copy/op=3 dispose 的共享接口语义；`0x3BC545C` 是 request object `+0xA0` callback-field 强候选，具体 manager table 未解析。记录见寿命合同 §7.2–7.4 和执行记录。GitNexus 1.6.12 已在 `caligo-gitnexus` Docker 容器重建 `/repo` 索引并通过 current status。接下来继续固定 hash 的 op=1/op=2 全调用点、manager 输入边界和 arena 路径静态研究；如需启动/读取 QQ 实例才能推进，先暂停并向用户说明，不自行启动。
+- 产品仍 **NOT READY**；feat-005/006 仍 `blocked`。用户已授权指定测试 QQ 实例；T1–T5 仅做固定 hash 外部只读 `observe-msf` 和受限内存扫描，没有注入、写入目标进程、调用 QQ 函数、callback invocation 或发送消息，也没有操作 SnowLuma。R2/R3 native 与 identity 门仍未闭合，R4 发信不准入。
+- 四次观测相隔 219 秒、183 秒、1274.1 秒，均确认同一目标进程代次、profile hash 与 MSFService/global-dispatcher 锚点匹配；每次 145 条线程、41 个已安装 TLS dispatcher、manager 链 2 次 visit。全局 dispatcher 对象四次都与一个线程 TLS dispatcher 项相同；`field_58_tid` 经 DWORD 修正后四次位型一致，但都不匹配目标线程，T4 对 8,874 个可访问系统线程 ID 枚举也无匹配。静态已找到 `0x31F90B0` 在 `0x217D8CC` worker-context 初始化链中设置 `arg+0x58` 当前 TID；尚未证明全局 dispatcher 是否属于 `worker+0x48` 集合或退出清理路径。原始报告与日志只在 `local-evidence/n4-r2-field-20261013-224510/`。GUI 最小化；未激活或读取聊天内容。详情见 [thread contract §11](docs/research/qq-native-thread-contract.md#11-2026-10-13-同一实例的外部只读dispatcher复采) 与 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。
+- 固定磁盘 hash 的 manager op 0–3 静态映射、`73BD6C` 用户 invoker 五参 ABI、heap-fallback 0x40 分配/释放配对及 `0x54CE00` op=1/op=3 consumer 用法见 [寿命合同](docs/research/qq-native-lifetime-contract.md) 与 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。GitNexus 1.6.12 已在 `caligo-gitnexus` Docker 容器索引 `/repo`。
 
 ## Changed Areas
 
-- Rust：bridge 回执期限与 unknown 诊断语义、response ledger timeout/tombstone 和迟到更正；OneBot HTTP/HTTP POST/正反向 WS transport、统一动作层、bounded event queues 与 POST→WS 顺序合同。
+- Rust：bridge 回执期限与 unknown 诊断语义、response ledger timeout/tombstone 和迟到更正；OneBot HTTP/HTTP POST/正反向 WS transport、统一动作层、bounded event queues 与 POST→WS 顺序合同；`caligo-cli observe_msf` 的 `field_58_tid` 改按 unsigned DWORD 输出。
 - 文档：执行记录、固定 hash callback manager 静态研究增量、wire sequence [ADR](docs/decisions/2026-10-11-wire-sequence-authority.md)、progress/feature/index/architecture 状态。
 - 测试 harness：`resident_lifecycle` 的资源快照从进程级并行污染源改为当前测试线程 opt-in 计数，L17 assertions 保留。
 - 既有 README/AGENTS/guides/skills/verification harness 等未提交改动继续保留，勿回滚或重写。
@@ -20,6 +20,9 @@
 
 - `cargo test -p caligo-core --locked --offline --target-dir target-harness` 与 R6 transport 定向测试通过；本次完整文档/工作区验证结果见 progress 与 N4 执行记录。具体限制：只属离线测试，不替代 native/QQ 回执或真实 OneBot 应用验收。
 - `cargo fmt --all` 后审阅并撤销了本范围外的纯格式化变更；保留修改仅涉及 R3 timeout/result path 与对应测试。
+- 本轮 `cargo build -p caligo-cli --locked --offline --target-dir target-harness` 通过，observer unsigned 字段修改已加载到新构建并完成 T4 只读采样；存在仓库既有 warnings，未运行 Cargo 测试。
+- 本轮提交前复验 `init.ps1 -Mode docs` PASS（9 live docs / 174 local links / 33 historical entries / 10 features）；`git diff --check` PASS，Git 仅提示现有 CRLF 规范化。Docker GitNexus 1.6.12 / Node 22.23.2 对 `/repo` 强制分析后为 18,386 nodes / 49,242 edges / 148 clusters / 459 flows，覆盖 272 files；提交前 `detect-changes --scope staged` 为 5 files / 31 symbols / 2 flows、medium risk。提交后已重建索引并确认 `status --json` up-to-date、runner/content current、无 incomplete reasons，final `detect-changes --scope all` 为 No changes detected；分析仍有流程、分支和 PDG 截断警告，缺图不证明无路径。
+- Linux Docker descriptor helper 重读计划并核对 39 个 cited paths 的 HEAD/index/worktree/untracked digest；计划 digest `sha256:7ffaf98b4b4a25f5083fa91feab3655a5dab84272dfc15a3529c467ade1dee3f`，重锚时 HEAD 为 `1b7f6147a7ee213ec070f7b795502a2e9eddab69`。已落地 R1–R6 差异按引用路径复核；`.agents/` 是保留的用户 harness。之后追加的 T5 RTTI/owner-call 文档在 progress 与执行记录中。
 - 既有完整 R1/R2/R3 sequence/R5 离线证据仍见下方历史记录；不将本次验证写成当前 callback manager ABI、线程/排空或 R4 现场通过。
 
 - 前一轮 `.\init.ps1 -Mode all` PASS，docs 9 live docs / 161 links；普通 workspace 192 passed、research workspace 226 passed；历史原始摘要 `target-harness/n4-r2-owned-join-all.log`。CPB identity follow-up 的最新完整结果见下一条。
@@ -40,7 +43,7 @@
 
 ## Blockers / Stop Conditions
 
-- 固定-hash `1DB2(pair*)` 已确认并接入未提交 pair 清理；成功提交后的 service pair 继续 resident/quarantined。`732A80` body 深复制后由 `B75029` 释放输入，未使用的 self-string clone 已删除。bridge callback image 已在共用 `leak_ctx` 门中 PIN 到 QQ 进程退出；resident generation stop 时本地关闭 callback 准入并等在途 callback 退出。QQ manager 完整 copy/move/destroy、回调/owner thread、QQ dispatcher stop/cancel/drain/quiescence 与既往 AV 仍未证。
+- 固定-hash `1DB2(pair*)` 已确认并接入未提交 pair 清理；成功提交后的 service pair 继续 resident/quarantined。`732A80` body 深复制后由 `B75029` 释放输入，未使用的 self-string clone 已删除。bridge callback image 已在共用 `leak_ctx` 门中 PIN 到 QQ 进程退出；resident generation stop 时本地关闭 callback 准入并等在途 callback 退出。T1–T5 固定-profile 外部只读观察确认 global dispatcher object 出现在一条 TLS 项；其 `+0x58` 是 `GetCurrentThreadId` 值且五次都不匹配当前目标线程。按指针-backed vector 正确布局扫描后仍无与已知 worker-context 双 vptr / 同一 object-control pair 相符的成员候选。RTTI 将析构虚表项归属为 `ThreadTaskManagerImpl`；唯一直接构造调用链为 `0xD31686 → 0x217D16C → 0x217D242`，holder 安装在外层对象 `+0x110`，但外层销毁者/析构触发仍未知。实际 callback consumer/owner、QQ dispatcher stop/cancel/drain/quiescence、完整 manager ABI 与既往 AV 仍未证。
 - CPB 相似消息没有强身份桥接，`stable_identity unsupported`；标准同步 send 不得返回 `ok`，AcceptedUnconfirmed/unknown 不重发。
 - R5 core/store 已装配到 AccountActor 事件接收与 Daemon `StoreReader`；普通 caligod HTTP、HTTP POST event、正向/反向 WS 已接动作层，群 send 等强回执及持久消息 ID，私聊目标明确 unsupported。HTTP POST 快速操作结束后才向 WS 扇出；transport 队列有界。native bridge 当前 projection 是 `None`，实际 CPB 接收仍不产生该索引；真实应用互通、私聊映射与消息身份仍未完成。
 - R4 只有在 R1–R3 全门完成、当次合同与新现场准入明确后才可开始；当前不满足。
@@ -48,9 +51,9 @@
 ## Next Restartable Steps
 
 1. 读 [AGENTS](AGENTS.md)、[progress](progress.md)、本记录及上述执行记录；确认当前 status/diff，保留所有脏 harness 文件。
-2. 继续固定 `wrapper.node` 的 R2 静态调用者/lifetime 调查；op=1/op=3 assignment consumer 证据与 `+0xA0` callback-field 候选已记入 §7.4，具体 manager table 与 op=2 完整合同/调用点、arena 分支仍需证据。owner/consumer 的当前实例线程身份、QQ dispatcher 运行态 stop/cancel/drain/quiescence 或历史 AV 若需要启动/读取 QQ 实例，先暂停并向用户说明，不自行启动。
+2. 继续固定 `wrapper.node` 的 R2 静态调用者/lifetime 调查；`0x31F90B0` 已定位为 `+0x58` 当前 TID writer，`0x217D8CC` 经 `0x31F83DC` 从 `worker+0x48` 的 pointer-backed vector 取 pair。T1–T5 确认 global dispatcher object 同时存在于一条 TLS 项，但 T5 对全部可读映射的 vector-owner 复核未找到满足已知双 vptr 与同一 object/control pair 的成员候选；membership 保持 unknown，不把有限扫描作为否定证明。已确认析构虚表属于 `ThreadTaskManagerImpl` 且会清理该 shared-pair vector；factory `0x217D16C` 构造 manager 后，`0xD31686` 将 holder 装入外层 `+0x110`，多个调用者中包括 `0xB81758` 的 global-send 初始化近邻；尚未定位外层析构/退出调用。`+0x58` 与真实 `GetCurrentThreadId` IAT 对应，五次均无当前目标线程匹配。下一步查 manager 外层对象销毁 owner、op=1/op=2 完整调用合同及 manager table 身份；consumer 线程与 stop/cancel/drain/quiescence 仍未证。T5 与 RTTI/vtable 证据写入 thread contract §12。用户 QQ 授权支持合同内受控只读观察，不越过 R1–R3 门做 R4 native send。
 3. R3 强 native identity 仍 unsupported；重复/相同 CPB 行歧义 fixture 已确认不会消费 pending sends，缺稳定 ID/发送者映射的 CPB 记录现在不会伪造事件，不通过真实 QQ 实验绕过。
 4. R2 callback manager/owner-thread/dispatcher quiescence 和历史 AV 根因继续未闭合；若 AV 再现，先保留 dump、异常地址和线程栈。
 5. 从固定-hash CPB/native record 继续研究稳定 native ID 与 sender UID→UIN 的证据来源；当前 decoder 缺这两项，不能靠序号或文本补身份。
 6. R6 HTTP POST event、正向 WS、反向 WS 的离线合同已实现并测试；剩余是 native projection/私聊身份、真实 OneBot 应用收发/get_msg/慢连接矩阵。先完成 R2/R3 准入缺口；不以合成投影替代现场数据，也不绕过 R4 前置条件。
-7. `git diff --check`、文档检查和本次适用的离线验证；R2/R3 ABI/身份准入门完成前不开始 R4，不恢复旧 PID/旧 hook。
+7. `git diff --check`、`init.ps1 -Mode docs` 与 Docker GitNexus current-index 检查；R2/R3 ABI/身份准入门完成前不开始 R4，不恢复旧 PID/旧 hook。

@@ -2,10 +2,10 @@
 
 ## Current State
 
-**Last Updated:** 2026-10-13（Asia/Shanghai）
+**Last Updated:** 2026-10-14（Asia/Shanghai）
 **Baseline commit:** `0f5b483`；本次静态追查起点 `59b8146`，保留既有未跟踪 harness 文件。
-**Active Feature:** 本轮继续 R2 固定 hash callback manager 静态调查：已补强共享 16 字节 wrapper 的 op=1/op=3 consumer 用法，并确认一个 request-object callback-field 候选；具体 manager table、op=1/op=2 完整调用合同与所有调用点、owner/consumer thread、QQ stop/cancel/drain/quiescence 与旧 AV 根因仍开放。N4-R3/R5/R6 离线子块保持此前状态，CPB 稳定身份仍 unsupported；feat-005/006 仍 blocked，R4 不准入。
-**Scope:** 在 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md) 范围内继续关闭有固定 hash 磁盘证据支持的 R2 静态问题；不启动 QQ，不越过原生生命周期和现场准入门。
+**Active Feature:** N4-R2。用户已授权使用指定测试 QQ 实例；同一固定 profile 已完成五次外部只读 `observe-msf`。五次全局 dispatcher 对象都命中一条线程 TLS 项，`+0x58` DWORD 位型归一后相同且不匹配目标线程；T4 可访问系统线程枚举亦无匹配，静态 IAT 证实该字段读取 `GetCurrentThreadId`。修正 collection 的 pointer-backed vector 布局后，T5 全可读映射扫描未找到匹配已知 worker-context 双 vptr 与同一 shared pair 的成员候选，故 membership 仍 unknown。callback consumer、manager 完整 ABI、退出/迁移与 stop/cancel/drain/quiescence、旧 AV 根因未闭合。R3 stable native identity 仍 unsupported；feat-005/006 仍 blocked，R4 发信门未满足。
+**Scope:** 在 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md) 范围内，对指定实例完成五次固定 hash 的外部只读校准及受限只读内存取证；零注入、零目标写入、零 QQ 函数调用、零消息发送、零聊天打开，SnowLuma 未操作。R1–R3 完成门未满足，不执行 R4 native send。
 
 ## 当前产品验收边界
 
@@ -32,7 +32,8 @@
 - R3 使用 core journal 作为常驻候选 wire sequence authority，见 ADR；CPB 只有弱文本候选，stable identity unsupported，同步 send 不能返回成功。
 - CPB identity follow-up 移除了 `cpbseq:{seq}` 伪 native ID。当前 decoder 不产生稳定 native ID 或 sender UID→UIN 映射；缺少这些证据时只计 `identity_blocked`，不向 resident 事件流发布。定向 gate 1/1 与 `init.ps1 -Mode all`（default 191/191、research 227/227）通过；详见 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。这关闭伪身份入口，不关闭 receive/OneBot 功能或 R4 门。
 - R5 core/store 子块现已接入：数值 account 的 Daemon 打开 sibling MessageStore；AccountActor 在 journal 后、ACK 前持久化显式 OneBot projection，重启时幂等重建索引，Daemon `StoreReader` 与 OneBot `get_msg` 共用该索引。普通构建 `caligod` 的 loopback HTTP、HTTP POST events、正向/反向 WS 共用动作层和 Daemon；HTTP POST quick operation 完成后才扇出到 WS，订阅者队列有界。标准群发送只在强 native 回执及匹配的持久 OneBot ID 均可读后成功，私聊映射未证时明确 unsupported。`daemon_client` 当前仍提供 `None` projection，不能声称 native receive 可查询；真实应用互通、私聊 peer UID 映射与稳定身份未完成，feat-006 仍 blocked。
-- R4 现场完成门不满足；保留最新现场硬停、钩子路线否决、旧实例不可复用。
+- 2026-10-13 用户授权后，在本机指定测试实例上运行四次 `caligo-cli observe-msf`；observer 仅 `QUERY_INFORMATION | VM_READ`，原始报告与日志保存在 `local-evidence/n4-r2-field-20261013-224510/`。四次均为同一进程代次、固定 `wrapper.node` SHA-256 匹配、MSFService 锚点匹配、TLS index 有效、145 条线程中 41 条装有同一 dispatcher vtable、manager 链各观察到 2 次 visit。global dispatcher 地址四次均匹配一个线程 TLS dispatcher 项。observer 的 `field_58_tid` 从 `i32` 改为 `u32` 后完成 T4 复采；DWORD 位型四次一致，均不匹配目标线程，T4 的 8,874 个可访问系统线程 ID 枚举也无匹配。静态已定位 `0x31F90B0` 写入 `arg+0x58`，但 worker 集合归属及退出清理仍未证。没有调用 callback 或 native send；consumer 执行线程、stop/cancel/drain/quiescence、R3 identity 与历史 AV 仍开放。
+- R4 现场完成门不满足；本轮只完成外部只读校准，没有注入/发送。保留最新现场硬停、钩子路线否决、旧实例不可复用。
 - 部分 research/profile 文件仍有“实现未开始/阻塞 retCode”等旧描述。
   [docs 索引](docs/README.md) 指向后续台账；历史原文保留，能力 gate 未自动升级。
 - 历史 research 全仓首次检查出现 bridge lib `STATUS_ACCESS_VIOLATION (0xc0000005)`；原始日志只显示前两项 `asyncrun` 测试通过，未留下故障线程/地址。本次单独复跑 research bridge lib 串行 69/69、默认并行 69/69 均通过，结果不能解释或关闭历史失败；未找到对应 WER、匹配 dump 或可用 `cdb`/`procdump`。本轮发现一份更早的 local-only QQ Crashpad dump，文件头为 `0xE06D7363`（C++ exception），无证据表明它对应 research AV，故不用于归因；`0xc0000005` 继续作为稳定性 blocker。
@@ -59,6 +60,12 @@
 | 检查脚本语法 | `node --check scripts/check-docs.mjs` | 通过 |
 | 上游结构审计终验 | `node .agents/skills/harness-creator/scripts/validate-harness.mjs --target .` | 100/100，五类结构各 5/5；未做 agent 成功率对照实验 |
 | 差异检查 | `git diff --check` | 通过；Rust 和历史记录无差异 |
+| N4-R2 observer DWORD 读取 | `cargo build -p caligo-cli --locked --offline --target-dir target-harness` | 通过；`field_58_tid` 改用 `u32`，T4 只读复采成功；保留已有 warnings，未运行测试 |
+| 2026-10-13 N4 文档门 | `.\init.ps1 -Mode docs` | PASS：9 live docs、172 本地链接、33 个历史入口、10 个 feature |
+| 2026-10-13 差异门 | `git diff --check` | PASS：observer unsigned DWORD 与本次维护文档改动 |
+| 2026-10-13 Docker GitNexus | `gitnexus analyze --force --index-only --pdg`; `status --json`; `detect-changes --scope all` in `caligo-gitnexus` | final status up-to-date，runner/content current，无 incomplete reasons；detect 命中 5 个预期文件与 2 条 observer flow，risk medium 来自全工作树范围；原始状态与检测输出在忽略日志 |
+
+本轮 GitNexus 仍报告 callable-flow 候选超 cap、536 个入口候选中 336 个未入流程、902 个 callee 分支跳过、14 次 walk 达预算，以及局部 REACHING_DEF/CDG 缺口；因此缺失边或 flow 不作为“没有调用”的证据。
 
 本机原始输出保存在被忽略的 `target-harness-verification.local.md`、
 `target-harness-bridge-diagnostic.local.md` 与 `target-harness-research-recheck.local.md`。
@@ -77,7 +84,7 @@
 
 ## Next / 下一工作入口
 
-按 [会话交接](session-handoff.md) 继续核对 callback manager/thread/drain 与历史 AV 证据，并从固定-hash CPB/native record 研究稳定 native ID 和 sender UID→UIN 映射。R5 core/store/普通 HTTP listener 已有离线证据；R6 event/WS transport 与真实客户端矩阵仍待办。强 identity 与现场生命周期门未满足前不开始 R4。旧实例、旧钩子和旧 unknown 请求均不能作为继续实验或自动重发的入口。
+按 [会话交接](session-handoff.md) 继续固定-hash callback manager op=1/op=2 调用合同、global dispatcher 对 worker 集合归属与 `field_58_tid` 生命周期证据，并从 CPB/native record 研究稳定 native ID 和 sender UID→UIN。R5/R6 离线接线已有证据，真实应用矩阵仍待办。R1–R3 与 stop/cancel/drain/quiescence 门未满足前不进行 R4 发信；unknown 不重发，SnowLuma 保持不触碰。
 
 ## 2026-10-11 N4 响应恢复执行
 
@@ -135,3 +142,15 @@
 - 固定 hash 上确认共享 16 字节 wrapper assignment helper 的 op=3 destination cleanup、op=1 source copy 和调用方 source disposal；另确认 `0x3BC545C` 从 request object `+0xA0` 复制 callback-field 候选后传入下游。详见 [寿命合同 §7.4](docs/research/qq-native-lifetime-contract.md#74-callback-manager-consumer-callers-follow-up2026-10-13静态) 与 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。候选对象具体 manager table 未解析，op=2 完整调用者/合同仍 open；有限 direct-call scan 不构成完整 xref。
 - GitNexus 已改在专用 Docker 容器中运行：CLI 1.6.12 / Node 22.23.2 Linux x64。提交前的工作树索引在 HEAD `4da7167` 上 status up-to-date、runner/content current、无 incomplete reasons；文档提交后再次刷新，最终索引也匹配提交后的 HEAD，`status --json` up-to-date、final `detect-changes --scope all` 为 No changes detected。`drain_responses` 仓库调用者定位为 4 个测试 + 1 个生产侧 adapter 调用，已与 `rg` 核对；图本身有流程截断，不对缺失边作否定推断。
 - 仅更新研究/状态文档，未运行 Cargo 测试、未调用或读取 QQ，没有更改 SnowLuma 连接。R2 原生 manager / thread / quiescence 和历史 AV 仍未闭合；R4 不准入、feat-005/006 保持 blocked、产品 NOT READY。
+
+## 2026-10-14 N4-R2 dispatcher owner T5 只读复核
+
+- 第五次 `observe-msf` 绑定既有测试进程代次和 profile hash；145 个线程、41 个 TLS dispatcher，全局 dispatcher 指针仍命中一条 TLS 项。五次 `+0x58` 原始 DWORD 位型相同且均不匹配目标线程；T4 对 8,874 个可访问系统线程枚举也无匹配。
+- 固定 profile 静态核验：`0x7879D0` IAT → `GetCurrentThreadId`；`.pdata` 起点解码覆盖 525,291 个函数范围 / 18,889,360 条指令；`0x217D8CC` 遍历 `worker+0x48` pointer-backed 16-byte pair collection 并设置当前 TID；`0xB7CE8A` 通过 singleton shared pair 提交 outbound task。
+- T5 只读扫描 2,274 个可读提交 region、每轮约 901 MB，出现 3 次局部读取不足。纠正内联数组假设后，未找到符合固定 worker-context 双 vptr、vector 项、同一 global object/control block 的精确成员候选；归属与生命周期继续 unknown。原始证据在 `local-evidence/n4-r2-field-20261014-000619/`，脱敏摘要 `summary-t5-redacted.json`；详情见 [thread contract §12](docs/research/qq-native-thread-contract.md#12-2026-10-14-r2-global-dispatcher-owner-只读复核) 与 [执行记录 T5](docs/execution/2026-10-11-n4-response-recovery.md)。
+- 没有注入、目标进程写入、QQ 函数调用、callback invocation、发送、打开聊天或操作 SnowLuma。R2 owner/consumer/manager/quiescence 与历史 AV、R3 stable identity 均未闭合；R4 不准入，feat-005/006 blocked，产品 NOT READY。未运行 Cargo 测试。
+- 新增固定-hash RTTI/vtable 证据：`.rdata` RVA `0x4260448` 的 `ThreadTaskManagerImpl` vtable 含 `0x217DD98` 析构项；析构链最终遍历 shared-pair vector 并释放缓冲。仅确认 manager 类存在清理实现；owner、析构触发、线程退出顺序与 callback drain 仍未知。
+- `.pdata` xref 映出 `0x217D242` 构造函数仅由 `0x217D16C` 直接调用；factory 创建 0xF0 字节 manager 并包入 shared holder。`0xD31686` 将 holder 安装至自身 `+0x110` 后调 `0x217D58C`，且全局发送初始化近邻 `0xB81758` 是其多个直接调用点之一；对象销毁 owner/退出触发/drain 仍未知。
+- 精简静态分析摘要写入忽略的本机证据 `local-evidence/n4-r2-field-20261014-000619/summary-r2-manager-static-redacted.json`；wrapper 哈希固定，真实会话/QQ 二进制仍不入库。
+- 本轮文档门通过：`init.ps1 -Mode docs` 为 9 live docs / 174 local links / 33 historical entries / 10 features；`git diff --check` exit 0（仅有仓库既有 LF→CRLF 提示）。提交前 Docker GitNexus 1.6.12 / Node 22.23.2 对 272 个文件强制重建为 18,386 nodes / 49,242 edges / 148 clusters / 459 flows；`detect-changes --scope staged` 为 5 files / 31 symbols / 2 observer flows、medium risk。提交后 Docker 索引匹配 HEAD 且 `status --json` up-to-date、runner/content current、无 incomplete reasons；final `detect-changes --scope all` 为 No changes detected。索引仍报告 33 个 callable-flow 候选超 cap、336/536 entrypoint candidates 未入 flow、902 callees 被跳过、14 次 walk 达预算及局部 REACHING_DEF/CDG 缺口；缺失关系不作为无调用证明。未运行 Cargo tests。
+- 在 T5 文档追补前通过 Docker Linux descriptor helper 重读 schema-2 计划：plan digest 仍为 `sha256:7ffaf98b4b4a25f5083fa91feab3655a5dab84272dfc15a3529c467ade1dee3f`、39 个 cited paths；当时 HEAD 为 `1b7f6147a7ee213ec070f7b795502a2e9eddab69`。所有引用路径均重新哈希并与计划 manifest 比对；已落地的 R1–R6 离线实现差异已核对，新增 `.agents/` harness 识别为用户未跟踪工作并保留。该记录为该时点快照，后续 T5 文档改动列在本节。

@@ -380,8 +380,8 @@ struct GlobalDispatcherReport {
     vptr_rva: Option<u64>,
     vptr_module: Option<String>,
     slots: Vec<String>,
-    /// dispatcher+0x58 的 owner TID(31F88EA 跨线程判定字段)。
-    field_58_tid: Option<i32>,
+    /// dispatcher+0x58 的 owner TID 原始 DWORD(31F88EA 跨线程判定字段)。
+    field_58_tid: Option<u32>,
     /// dispatcher+8 的内联 pair(队列对象)。
     field_8_pair: Option<u64>,
 }
@@ -485,6 +485,9 @@ impl Observer {
     fn i32(&self, addr: u64) -> Option<i32> {
         unsafe { rpm::<i32>(self.handle, addr) }
     }
+    fn u32(&self, addr: u64) -> Option<u32> {
+        unsafe { rpm::<u32>(self.handle, addr) }
+    }
     fn hex(&self, addr: u64, len: usize) -> String {
         use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
         let mut buf = vec![0u8; len];
@@ -560,7 +563,7 @@ fn observe(pid: u32, planted_idx: Option<u64>, self_test: bool) -> Result<Observ
                     vptr_rva: vptr.checked_sub(base).filter(|r| *r < 0x800_0000),
                     vptr_module: obs.module_of(vptr).map(|m| m.to_string()),
                     slots: obs.vtable(vptr, 8),
-                    field_58_tid: obs.i32(obj + 0x58),
+                    field_58_tid: obs.u32(obj + 0x58),
                     field_8_pair: obs.q(obj + 8),
                 })
             }

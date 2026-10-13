@@ -149,12 +149,12 @@ RTTI（文件级 COL 解码，`dump-p1-vtables.py` 输出 `p1-vtable-dump.json`�
 ### 10.2 dispatcher 类：两类提交目标同源 [live+static 交叉闭合]
 
 - **TLS 提交目标**（index=44，D32DAD 持有）：145–150 线程中 **41 个已安装**，全部指向**同一 vtable RVA `0x43B6088`**；slot0 = **`0x31F8CEE`**（真函数起点）。
-- **发送链全局 dispatcher**（`0x67510A8`）：**同一 vtable `0x43B6088`**，slot0 同为 `0x31F8CEE`。**发送与接收提交的是同一个类的两个实例**：发送用全局单例，接收结果处理用调用线程自己的 TLS 实例（§3/§4 的推断就此定版）。
+- **发送链全局 dispatcher**（静态 shared pair 位于 `0x67510A0`，对象 qword 是 `+8 = 0x67510A8`）：**同一 vtable `0x43B6088`**，slot0 同为 `0x31F8CEE`。发送路径经全局 singleton；接收路径代码读取调用线程 TLS 中的同类 dispatcher。T1–T5 五次现场报告里，全局对象地址都与一条 TLS dispatcher 项完全相同，因此本 profile 中不能再断言两条路径必为不同实例。该 TLS 项是否就是回调 consumer 仍未知。
 - 类合同（phaseH/I 反编译）：ctor `0x31F878C`（写 vtable，`+8` 存 {内部队列对象, 弱 pair}，弱计数获取）；slot0 `0x31F8CEE`（锁 `+8` pair → 转交 `0x31F88EA`）；`0x31F88EA` = 入队 + **owner TID 自检**（当前 TID vs 对象 `+0x58`，跨线程走显式唤醒路径 `0x217DE40`）。
 - **执行器单例 `0x750088` 现场未构造**（三次采样 vptr=None）——R2 §5 的 Core executor 单例不在本实例运行路径上；41 个 TLS dispatcher 与它无关（§5 的"关系 unknown"就此关闭：无关系）。
 - **MSFCoreService getter `0x74203C` 未被调用**（`+0x674D3E8` 槽为空）——运行时 switch 实际选择了 MSFService。首个运行时分支证据。
 
-### 10.3 发送/接收完整拓扑（闭合版）
+### 10.3 发送/接收静态拓扑与现场边界
 
 ```
 发送: 732A80 ─ this+0x60 (transport vtbl 0x41403B8)
@@ -163,20 +163,60 @@ RTTI（文件级 COL 解码，`dump-p1-vtables.py` 输出 `p1-vtable-dump.json`�
                 └ slot0 0x31F8CEE ─ 0x31F88EA 入队(+8 pair) + 跨线程唤醒
 接收: 1B41AE6 ─ 1B3F740 ─ D32D98(本线程 TLS, index 44) ─ 同类 dispatcher(0x43B6088)
                 └ slot0 0x31F8CEE ─ 同上入队
-回调: 出队线程执行 → 73bd6c → 用户 invoker —— 即"QQ 自己的 worker 线程",
-      不是提交线程,不保证恰一次;与提交者并发。
+回调: 静态调用路径为 dispatcher consumer → 73BD6C → 用户 invoker；现场尚无 native
+      callback invocation，具体 consumer TID、该 TLS 项角色与恰一次性均未确认。
 ```
+
+T5 的精确对象地址同时出现在一条 TLS dispatcher 项中；worker collection 的归属需按其指针-backed vector 布局另行验证，不能从类身份或 TLS 命中推出。
 
 ### 10.4 对 Caligo 合同的修订约束（取代 §8 中相应条款）
 
-1. [原 §8.1] 提交目标不再是纯推断：**发送 → 全局 dispatcher 实例；接收 → 提交线程 TLS 实例**。自有 adapter 在 QQ 拥有的线程上执行时，两条路径的语义已可核对；"任意线程可调用"仍然不被证明——worker 上下文（安装 TLS 的那 41 线程）之外的提交行为仍未证。
+1. [原 §8.1] 静态发送路径提交到全局 singleton；接收路径读取当前线程 TLS 中的同类 dispatcher。现场 T1–T5 显示全局对象也出现在一条 TLS 项里，因此对象是否分离及该项用途仍未知。自有 adapter 在 QQ 拥有的线程上执行时，两条代码路径可核对；worker 上下文之外的调用行为仍未证。
 2. [新] transport slot7 在**未连接时同步返回 0 且 token=0**——这是可依赖的失败信号（原生层可探测"会话未就绪"而无需发送）。
 3. [新] 状态检查点：内联连接对象 vtable `+0x30` 的状态值（`4/5` 为可提交态）可作为原生 ready 证据的一部分（仍需与 session-ready 门联合判定）。
-4. [新] callback 线程 = dispatcher 消费线程（QQ worker 池），与提交者并发——R2 §3"复制后异步"的约束维持并升级为实证背景。
-5. 仍未闭合（记录在案，不阻塞 P2 的合同冻结）：dispatcher 消费侧（出队→执行的线程池关系）；MSFService+0x60 的最后一条 store；stop/cancel/drain 路径；b78d06 token 的语义（回执关联候选）。
+4. [新] 静态 callback 路径从 dispatcher consumer 执行用户 invoker，可与提交者并发；本轮没有现场 callback invocation，具体消费线程仍未知。
+5. 仍未闭合：dispatcher 消费侧（出队→执行的线程池关系）；MSFService+0x60 的最后一条 store；stop/cancel/drain 路径；b78d06 token 的语义（回执关联候选）。
 
 ### 10.5 R3.1 证据索引
 
 - 观测报告：`docs/execution/2026-10-08-native-contract-recovery/evidence/p1-observe-field-47524-t{1,2,3}.json`（工具 `crates/caligo-cli/src/observe_msf.rs`，提交 6f85350+）。
 - 静态导出：phaseH（30 函数：1b4e4ec/b7ce8a/b7c6c0/31f8cee/31f878c 等）、phaseI（b816e8/31f88ea 等）、phaseJ（b81748）；`E:/stella/_reference/qq-native-r3-p1-20261008/`。
 - 字节级：transport/dispatcher vtable rip-scan（构造/析构唯一性）、`.pdata` 函数起点验证、`b7c6c0` 的 .rdata vtable 归属。
+
+## 11. 2026-10-13 同一实例的外部只读 dispatcher 复采
+
+用户授权后，对其指定的最新独立测试 QQ 实例做四次 `caligo-cli observe-msf --pid <local-only> --out <local-evidence>`。目标进程的父/创建时间、窗口句柄和 `wrapper.node` 已加载路径在首次采样前复核；第四次采样前再次核验 PID、进程创建时间、加载模块路径和磁盘 hash。四次均绑定同一代次，磁盘 SHA-256 与字节数匹配本 profile 冻结值。窗口最小化，未激活、未打开聊天或读取聊天正文。observer 源码合同只申请 `QUERY_INFORMATION | VM_READ`，所有输出写本机 local-evidence；没有注入、写入目标进程或调用 QQ 函数。
+
+四次采样间隔为 219 秒、183 秒、1274.1 秒，均有以下结果：
+
+| 字段 | 观测 | 边界 |
+|---|---|---|
+| MSFService | vptr 锚点命中；MSFCoreService 未构造 | 当前对象形状与既有 profile 相符，不证明业务 send ready |
+| dispatcher | global vptr `0x43B6088`；TLS index 有效 | 与静态 R3.1 vtable 身份一致 |
+| 线程/TLS | 每次观察 145 条目标线程、41 个已安装 TLS dispatcher，vptr 单一；global dispatcher 的对象地址四次都与一条线程的 TLS dispatcher 项完全相同 | 证明该对象在采样时安装于一个线程 TLS；不能据此认定该线程执行 callback 或代表 worker 集合成员 |
+| manager | 每次遍历到 2 个链节点 | 不证明 manager table / op ABI / stop 行为 |
+| global dispatcher `+0x58` | 四次读到相同 32 位位型；均不匹配目标进程线程。T4 将 observer 读取改为 `u32` 后，又与 8,874 个可访问系统线程 ID 比对，仍未匹配 | T1–T3 JSON 曾按 `i32` 显示负数；按原始 DWORD 位型重解释后与 T4 相同。字段当前 owner 语义及有效线程均未证，不能按 owner 已确认准入调用 |
+| Core executor 单例 | 锚点未命中/未构造 | 与 profile `not_in_play` 记录一致 |
+
+T4 采样前将 `GlobalDispatcherReport.field_58_tid` 从 `Option<i32>` 改为 `Option<u32>`，以保存 Windows DWORD 原值；`cargo build -p caligo-cli --locked --offline --target-dir target-harness` 通过。T1–T3 的原始 JSON 未改；本机脱敏汇总按同一 32 位位型对齐四次数据。四次都未发现 `field_58_tid` 与目标线程匹配；T4 的系统线程比对限定于当时可访问进程共 8,874 个线程 ID，不等同于完整 OS 内核视图。
+
+没有 callback 进入、slot enqueue/drain 或 terminal ledger 事件，因为没有 native invocation。四次复采不能关闭 dispatcher stop/cancel/drain/quiescence，也不能确认 callback consumer TID；`+0x58` 的现场值与静态 writer 语义之间仍有矛盾，不能猜字段已失效或自动替代静态合同。原始报告、CLI 原始日志、目标标识与完整线程 ID 只保存在 `local-evidence/n4-r2-field-20261013-224510/`，不入库。R2 及 R3 identity 门仍 open；不构成 R4 发信准入。
+
+针对该值的静态交叉检查找到一个 writer：`0x31F90B0` 调用 `0x7879D0` 取得当前 TID，并写入 `arg+0x58`。它的已导出调用者 `0x217D8CC` 在初始化 worker context 时循环 `worker+0x48` 集合（计数来自 `worker+0x2C`），对 `0x31F83DC` 返回的每个对象调用该 setter。`0x31F878C` 构造函数只写 dispatcher vptr 和 `+0x08/+0x10` pair；`0x31F88EA` 读取 `this+0x58` 并与当前 TID 比较，本身不写。现场发现 global dispatcher 对象与某线程 TLS dispatcher 项相同，证明对象进入过/处于 TLS 安装路径；尚未证明它是否属于 `worker+0x48` 集合，也未找到线程退出时清零/迁移该字段的路径。导出有限，不能推断全 binary 其它 writer 不存在。下一项仍是证明集合成员身份、查退出清理语义与 op=1/op=2 完整合同。
+
+复核原有 PID 47524 的三份 P1 报告时，global dispatcher `+0x58` 在 t1/t2 为零，t3 为非零但也没有匹配报告中的线程 TID。该历史样本说明这个字段的可见值会变化；当时的报告没有闭合其 owner 生命周期。本轮三次同值非零和线程清单不匹配与之并列保留，不将两组进程样本拼成一条生命周期证明。
+
+## 12. 2026-10-14 R2 global dispatcher owner 只读复核
+
+同一指定 QQ 进程完成第五次 `observe-msf` 采样 T5；PID、创建时间、加载路径与 profile hash 在采样/复核期间匹配。SnowLuma 保持原连接状态。没有激活 QQ 窗口、打开聊天、注入、写目标进程、调用 QQ 函数或发送消息。
+
+- T5 再次得到 145 条目标线程、41 个同 vptr TLS 项；全局 dispatcher 对象在一条 TLS 项中精确命中。T1–T5 的 `+0x58` DWORD 位型一致，均不属于各次 145 条目标线程；T4 当时对 8,874 个可访问系统线程 ID 的枚举也无匹配。
+- 固定 hash 的静态 import 表确认 `0x7879D0` 经 IAT 调用 `KERNEL32!GetCurrentThreadId`。函数起点 `.pdata` scan 覆盖 525,291 个函数范围、18,889,360 条指令；`0x217D8CC` 使用 `worker+0x2C` 计数，调用 `0x31F83DC` 从 `worker+0x48` 的指针-backed collection 取 `{object, control}` 16-byte pair，再调用 `0x31F90B0` 写当前 TID。发送侧 `0xB7CE8A` 调用 singleton getter `0xB816E8`，使用静态 pair 的 `+8/+0x10` 并增加 control 强引用，然后交给 `D32138`。
+- 曾按内联数组布局找到一条表面候选，随后检查 `0x31F83DC` 发现 `+0x48` 实际经首 qword 指向独立元素数组；内联候选已作废。按正确 stride 搜索全部可读提交映射后，未找到同时满足固定 worker-context 双 vptr、vector 元素地址、全局对象与相同 control block 的候选。扫描覆盖 2,274 个 region、每轮约 901 MB，出现 3 次局部读取不足；因此 collection membership 仍为 unknown，有限可读扫描不作为全内存否定证据。
+- 该现场结果收窄为：全局对象在一个 TLS 项中；`+0x58` 是真实 Windows TID，五次采样都没有当前活动线程匹配；全局对象是否属于 `worker+0x48` collection、TLS 项是否承担 callback consumer、线程退出/迁移及 stop/cancel/drain/quiescence 仍未闭合。没有 native invocation，因此没有 callback-enter/enqueue/drain 证据。
+- 原始 T5 observer、只读扫描和地址映射验证均保存在本机 `local-evidence/n4-r2-field-20261014-000619/`；脱敏计数见 `summary-t5-redacted.json`，新增 RTTI/manager caller 静态摘要为 `summary-r2-manager-static-redacted.json`。之前四次原始报告及现场范围记录留在 `local-evidence/n4-r2-field-20261013-224510/`。
+
+R2 owner/consumer/lifetime 与历史 `0xC0000005` 根因仍开放；R3 stable identity 与 sender UID→UIN 仍未闭合。R4 的 R1–R3 准入门未满足，本次没有执行原生发送。产品状态继续 NOT READY。
+
+- 固定 hash 的 `.rdata` 虚表在文件偏移 `0x425EC48`（RVA `0x4260448`）含 `0x217DD98` 函数项；前置 Complete Object Locator 的 TypeDescriptor 名为 `.?AVThreadTaskManagerImpl@internal@xpng@@`。该类析构路径为 `0x217DD98 → 0x217D4FA → 0x217D556 → 0x31F8372 → 0x14830`；末端遍历 shared-pair vector、逐项调用 `0x1DB2`，再以 16-byte 元素数调用 `0x1FD0` 释放缓冲区。这确认 manager 类存在该清理实现，但没有证明谁销毁对象、析构如何触发、线程退出关系、停机等待或异步 callback quiescence。
+- `.pdata` 全函数范围 xref 进一步确认 `0x217D242` 写入该双 vptr，是 `ThreadTaskManagerImpl` 构造函数；唯一直接构造调用点为 `0x217D16C`。后者分配 `0xF0` 字节对象、调用构造函数，再经 `0x217D35E` 建立 shared holder。`0xD31686` 调用该 factory，将 holder 转入自身 `+0x110`，再调 `0x217D58C`；其多个直接调用者包括全局发送初始化邻近路径 `0xB81758`。这些路径把 manager 实例与 holder/外层对象字段联系起来，但没有定位其销毁者，也未证明退出时执行析构或 callback drain。
