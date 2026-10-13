@@ -255,3 +255,11 @@ feat-005 / feat-006 保持 blocked，整个项目保持 NOT READY。
 - 另补固定-hash RTTI/vtable 交叉核验：`.rdata` RVA `0x4260448` 的 `ThreadTaskManagerImpl` vtable 含 `0x217DD98` 析构项；其链 `0x217DD98 → 0x217D4FA → 0x217D556 → 0x31F8372 → 0x14830` 逐项释放 shared pair 并释放 vector buffer。仅证明该类有清理实现，不证明 owner 调用/析构注册、线程退出触发、stop 顺序或 drain/quiescence。
 - `.pdata` xref 确认构造函数 `0x217D242` 的唯一直接调用者是 factory `0x217D16C`；它分配 0xF0 字节 `ThreadTaskManagerImpl` 并建 shared holder。`0xD31686` 把 holder 放入自身 `+0x110` 后调用 `0x217D58C`；全局发送初始化近邻 `0xB81758` 是 `0xD31686` 的多个直接调用点之一。尚未找到这些外层对象的析构路径或 QQ callback drain。
 - 其后对 `0x217D58C` 的定向反汇编显示：该启动方法按 manager 配置数构造 task 并填入 `ThreadTaskManagerImpl+0x48`；`0x217D8CC` 遍历同一 task vector 设置每个 dispatcher 的 TID，析构路径逐项 release 并释放 vector buffer。此前 T5 记录的 `worker+offset` 是暂定反汇编变量名，现按 RTTI class 修订为 `ThreadTaskManagerImpl this+offset`。此补充闭合该类内部 task vector 的构造/遍历/清理静态合同，但仍不证明 global dispatcher 是成员、外层 owner 会何时析构或 callback 已 drain。
+
+### 2026-10-14 R2 manager op=4 与 op=2 调用位置扩展（静态）
+
+- 复核冻结磁盘 `wrapper.node` 的 SHA-256 为 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。相对跳表 `0x3F7052C`/`0x3F70540` 相距 `0x14`；两者 `+0x10` 的 op=4 分支分别到 `0x73BCB0`/`0x73C309`，都清零第五参数指向的 qword。此处确认了已知两表的 op=4 实现；不是 callback presence 语义证明，也不允许调用 op=5 或其它越界值。
+- 对全部 `.pdata` 函数扩展 exact `mov edx,2` 筛选，按简单寄存器来源传播验证 `RCX` 与间接函数指针槽地址一致、`R9D=0x10`，并在控制转移/写覆盖前未观察返回值。找到 9 个 manager-ABI-shaped op=2 调用点，位于 7 个函数：`0x9C50FF`、`0x9C511A`、`0x9C5135`、`0x9E13A7`、`0x3456CE6`、`0x34576E5`、`0x35140D5`、`0x3B36599`、`0x3DD3ECD`。`0x35140D5` 在同一成员上先调用 `0x3FCE5E`；`0x9E13A7` 经 `0x3FBAB2 → 0x3FCE5E` 检查同一 manager slot 后，在条件分支执行 op=2。结果支持继续按具体地址分析 op=2，而非断言所有调用目标的动态 manager table 身份。
+- 勘误 §7.4 对 `0x3FCE5E` 的“presence helper”称呼：该函数只说明 op=4 的第五参数输出是否非零；已知两张 manager 表的 op=4 都将输出清零，所以语义名称过强。现称“manager op=4 输出查询 helper”；是否表达 callback 是否存在仍未证明。
+- 筛查器与完整地址级结果保存在本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\op2-manager-shape-screen-20261014\`，仅读固定磁盘样本；未访问 QQ 进程、未调用 native 函数、未发送消息、未操作 SnowLuma。筛选不覆盖其它 immediate 编码、间接数据流、分支合流或动态 manager slot 值，不代表完整 xref。
+- R2 owner/consumer thread、manager 外层 teardown、QQ dispatcher stop/cancel/drain/quiescence 与旧 `0xC0000005` 根因仍开放；R3 stable identity 与 sender UID→UIN 未闭合。R4 前置门不变，产品仍 NOT READY；本轮不运行 Cargo 测试。

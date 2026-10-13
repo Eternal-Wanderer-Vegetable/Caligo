@@ -7,7 +7,7 @@
 - 当前 R6 已接入 HTTP POST event、正向 WS 与反向 WS；三者复用动作层/Daemon，HTTP POST quick operation 结束后再向 WS 扇出，caligod 等 POST 订阅就绪才启动 bridge 接收。离线协议合同通过；native receive projection 与真实应用矩阵尚未验收。此前 R1–R5 离线子块及详证见 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。
 - 产品仍 **NOT READY**；feat-005/006 仍 `blocked`。用户已授权指定测试 QQ 实例；T1–T5 仅做固定 hash 外部只读 `observe-msf` 和受限内存扫描，没有注入、写入目标进程、调用 QQ 函数、callback invocation 或发送消息，也没有操作 SnowLuma。R2/R3 native 与 identity 门仍未闭合，R4 发信不准入。
 - T1–T4 观测相隔 219 秒、183 秒、1274.1 秒，均确认同一目标进程代次、profile hash 与 MSFService/global-dispatcher 锚点匹配；每次 145 条线程、41 个已安装 TLS dispatcher、manager 链 2 次 visit。global dispatcher 四次都与一个线程 TLS 项相同；`field_58_tid` DWORD 位型一致但不匹配目标线程，T4 对 8,874 个可访问系统线程 ID 枚举也无匹配。T5 在 2026-10-14 同一进程代次/profile 再次观测到 global dispatcher 命中 TLS 项且 `+0x58` 位型相同、不匹配目标线程。静态 RTTI 已将 `worker+offset` 暂定名修正为 `ThreadTaskManagerImpl this+offset`：`0x217D58C` 填充 `this+0x48` task vector，`0x217D8CC` 遍历并写当前 TID；析构清理该 vector。尚未证明 global dispatcher 是否属于 `ThreadTaskManagerImpl+0x48`、TLS 项是否是 callback consumer，或退出清理/迁移与 drain 路径。T1–T4 原始报告与日志在 `local-evidence/n4-r2-field-20261013-224510/`，T5 原始材料在 `local-evidence/n4-r2-field-20261014-000619/`。GUI 最小化；未激活或读取聊天内容。详情见 [thread contract §11](docs/research/qq-native-thread-contract.md#11-2026-10-13-同一实例的外部只读dispatcher复采)、[thread contract §12](docs/research/qq-native-thread-contract.md#12-2026-10-14-r2-global-dispatcher-owner-只读复核) 与 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。
-- 固定磁盘 hash 的 manager op 0–3 静态映射、`73BD6C` 用户 invoker 五参 ABI、heap-fallback 0x40 分配/释放配对、`0x54CE00` op=1/op=3 consumer 用法及 2026-10-14 bounded op=2 caller screen 见 [寿命合同](docs/research/qq-native-lifetime-contract.md) 与 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。本轮未启动/读取 QQ、未调用原生函数、未发送消息、未操作 SnowLuma。GitNexus 1.6.12 已在 `caligo-gitnexus` Docker 容器索引 `/repo`。
+- 固定磁盘 hash 的 manager op 0–4 静态映射、`73BD6C` 用户 invoker 五参 ABI、heap-fallback 0x40 分配/释放配对、`0x54CE00` op=1/op=3 consumer 用法及 2026-10-14 的 op=2 ABI-shaped callers/op=4 输出清零复核见 [寿命合同](docs/research/qq-native-lifetime-contract.md) 与 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。本轮未启动/读取 QQ、未调用原生函数、未发送消息、未操作 SnowLuma。GitNexus 1.6.12 已在 `caligo-gitnexus` Docker 容器索引 `/repo`。
 
 ## Changed Areas
 
@@ -18,6 +18,7 @@
 
 ## Verification
 
+- 本轮离线文档/静态筛查：`init.ps1 -Mode docs` PASS（9 live docs / 178 local links / 33 historical entries / 10 features），`git diff --check` exit 0（仅 LF→CRLF 提示），Docker GitNexus staged gate 为 4 files / 14 section symbols / 0 affected processes / low risk；没有运行 Cargo 测试。
 - `cargo test -p caligo-core --locked --offline --target-dir target-harness` 与 R6 transport 定向测试通过；本次完整文档/工作区验证结果见 progress 与 N4 执行记录。具体限制：只属离线测试，不替代 native/QQ 回执或真实 OneBot 应用验收。
 - `cargo fmt --all` 后审阅并撤销了本范围外的纯格式化变更；保留修改仅涉及 R3 timeout/result path 与对应测试。
 - 本轮 `cargo build -p caligo-cli --locked --offline --target-dir target-harness` 通过，observer unsigned 字段修改已加载到新构建并完成 T4 只读采样；存在仓库既有 warnings，未运行 Cargo 测试。
@@ -51,7 +52,7 @@
 ## Next Restartable Steps
 
 1. 读 [AGENTS](AGENTS.md)、[progress](progress.md)、本记录及上述执行记录；确认当前 status/diff，保留所有脏 harness 文件。
-2. 继续固定 `wrapper.node` 的 R2 静态调用者/lifetime 调查；`0x31F90B0` 是 `+0x58` 当前 TID writer，`0x217D8CC` 经 `0x31F83DC` 从 `ThreadTaskManagerImpl+0x48` pointer-backed task vector 取 pair。T1–T5 确认 global dispatcher object 同时存在于一条 TLS 项，但 T5 对全部可读映射的 vector-owner 复核未找到满足已知双 vptr 与同一 object/control pair 的成员候选；membership 保持 unknown，不把有限扫描作为否定证明。已确认 `ThreadTaskManagerImpl` 析构会清理该 shared-pair vector；静态调用链为 `0xB81758 → 0xD31686 → 0x217D16C`，`0xD31686` 将 manager holder 装入外层 `+0x110` 后调用 `0x217D58C`；尚未定位外层析构/退出调用。`+0x58` 与真实 `GetCurrentThreadId` IAT 对应，五次均无当前目标线程匹配。最新 op=2 筛查及本机脚本见寿命合同 §7.5；筛查仅是 bounded census，继续追外层析构 owner、op=1/op=2 ABI 和 `0x3BC545C` 的具体 manager-table/字段 owner，不把未命中解释为没有调用。consumer 线程与 stop/cancel/drain/quiescence 仍未证。T5 与 RTTI/vtable 证据写入 thread contract §12。用户授权了指定 QQ 实例，但 R1–R3 门未满足，不能开始 R4 native send。
+2. 继续固定 `wrapper.node` 的 R2 静态调用者/lifetime 调查；`0x31F90B0` 是 `+0x58` 当前 TID writer，`0x217D8CC` 经 `0x31F83DC` 从 `ThreadTaskManagerImpl+0x48` pointer-backed task vector 取 pair。T1–T5 确认 global dispatcher object 同时存在于一条 TLS 项，但 T5 对全部可读映射的 vector-owner 复核未找到满足已知双 vptr 与同一 object/control pair 的成员候选；membership 保持 unknown，不把有限扫描作为否定证明。已确认 `ThreadTaskManagerImpl` 析构会清理该 shared-pair vector；静态调用链为 `0xB81758 → 0xD31686 → 0x217D16C`，`0xD31686` 将 manager holder 装入外层 `+0x110` 后调用 `0x217D58C`；尚未定位外层析构/退出调用。`+0x58` 与真实 `GetCurrentThreadId` IAT 对应，五次均无当前目标线程匹配。最新 op=2 ABI-shaped 调用点与本机脚本见寿命合同 §7.6：9 个同-slot/size 形状调用分布于 7 个函数，两个还对同一 slot 调 op=4 helper；仍需解析动态 manager-table 值、外层析构 owner、op=1/op=2 剩余 ABI 和 `0x3BC545C` 字段 owner。`0x3FCE5E` 的 callback-presence 命名已校正为 op=4 output-query helper，不推断语义。consumer 线程与 stop/cancel/drain/quiescence 仍未证。T5 与 RTTI/vtable 证据写入 thread contract §12。用户授权了指定 QQ 实例，但 R1–R3 门未满足，不能开始 R4 native send。
 3. R3 强 native identity 仍 unsupported；重复/相同 CPB 行歧义 fixture 已确认不会消费 pending sends，缺稳定 ID/发送者映射的 CPB 记录现在不会伪造事件，不通过真实 QQ 实验绕过。
 4. R2 callback manager/owner-thread/dispatcher quiescence 和历史 AV 根因继续未闭合；若 AV 再现，先保留 dump、异常地址和线程栈。
 5. 从固定-hash CPB/native record 继续研究稳定 native ID 与 sender UID→UIN 的证据来源；当前 decoder 缺这两项，不能靠序号或文本补身份。

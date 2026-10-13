@@ -145,7 +145,7 @@ R2 的三条 getter 使用审计（`1760`/`15C0`/`4C40` 只取首 qword、不释
 继续针对同一冻结 `wrapper.node`（SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`）做 Ghidra 12.1.4 `-noanalysis` 定向反汇编/反编译，并将直接调用点限定到 PE `.pdata` 函数范围。全程只读磁盘样本，没有启动、读取或操作 QQ 进程。
 
 - `0x54CE00` 是 16 字节包装对象的 assignment helper：先对目标调用 op=3，再对来源调用 op=1，参数包括 size `0x10` 与目标上下文。
-- `0x9B31C8` 先对 `source + 0x10` 调用已知 presence helper `0x3FCE5E`，然后经 `0x54CE00` 复制至目标，最后通过已知 wrapper `0x2632` 对 source 调用 op=3。这直接支持该共享 callback-manager 接口的复制/assignment 与来源释放用法。`0x744D7E` 也在 assignment 后对 source 调用 op=3；`0x31FA9D4` 在复制较大对象时两次调用 helper，处理相邻的两个 16 字节成员。
+- `0x9B31C8` 先对 `source + 0x10` 调用 op=4 输出查询 helper `0x3FCE5E`（其“callback presence”语义见 §7.6 勘误），然后经 `0x54CE00` 复制至目标，最后通过已知 wrapper `0x2632` 对 source 调用 op=3。这直接支持该共享 callback-manager 接口的复制/assignment 与来源释放用法。`0x744D7E` 也在 assignment 后对 source 调用 op=3；`0x31FA9D4` 在复制较大对象时两次调用 helper，处理相邻的两个 16 字节成员。
 - `0x3BC545C` 以 op=1 将 size `0x10` 的 source wrapper 复制到局部存储，再把副本传给 `0x3BC6298`。其上游 `0x3BC4C18`、`0x3BC4D84` 从请求对象 `+0xA0` 字段取该对象，并将副本传入下游 callback/request helper；这是强 callback-field 候选，但具体 manager table 仍未解析。
 - 排除 `0x970E2A`（其调用方把 op=2 返回字节当布尔值）、`0x982F4E`（op=1/op=2 返回字节进入配置序列化字段）和 `0x340CA75`（把 op=1 返回值当布尔值）。这些返回形状不符合已知 callback manager op=1/op=2 的 void 路径。`0x3225B8A`、`0x33FCBA4` 是另一 `+0x68` property manager 的属性序列化调用；`0x34A156E` 的 0x20 步长数组 op=1 copy 仍因容器/成员所有权未知而未定类。
 
@@ -162,6 +162,17 @@ R2 的三条 getter 使用审计（`1760`/`15C0`/`4C40` 只取首 qword、不释
 - 该筛查仅覆盖固定 immediate 编码、有限指令形状与直接调用；间接引用、不同参数准备/编码、未识别 wrapper 及数据流路径仍可能存在。结果只支持“本次 bounded screen 未找到可归属的 op=2 caller”，不支持“没有 op=2 caller”，也不闭合完整调用者集合或外部合同。
 
 可复现材料：`r2-op2-caller-screen.py` 与 `r2-op2-caller-screen.txt`（同目录）。新证据仍不闭合 op=1/op=2 全调用者、arena 寿命、callback owner/consumer thread、QQ stop/cancel/drain/quiescence、历史 `0xC0000005` 或现场准入；R4 继续不准入。
+
+### 7.6 Callback manager op=4 与 op=2 ABI 调用点补充（2026-10-14，静态）
+
+本节复核与 §7.5 相同的冻结磁盘 `wrapper.node`，SHA-256 仍为 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`；只读 PE、`.pdata` 和反汇编，没有访问 QQ 进程或操作 SnowLuma。
+
+- 两张已知 manager 相对跳表地址分别是 `0x3F7052C`、`0x3F70540`，相差 `0x14`。按已验证的相对位移解码 `table+0x10`，inline `0x73BC5C` 的 op=4 指向 `0x73BCB0`，heap `0x73C2AA` 的 op=4 指向 `0x73C309`；前者执行 `and qword ptr [rbx],0`，后者执行 `and qword ptr [rax],0`，二者都把第五参数指向的 qword 清零。故已知两张表的可证分支范围是 op=0–4，而不是只到 op=3；分支没有范围检查，不能把 op=5 或其它越界值当成有效操作。
+- `0x3FCE5E` 加载传入 pair 的首 qword 并以 `(RCX=0, EDX=4, R8=0, R9=0, fifth=&out)` 调 manager，之后返回 `out != 0`。对上述两张表，op=4 把 `out` 清零，因此 helper 返回 false。此前 §7.4 依调用位置把它称为“presence helper”，语义命名过强；本节将其校正为 manager op=4 输出查询 helper。它是否表示 callback 是否存在，不能从该 helper/两张表的 op=4 实现推出。
+- 对全部可执行节中的精确 `mov edx,2`、`.pdata` 函数范围内的同基本块首个间接调用，加入轻量寄存器来源归一化；要求 RCX 等于间接 manager 函数指针槽地址、R9D=`0x10`，且 op=2 返回值在紧邻指令内未被观察。此 bounded ABI 形状筛选得到 9 个调用点、分布于 7 个函数：`0x9C50FF/0x9C511A/0x9C5135`、`0x9E13A7`、`0x3456CE6`、`0x34576E5`、`0x35140D5`、`0x3B36599`、`0x3DD3ECD`。其调用均把 RCX 指向与间接目标相同的 pair/manager slot，并传 `R9=0x10`；局部上下文与清理/收尾路径相容。两个调用点 `0x35140D5` 和 `0x9E13A7` 还会在同一字段上调用 `0x3FCE5E` 的包装（后者经 `0x3FBAB2` 转调），然后在各自条件分支中 op=2。
+- 这 9 个是高置信 manager-ABI-shaped op=2 caller 候选，较 §7.5 的 `[reg+0x10]` 过滤有所扩展；结合 pair-slot、16-byte size 与相邻 op=4 调用，足以把 op=2 调查推进到具体静态调用位置。但间接函数指针的动态值未解析，尚不能逐一断言它们运行时指向 `0x73BC5C` 或 `0x73C2AA`；寄存器归一化与近邻返回值检查也不是全路径数据流/完整 xref。不得据此推断调用时机、manager 外层 owner、线程、closure 寿命或 dispatcher quiescence。
+
+可复现筛查器及地址级输出仅存本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\op2-manager-shape-screen-20261014\r2-op2-manager-shape-screen.py` / `.txt`。此增量没有改变 R2/R3/R4 准入：consumer/owner thread、manager 外层 teardown、QQ stop/cancel/drain/quiescence、历史 `0xC0000005`、R3 stable identity 仍开放；R4 继续不准入。
 
 ## 8. 对实现的硬约束
 
