@@ -190,6 +190,17 @@ R2 的三条 getter 使用审计（`1760`/`15C0`/`4C40` 只取首 qword、不释
 - `0x345745A` 的 vptr 初始化路径还从输入对象 `+0x10` 取间接 manager target，以 `EDX=1`、`R9=0x10` 调用，目标 pair 地址在 `this+0x20`；这是一个新的 op=1-shaped copy/initialization 点，但其动态 target 仍未知。`0x3456986 → 0x3456A0A` 的 base 初始化另以 op=0 调输入 manager；这些用法不能充当三个 op=2 slot 的具体动态 table 证明。候选 handler 的构造/析构 vptr 写入已找到，manager/pair 初始化所有权仍未闭合。
 - 可复现脚本/输出：本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\op2-manager-shape-screen-20261014\r2-op2-vtable-membership-20261014.py/.txt` 与 `r2-op2-owner-method-context-20261014.py/.txt`。脚本在读样本前校验固定 hash。COL 扫描和常见 RIP-relative xref 仍有编码/解析边界，不构成全 binary xref、调用时序、manager 动态值或寿命/线程/quiescence 证明。
 
+### 7.8 `HttpConnection+0xA0` callback wrapper owner（2026-10-14，静态）
+
+重新核验磁盘 `wrapper.node` SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。只读 PE、`.pdata` 与目标函数反汇编；没有启动/读取 QQ 进程、调用原生函数、发送消息或操作 SnowLuma。
+
+- `0x3BC2C3A` 与 `0x3BC3082` 中的 RIP-relative vptr 都指向 `.rdata` RVA `0x458D3B8`；前置 COL RVA `0x458D4C0` 的 type descriptor 是 `.?AVHttpConnection@httpx@@`。vtable slot 0 的 `0x3BC550C` 调用 `0x3BC3082` 清理主体。由此将该字段 owner 从此前的 request-object 候选准确收敛为 `httpx::HttpConnection`。
+- 构造函数 `0x3BC2C3A` 将识别为空 wrapper 哨兵的 manager/invoker 地址 `0x2338` / `0x236A` 写入 `this+0xB0/+0xB8`，并把 `this+0xA0` 传给该 manager 的 op=3、`R9=0x10` 路径。析构主体 `0x3BC3082` 对 `this+0xA0` 调用 `0x2632` dispose，构成字段初始化与释放的配对证据。
+- `0x3BC456A` 的状态分发分别进入 `0x3BC4C18`（设置状态 6）和 `0x3BC4D84`（设置状态 8）；两者都把 `this+0xA0` 交给 `0x3BC545C`。后者从该 wrapper 的 `+0x10` manager slot 发起 op=1、16-byte copy，再把副本传给下游 HTTP request/callback helper。因此，现可确认 `HttpConnection+0xA0` 是 manager-managed callback wrapper storage；这不表示任一运行实例当前持有非空 callback。
+- 尚未定位运行时把该字段从 empty 哨兵替换为 inline/heap manager 的赋值入口；也没有将其动态 manager 指针绑定到 `0x73BC5C/0x73C2AA`。op=1/op=2 外部 ABI 与完整 caller 集合、arena 分支寿命、manager/consumer owner thread、外层 teardown、QQ dispatcher stop/cancel/drain/quiescence、历史 `0xC0000005` 和 R3 stable identity 继续开放，R4 仍不准入。
+
+可复现脚本/文本输出保存在本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\httpconnection-field-owner-20261014\r2-httpconnection-callback-field-owner-20261014.py/.txt`。该脚本在读取前校验固定 hash；只含本机静态地址与 RTTI，不入库。
+
 ## 8. 对实现的硬约束
 
 1. Rust FFI 声明只能引用本文 `[verified]` 的几何与函数地址；`[inferred]` 项进入实现前必须先闭合。
