@@ -174,6 +174,22 @@ R2 的三条 getter 使用审计（`1760`/`15C0`/`4C40` 只取首 qword、不释
 
 可复现筛查器及地址级输出仅存本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\op2-manager-shape-screen-20261014\r2-op2-manager-shape-screen.py` / `.txt`。此增量没有改变 R2/R3/R4 准入：consumer/owner thread、manager 外层 teardown、QQ stop/cancel/drain/quiescence、历史 `0xC0000005`、R3 stable identity 仍开放；R4 继续不准入。
 
+### 7.7 op=2 候选代码引用的 RTTI/vtable 复核（2026-10-14，静态）
+
+对 §7.6 中 `0x9C509C`、`0x345763E`、`0x3456C1C` 三个函数，复核此前记录的 `.rdata` qword 代码地址，并沿 RTTI/vtable 与 vptr 写入路径追查。样本仍为磁盘 `wrapper.node` SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`；无 QQ 进程读取、函数调用或 SnowLuma 操作。最终脚本与原始输出保存在本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\op2-manager-shape-screen-20261014\r2-op2-vtable-membership-20261014.py/.txt` 和同目录 `r2-op2-owner-method-context-20261014.py/.txt`。
+
+- 扫描 `.rdata` 中满足 image-relative signature/self-RVA、有效 type descriptor 与 class hierarchy descriptor 的 COL，并以 COL 指针定位 vtable，再按下一个有效 header 与连续 `.text` 函数地址边界限制 slot。总计发现 15,412 个有效 COL / 15,410 个 vtable header；已知 `ThreadTaskManagerImpl` vtable `0x4260448` 被正确识别为 parser 正向对照。此前三个 qword 位于 vtable 中间，前一 qword 是上一 virtual slot，而不是 COL；只检查“前一 qword 是否 COL”会误判 vtable 起点。
+
+| op=2-shaped 函数 | 有效 vtable / slot | RTTI class descriptor | vptr 写入点 |
+|---|---|---|---|
+| `0x9C509C` | RVA `0x3FADD38`, slot 5 | `.?AVFileDragManagerWin@nt@@`，COL RVA `0x3FADD70` | `0x9C47E6` 计算表地址，`0x9C47ED` 写入 `[rcx]` |
+| `0x345763E` | RVA `0x43E7528`, slot 3 | `.?AVIgnoreBodyHttpRequestHandler@httpx@@`，COL RVA `0x43E75B0` | `0x345747D` 计算表地址，`0x3457484` 写入 `[rcx+8]` |
+| `0x3456C1C` | RVA `0x43E73B8`, slot 3 | `.?AVSaveToStringHttpRequestHandler@httpx@@`，COL RVA `0x43E74E0` | `0x34569A6/0x3456D4C` 计算表地址，后续写入 `[rcx+8]` |
+
+- 这些 RTTI/vtable 结果确定的是 op=2-shaped 函数所属的 enclosing C++ class/method slot，不是间接 manager field 的目标类型。`0x9C509C` 对 `[this+0x30]`、`[this+0x50]`、`[this+0x70]` 分别执行 op=2；`0x345763E` 与 `0x3456C1C` 则从 `0x123528` 返回对象的 `+0x38/+0x48` manager slot 调 op=2。动态调用值仍未逐一绑定到 `0x73BC5C/0x73C2AA`。
+- `0x345745A` 的 vptr 初始化路径还从输入对象 `+0x10` 取间接 manager target，以 `EDX=1`、`R9=0x10` 调用，目标 pair 地址在 `this+0x20`；这是一个新的 op=1-shaped copy/initialization 点，但其动态 target 仍未知。`0x3456986 → 0x3456A0A` 的 base 初始化另以 op=0 调输入 manager；这些用法不能充当三个 op=2 slot 的具体动态 table 证明。候选 handler 的构造/析构 vptr 写入已找到，manager/pair 初始化所有权仍未闭合。
+- 可复现脚本/输出：本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\op2-manager-shape-screen-20261014\r2-op2-vtable-membership-20261014.py/.txt` 与 `r2-op2-owner-method-context-20261014.py/.txt`。脚本在读样本前校验固定 hash。COL 扫描和常见 RIP-relative xref 仍有编码/解析边界，不构成全 binary xref、调用时序、manager 动态值或寿命/线程/quiescence 证明。
+
 ## 8. 对实现的硬约束
 
 1. Rust FFI 声明只能引用本文 `[verified]` 的几何与函数地址；`[inferred]` 项进入实现前必须先闭合。

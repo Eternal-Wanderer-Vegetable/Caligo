@@ -82,6 +82,8 @@
 - 本轮入口 `.\init.ps1 -Mode docs` 通过（9 文档 / 154 链接 / 32 历史入口 / 10 工作块）；交付后复核同样通过：9 文档 / 156 链接 / 33 历史入口 / 10 工作块；git diff --check 通过。
 - 本机合成探针及原始输出：`E:/stella/_reference/caligo-n4-recovery-20261011/`，未复制进仓库；QQ 现场零动作。
 
+2026-10-14 bounded static follow-up：有效 COL/vtable 链把 `0x9C509C`、`0x345763E`、`0x3456C1C` 分别归属 `FileDragManagerWin` slot 5、`IgnoreBodyHttpRequestHandler` slot 3、`SaveToStringHttpRequestHandler` slot 3；也找到相应 vptr writer。`0x345745A` 暴露一处 op=1/16-byte 初始化形状。enclosing class 已识别，但这些方法内的 nested manager slot 动态值仍未绑定到 `73BC5C/73C2AA`；`0x3BC545C` owner 与外层析构等仍 open。证据与边界见 [寿命合同 §7.7](docs/research/qq-native-lifetime-contract.md) 和 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。
+
 ## Next / 下一工作入口
 
 按 [会话交接](session-handoff.md) 继续固定-hash callback manager op=1/op=2 调用合同与新发现的 op=2 ABI-shaped caller、manager 外层析构 owner，以及 global dispatcher 对 worker 集合归属与 `field_58_tid` 生命周期证据；op=2 与 op=4 增量见 [寿命合同 §7.6](docs/research/qq-native-lifetime-contract.md#76-callback-manager-op4-与-op2-abi-调用点-补充-2026-10-14-静态)。另从 CPB/native record 研究稳定 native ID 和 sender UID→UIN。R5/R6 离线接线已有证据，真实应用矩阵仍待办。R1–R3 与 stop/cancel/drain/quiescence 门未满足前不进行 R4 发信；unknown 不重发，SnowLuma 保持不触碰。

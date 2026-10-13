@@ -263,3 +263,9 @@ feat-005 / feat-006 保持 blocked，整个项目保持 NOT READY。
 - 勘误 §7.4 对 `0x3FCE5E` 的“presence helper”称呼：该函数只说明 op=4 的第五参数输出是否非零；已知两张 manager 表的 op=4 都将输出清零，所以语义名称过强。现称“manager op=4 输出查询 helper”；是否表达 callback 是否存在仍未证明。
 - 筛查器与完整地址级结果保存在本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\op2-manager-shape-screen-20261014\`，仅读固定磁盘样本；未访问 QQ 进程、未调用 native 函数、未发送消息、未操作 SnowLuma。筛选不覆盖其它 immediate 编码、间接数据流、分支合流或动态 manager slot 值，不代表完整 xref。
 - R2 owner/consumer thread、manager 外层 teardown、QQ dispatcher stop/cancel/drain/quiescence 与旧 `0xC0000005` 根因仍开放；R3 stable identity 与 sender UID→UIN 未闭合。R4 前置门不变，产品仍 NOT READY；本轮不运行 Cargo 测试。
+
+### 2026-10-14 R2 op=2 候选 RTTI/data-reference 复核（静态）
+
+- 固定 `wrapper.node` hash 为 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。全 `.rdata` 合法 COL/vtable 扫描并通过已知 `ThreadTaskManagerImpl` RTTI 正向对照后，确认 `0x9C509C` 是 `FileDragManagerWin` vtable slot 5，`0x345763E` 是 `IgnoreBodyHttpRequestHandler` slot 3，`0x3456C1C` 是 `SaveToStringHttpRequestHandler` slot 3。三个原始 qword 都是 vtable 中间的函数指针；前置 qword 是上一 slot，不是 COL。对应 vptr 写入点分别为 `0x9C47ED`、`0x3457484`、`0x34569AD`。
+- `0x345745A` 还提供一处具体 op=1-shaped 初始化：从输入对象 `+0x10` 取动态目标，传 `EDX=1`、`R9=0x10`，目标 pair 地址为 `this+0x20`。`0x3456A0A` 以 op=0 调 manager 并写入相邻 pair/invoker 字段。此处确定 enclosing handler class 与其 vptr 写入，不证明上述动态 manager 等于 `0x73BC5C/0x73C2AA`，也未将 `0x345763E/0x3456C1C` 所取 nested object 的 pair owner 绑定到 handler 字段。
+- 可复现脚本/输出：本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\op2-manager-shape-screen-20261014\r2-op2-vtable-membership-20261014.py/.txt` 和 `r2-op2-owner-method-context-20261014.py/.txt`。COL 与 RIP-relative xref 扫描有解析边界，不是全 binary xref。动态 manager table 值、op=2 外部合同/全调用者、`0x3BC545C` 字段 owner、外层 teardown、callback/dispatcher stop-cancel-drain-quiescence、历史 AV 与 R3 stable identity 仍 open；未启动/操作 QQ 或 SnowLuma、未跑 Cargo 测试，R4 准入与产品状态不变。
