@@ -140,6 +140,19 @@ R2 的三条 getter 使用审计（`1760`/`15C0`/`4C40` 只取首 qword、不释
 
 本节关闭的是固定样本 `73BD6C` 用户 invoker 参数个数与源码声明不匹配这一 ABI 子项。callback manager op 0–3 的完整调用合同、owner/consumer thread、原生 stop/cancel/drain/quiescence、稳定 native identity 及历史 `0xC0000005` 仍开放，R4 准入不变。
 
+### 7.4 Callback manager consumer callers follow-up（2026-10-13，静态）
+
+继续针对同一冻结 `wrapper.node`（SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`）做 Ghidra 12.1.4 `-noanalysis` 定向反汇编/反编译，并将直接调用点限定到 PE `.pdata` 函数范围。全程只读磁盘样本，没有启动、读取或操作 QQ 进程。
+
+- `0x54CE00` 是 16 字节包装对象的 assignment helper：先对目标调用 op=3，再对来源调用 op=1，参数包括 size `0x10` 与目标上下文。
+- `0x9B31C8` 先对 `source + 0x10` 调用已知 presence helper `0x3FCE5E`，然后经 `0x54CE00` 复制至目标，最后通过已知 wrapper `0x2632` 对 source 调用 op=3。这直接支持该共享 callback-manager 接口的复制/assignment 与来源释放用法。`0x744D7E` 也在 assignment 后对 source 调用 op=3；`0x31FA9D4` 在复制较大对象时两次调用 helper，处理相邻的两个 16 字节成员。
+- `0x3BC545C` 以 op=1 将 size `0x10` 的 source wrapper 复制到局部存储，再把副本传给 `0x3BC6298`。其上游 `0x3BC4C18`、`0x3BC4D84` 从请求对象 `+0xA0` 字段取该对象，并将副本传入下游 callback/request helper；这是强 callback-field 候选，但具体 manager table 仍未解析。
+- 排除 `0x970E2A`（其调用方把 op=2 返回字节当布尔值）、`0x982F4E`（op=1/op=2 返回字节进入配置序列化字段）和 `0x340CA75`（把 op=1 返回值当布尔值）。这些返回形状不符合已知 callback manager op=1/op=2 的 void 路径。`0x3225B8A`、`0x33FCBA4` 是另一 `+0x68` property manager 的属性序列化调用；`0x34A156E` 的 0x20 步长数组 op=1 copy 仍因容器/成员所有权未知而未定类。
+
+本次有界 `E8 rel32` 扫描在 `.pdata` 函数范围内找到 42 个目标匹配；它不含完整间接引用或数据流引用，不能据此称为完整 xref，也不能从缺项推出“没有调用”。原始输出和固定哈希记录位于本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\` 下的 `manager-callers-followup-20261013\`、`caller-refs-20261013\`、`candidate-context-20261013\` 与 `candidate-context-followup-20261013\`，未入库。
+
+这补强了共享接口的 op=1/op=3 consumer 用法；仍未证明这些对象确实使用 inline 表 `0x3F7052C` 或 heap 表 `0x3F70540`，也未穷尽 op=1/op=2 调用者或解析 op=2 外部合同。arena 分支、owner/consumer thread、QQ dispatcher stop/cancel/drain/quiescence 和历史 AV 根因继续开放；R4 不准入。
+
 ## 8. 对实现的硬约束
 
 1. Rust FFI 声明只能引用本文 `[verified]` 的几何与函数地址；`[inferred]` 项进入实现前必须先闭合。
