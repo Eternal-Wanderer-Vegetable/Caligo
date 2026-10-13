@@ -207,3 +207,11 @@ feat-005 / feat-006 保持 blocked，整个项目保持 NOT READY。
 - 此项只闭合固定-hash `73BD6C` 用户 invoker 参数个数与 Caligo 声明的一致性。第五参 UID 编码/与 request cookie 的关系、manager op 1/2 全调用者与语义、owner/consumer thread、QQ dispatcher stop/cancel/drain/quiescence 和历史 `0xC0000005` 仍开放；R3 stable native identity 缺口未变，R4 仍不准入。
 - `cargo test -p caligo-bridge --lib --features research consumer_probe::tests --locked --offline --target-dir target-harness -- --test-threads=1` PASS（7/7）；`rustfmt --edition 2021 --config skip_children=true --check crates/caligo-bridge/src/consumer_probe.rs crates/caligo-bridge/src/g3.rs` PASS；`.\init.ps1 -Mode all` PASS，docs 9 live docs / 168 local links，普通与 research workspace 均完成。构建保留已有 warnings。
 - 最终 `git diff --check` PASS。GitNexus 在脏工作树下已刷新到当前 base HEAD 并经 `status --json` 确认为 `up-to-date`/runner `current`/content `current`；post-commit detect gate 在本节收尾完成后核验。以上均为离线验证，不构成 QQ 现场或生产验收。
+
+### 2026-10-13 R2 heap-fallback closure 分配/释放配对补充（离线）
+
+- 再次计算冻结磁盘 `wrapper.node` SHA-256，仍为 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。Ghidra 12.1.4 `-noanalysis` 定向导出 `0x24C0`、`0x1FD0`、`0x1FE0`、`0xB75000`、`0xB75029`；结果位于本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\allocator-helper-analysis\followup-20261013\`，没有加载/调用 QQ。
+- 与既有 `73BBF8`、`73C2AA` 反汇编合并看：`73BBF8` 的 heap fallback 分配 `24C0(0x40)`，而 `24C0` 跳到 `B75000`；heap manager op=2/3 清理 closure 后以 `(closure, 0x40)` 调 `1FD0`，其经 `1FE0` 跳到 `B75029`。这闭合固定 hash 中 heap-fallback closure 的同尺寸 QQ wrapper 分配/释放配对。
+- 未将该结论扩展到 `4D3588` 的 arena 分支或 wrapper allocator 内部，也未推断 op=1/op=2 的完整调用者与外部合同、op=3 重复调用安全。owner/consumer thread、QQ stop/cancel/drain/quiescence、历史 `0xC0000005` 和 R3 stable identity 仍开放；R4 不准入，feat-005/006 与产品状态不变。没有 QQ 操作或 SnowLuma 改动。
+- 文档门 `init.ps1 -Mode docs` PASS（9 live docs、168 local links、33 historical entries、10 features）；`git diff --check` PASS。GitNexus 1.6.12 增量重索引后 status `up-to-date`，runner/content current、incompleteReasons empty；索引日志仍提示 callable-flow candidates 超 cap 及流程截断，故不作“无调用”推断。
+- `detect-changes --scope staged` 报 CRITICAL、449 affected processes；改动集严格是四份 Markdown，唯一 changed symbol 是执行记录中的 section heading，列出的环境启动/OneBot/native 流程不对应源码变更。已核查 staged path 清单与 diff；该影响面判为文档节点解析扩散，保留检测结果，不把它解释为 449 条运行调用受本次改动影响。

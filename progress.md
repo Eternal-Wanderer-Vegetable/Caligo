@@ -3,8 +3,8 @@
 ## Current State
 
 **Last Updated:** 2026-10-13（Asia/Shanghai）
-**Baseline commit:** `0f5b483`；当前起点 `80d6d95`，保留既有未跟踪 harness 文件。
-**Active Feature:** 本轮补充了固定 hash callback manager op 0–3 的双表静态分支图；op=1/op=2 的调用合同、owner/consumer thread、QQ stop/cancel/drain/quiescence 与旧 AV 根因仍开放。N4-R3/R5/R6 离线子块保持此前状态，CPB 稳定身份仍 unsupported；feat-005/006 仍 blocked，R4 不准入。
+**Baseline commit:** `0f5b483`；本次静态追查起点 `59b8146`，保留既有未跟踪 harness 文件。
+**Active Feature:** 本轮继续 R2 固定 hash callback manager 静态调查，并闭合 heap-fallback closure 的 0x40 QQ wrapper 分配/释放配对；op=1/op=2 的完整调用合同与所有调用点、owner/consumer thread、QQ stop/cancel/drain/quiescence 与旧 AV 根因仍开放。N4-R3/R5/R6 离线子块保持此前状态，CPB 稳定身份仍 unsupported；feat-005/006 仍 blocked，R4 不准入。
 **Scope:** 在 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md) 范围内继续关闭有固定 hash 磁盘证据支持的 R2 静态问题；不启动 QQ，不越过原生生命周期和现场准入门。
 
 ## 当前产品验收边界
@@ -28,7 +28,7 @@
 ## Blockers / Risks
 
 - 离线修复已贯通 request_id、NativeStarted 边界、AcceptedUnconfirmed 与旧 journal 保守恢复。2026-10-12 follow-up 使非零 callback code 保持 unknown 并保留原始 errCode/errStr 诊断；core 将剩余响应期限随 v3 Dispatch 下发，bridge 超时后发 DeliveryUnknown，并为同一请求保留最多 60 秒、最多 256 项的迟到强身份更正槽。无稳定 native identity 的成功仍 unsupported/unknown，不自动重发；实现与验证见执行记录。
-- R2 已基于磁盘文件与冻结样本同 hash（`63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`）静态确认 `1DB2(pair*)` release、`732A80` body 同步深复制及 `B75029` 输入释放；代码按代复用单个 service pair、body 调用后对称释放、去掉未使用的 self-string 副本。常驻与一次性 callback context 在发布前 PIN bridge image；resident 停止时本地关闭 callback 准入、等待已准入调用退出，隔离后迟到 callback 仅计数、不入槽。2026-10-13 Ghidra `-noanalysis` follow-up 已映射 `73BC5C/73C2AA` 两张 callback manager 的 op 0–3 分支；op=1/op=2 调用合同、其它输入完整性、owner/回调线程、QQ stop/cancel/drain/quiescence 和历史 AV 原因仍未证。静态与离线证据不证明 QQ consumer 停止、原生队列排空或最终业务回执持久化；产品仍 blocked。
+- R2 已基于冻结磁盘样本 hash（`63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`）静态确认 `1DB2(pair*)` release、`732A80` body 同步深复制与 `B75029` 输入释放；代码按代复用单个 service pair、body 调用后对称释放、去掉未使用的 self-string 副本。常驻和一次性 callback context 在发布前 PIN bridge image；resident 停止时本地关闭 callback 准入、等待已准入调用退出，隔离后迟到 callback 只计数、不入槽。2026-10-13 Ghidra follow-up 已映射 `73BC5C/73C2AA` 的 op 0–3，并确认 heap-fallback closure 通过 `24C0→B75000` 分配 0x40 字节、`1FD0→1FE0→B75029` 以同尺寸释放。op=1/op=2 完整调用合同/所有调用点、arena 分支寿命、其它输入完整性、owner/回调线程、QQ stop/cancel/drain/quiescence 和历史 AV 原因仍未证。静态与离线证据不证明 QQ consumer 停止、原生队列排空或最终业务回执持久化；产品仍 blocked。
 - R3 使用 core journal 作为常驻候选 wire sequence authority，见 ADR；CPB 只有弱文本候选，stable identity unsupported，同步 send 不能返回成功。
 - CPB identity follow-up 移除了 `cpbseq:{seq}` 伪 native ID。当前 decoder 不产生稳定 native ID 或 sender UID→UIN 映射；缺少这些证据时只计 `identity_blocked`，不向 resident 事件流发布。定向 gate 1/1 与 `init.ps1 -Mode all`（default 191/191、research 227/227）通过；详见 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。这关闭伪身份入口，不关闭 receive/OneBot 功能或 R4 门。
 - R5 core/store 子块现已接入：数值 account 的 Daemon 打开 sibling MessageStore；AccountActor 在 journal 后、ACK 前持久化显式 OneBot projection，重启时幂等重建索引，Daemon `StoreReader` 与 OneBot `get_msg` 共用该索引。普通构建 `caligod` 的 loopback HTTP、HTTP POST events、正向/反向 WS 共用动作层和 Daemon；HTTP POST quick operation 完成后才扇出到 WS，订阅者队列有界。标准群发送只在强 native 回执及匹配的持久 OneBot ID 均可读后成功，私聊映射未证时明确 unsupported。`daemon_client` 当前仍提供 `None` projection，不能声称 native receive 可查询；真实应用互通、私聊 peer UID 映射与稳定身份未完成，feat-006 仍 blocked。
@@ -122,3 +122,10 @@
 - 该证据只闭合一个 callback ABI 子项；manager op 1/2 调用合同、当前 owner/consumer thread、QQ dispatcher stop/cancel/drain/quiescence、历史 AV 根因、R3 stable native ID 与 sender UID→UIN 仍未闭合。R4 未执行；本轮未对 QQ 调用 native API 或发送消息，SnowLuma 仅作静态参考，feat-005/006 继续 blocked，产品 NOT READY。
 - `cargo test -p caligo-bridge --lib --features research consumer_probe::tests --locked --offline --target-dir target-harness -- --test-threads=1` PASS（7/7）；本次 `rustfmt --edition 2021 --config skip_children=true --check crates/caligo-bridge/src/consumer_probe.rs crates/caligo-bridge/src/g3.rs` 在格式化后 PASS；`.\init.ps1 -Mode all` PASS，docs 9 live docs / 168 local links，普通与 research workspace 全部完成。构建存在既有 warnings。
 - `git diff --check` PASS。GitNexus 1.6.12 在 7 个 tracked dirty files 下重建索引，commit `80d6d95b0cbf652812170d53c833da0d7934221c`、runner/current-content 皆 current、无 incomplete reasons；调用流候选/REACHING_DEF/流程截断警告仍按不完备图处理。post-commit final detect 输出记录于最终答复；本轮未对 QQ 调用 native API 或发送消息。
+
+## 2026-10-13 N4-R2 heap-fallback closure 分配/释放配对（离线）
+
+- 再次核对冻结磁盘 `wrapper.node` SHA-256，仍为 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。Ghidra 12.1.4 `-noanalysis` 定向导出 `0x24C0`、`0x1FD0`、`0x1FE0`、`0xB75000`、`0xB75029`；原始静态输出位于本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\allocator-helper-analysis\followup-20261013\`，不入库。
+- `73BBF8` 的 heap fallback 以 `24C0(0x40)` 分配，`24C0` 跳到 `B75000`；heap manager op=2/3 清理 closure 后以 `(closure, 0x40)` 调 `1FD0`，其经 `1FE0` 跳到 `B75029`。这只闭合固定样本 heap-fallback closure 的同尺寸 QQ wrapper 分配/释放配对，不扩展到 arena branch 或 wrapper 内部 allocator 语义。
+- 仍未闭合 op=1/op=2 完整调用者与合同、op=3 重复调用安全、manager 输入边界、owner/consumer thread、QQ dispatcher quiescence、历史 AV 或 R3 stable identity。R4 不准入；本轮未操作 QQ 或 SnowLuma。
+- 本轮门：`init.ps1 -Mode docs` PASS（9 live docs、168 links、33 historical entries、10 features）；`git diff --check` PASS。GitNexus 1.6.12 对四份文档做增量重索引，status 为 up-to-date、runner/content current、incompleteReasons 为空；图仍有 callable-flow cap 与 flow truncation 警告，不能以缺失关系证明无调用。`detect-changes --scope staged` 标为 CRITICAL/449 flows；暂存区仅四份 Markdown，唯一 changed symbol 是旧执行记录 section 标题，影响路径与实际源码 diff 无关，复核为文档图扩散，不据此声称源代码调用链改变。

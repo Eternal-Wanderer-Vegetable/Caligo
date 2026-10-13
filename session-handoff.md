@@ -2,11 +2,12 @@
 
 ## Current Objective
 
-- 日期：2026-10-13（Asia/Shanghai）；计划源基线 `0f5b483`，本轮 ABI 修正起点 HEAD `80d6d95`。
+- 日期：2026-10-13（Asia/Shanghai）；计划源基线 `0f5b483`，本次静态追查起点 HEAD `59b8146`。
 - 用户请求执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)。
 - 当前 R6 已接入 HTTP POST event、正向 WS 与反向 WS；三者复用动作层/Daemon，HTTP POST quick operation 结束后再向 WS 扇出，caligod 等 POST 订阅就绪才启动 bridge 接收。离线协议合同通过；native receive projection 与真实应用矩阵尚未验收。此前 R1–R5 离线子块及详证见 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。
 - 产品仍 **NOT READY**；feat-005/006 仍 `blocked`。R2/R3 native 与 identity 门未闭合，因此 R4 不准入；本轮未对 QQ 实例发送或调用 native，也没有改变 SnowLuma 连接。
 - 本轮先完成固定磁盘 hash 的 manager op 0–3 静态映射，随后发现并修正 `73BD6C` 用户 invoker 的 5/6 参数不一致，证据与结果见 [寿命合同 §7.2–7.3](docs/research/qq-native-lifetime-contract.md#72-callback-manager-operation-dispatch-静态补充-2026-10-13) 和 [执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。定向回调测试 7/7 与 `init.ps1 -Mode all` 已通过。最新启动 QQ 实例经用户指定为候选测试账号，但因稳定 native identity 与 dispatcher/thread/quiescence 门未满足而未操作/发送；SnowLuma 只作参考。op=1/op=2 完整调用者/语义、当前 owner/consumer thread 与 QQ dispatcher quiescence 仍 open。
+- 本次继续静态确认 heap-fallback closure 使用 `24C0→B75000` 分配 0x40 字节，并在 `73C2AA` op=2/3 经 `1FD0→1FE0→B75029` 同尺寸释放；记录见寿命合同 §7.2 和执行记录。该项不改变 R2/R3/R4 门。接下来仍从固定 hash 找 op=1/op=2 调用点与合同；如果要启动/读取 QQ 实例才能推进，先暂停并向用户说明。
 
 ## Changed Areas
 
@@ -47,7 +48,7 @@
 ## Next Restartable Steps
 
 1. 读 [AGENTS](AGENTS.md)、[progress](progress.md)、本记录及上述执行记录；确认当前 status/diff，保留所有脏 harness 文件。
-2. 继续固定 `wrapper.node` 的 R2 静态调用者/lifetime 调查；本次已映射 manager op 0–3 分支，但 op=1/op=2 的调用合同、所有调用者与 manager 输入边界仍需证据。owner/consumer 的当前实例线程身份、QQ dispatcher 运行态 stop/cancel/drain/quiescence 或历史 AV 若需要启动/读取 QQ 实例，先暂停并向用户说明，不自行启动。
+2. 继续固定 `wrapper.node` 的 R2 静态调用者/lifetime 调查；op 0–3 分支及 heap-fallback closure 同尺寸分配/释放配对已映射，op=1/op=2 的调用合同、所有调用者与 manager 输入边界仍需证据。owner/consumer 的当前实例线程身份、QQ dispatcher 运行态 stop/cancel/drain/quiescence 或历史 AV 若需要启动/读取 QQ 实例，先暂停并向用户说明，不自行启动。
 3. R3 强 native identity 仍 unsupported；重复/相同 CPB 行歧义 fixture 已确认不会消费 pending sends，缺稳定 ID/发送者映射的 CPB 记录现在不会伪造事件，不通过真实 QQ 实验绕过。
 4. R2 callback manager/owner-thread/dispatcher quiescence 和历史 AV 根因继续未闭合；若 AV 再现，先保留 dump、异常地址和线程栈。
 5. 从固定-hash CPB/native record 继续研究稳定 native ID 与 sender UID→UIN 的证据来源；当前 decoder 缺这两项，不能靠序号或文本补身份。

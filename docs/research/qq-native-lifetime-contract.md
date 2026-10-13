@@ -124,11 +124,13 @@ R2 的三条 getter 使用审计（`1760`/`15C0`/`4C40` 只取首 qword、不释
 | inline `73BC5C` | 2 / 3 | `73BC7F` | 调 `4D3588` 与 `7328EA`；仅 op=2 随后把 manager/invoker 改为空函数 `72D596/72D5C8`，op=3 不做该改写。op=3 的已知外层调用仍是 `2632`。 |
 | heap `73C2AA` | 0 | `73C30F` | 将 `R8` 指向的 holder 内容写入输出，并设置 heap manager/invoker `73C2AA/73C34C`；`31C5F8` 随后清空源 pair。 |
 | heap `73C2AA` | 1 | `73C32A` | 直接函数尾返回，没有在该分支内读写 closure 字段；调用语义未定。 |
-| heap `73C2AA` | 2 / 3 | `73C2DA` | 经 `7328EA` 清理 closure，随后以 closure 指针与 `0x40` 参数调用 `1FD0`；该目标的释放语义未单独导出。仅 op=2 随后重置 manager/invoker，op=3 不重置。 |
+| heap `73C2AA` | 2 / 3 | `73C2DA` | 经 `7328EA` 清理 closure，随后以 closure 指针与 `0x40` 参数调用 `1FD0 → 1FE0 → B75029`；与下述 `24C0 → B75000` 的 0x40 heap fallback 分配配对。仅 op=2 随后重置 manager/invoker，op=3 不重置。 |
 
 两 manager 都直接用 operation 值索引跳转表；入口没有看到范围检查。这里确认的是固定样本中 0–3 的机器码分支，不证明其它值可用，也不证明所有调用点只传这些值。`op=0` 的 move-like 用法、`op=3` 的 dispose 用法有可定位包装调用；`op=1` 的调用者和完整语义、op=2 的调用合同及所有调用点仍未闭合。下一步不得主动调用未知 operation。
 
-原始本机输出位于 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\manager-dispatch\`：`dispatch.tsv`、`range_73bc5c.asm`、`range_73c2aa.asm`、对应反编译文件及 `target-hash.txt`。这项静态增量不闭合 owner/consumer thread、QQ dispatcher stop/cancel/drain/quiescence、historical AV 或现场准入。
+2026-10-13 allocator follow-up：`73BBF8` 在 `4D3588` 未返回 arena 地址时调用 `24C0(0x40)`，将 closure 存入返回的 heap block，并安装 heap manager/invoker；`24C0` 跳到 `B75000`。`73C2AA` 的 op=2/3 分支从 holder 取同一 closure 指针，先调用 `7328EA` 清理内容，再以 `(closure, 0x40)` 调 `1FD0`；`1FD0 → 1FE0 → B75029`。这闭合固定样本中 heap-fallback closure 的同尺寸 QQ wrapper 分配/释放配对。它不证明 wrapper 内部 allocator 细节、arena 路径寿命、op=1/op=2 外部调用合同、op=3 可重复调用，也不闭合线程/quiescence。定向导出及 hash 在本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\allocator-helper-analysis\followup-20261013\`；只反汇编固定磁盘样本，未加载或调用 QQ。
+
+原始本机 manager 输出位于 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\manager-dispatch\`：`dispatch.tsv`、`range_73bc5c.asm`、`range_73c2aa.asm`、对应反编译文件及 `target-hash.txt`。allocator follow-up 的跳板反汇编与 hash 位于上述 `allocator-helper-analysis\followup-20261013\`。这些静态增量不闭合 op=1/op=2 完整调用者与语义、owner/consumer thread、QQ dispatcher stop/cancel/drain/quiescence、historical AV 或现场准入。
 
 ### 7.3 `73BD6C` 用户 invoker 五参 ABI 与 Rust 对齐（2026-10-13）
 
