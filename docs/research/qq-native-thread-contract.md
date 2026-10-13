@@ -210,10 +210,13 @@ T4 采样前将 `GlobalDispatcherReport.field_58_tid` 从 `Option<i32>` 改为 `
 
 同一指定 QQ 进程完成第五次 `observe-msf` 采样 T5；PID、创建时间、加载路径与 profile hash 在采样/复核期间匹配。SnowLuma 保持原连接状态。没有激活 QQ 窗口、打开聊天、注入、写目标进程、调用 QQ 函数或发送消息。
 
+本节 RTTI/vtable 结果将此前反汇编注释中的 `worker+offset` 暂定变量名收敛为 `ThreadTaskManagerImpl this+offset`；相同地址与字段偏移不变，但不能据旧变量名推断另有一个 worker owner 对象。
+
 - T5 再次得到 145 条目标线程、41 个同 vptr TLS 项；全局 dispatcher 对象在一条 TLS 项中精确命中。T1–T5 的 `+0x58` DWORD 位型一致，均不属于各次 145 条目标线程；T4 当时对 8,874 个可访问系统线程 ID 的枚举也无匹配。
-- 固定 hash 的静态 import 表确认 `0x7879D0` 经 IAT 调用 `KERNEL32!GetCurrentThreadId`。函数起点 `.pdata` scan 覆盖 525,291 个函数范围、18,889,360 条指令；`0x217D8CC` 使用 `worker+0x2C` 计数，调用 `0x31F83DC` 从 `worker+0x48` 的指针-backed collection 取 `{object, control}` 16-byte pair，再调用 `0x31F90B0` 写当前 TID。发送侧 `0xB7CE8A` 调用 singleton getter `0xB816E8`，使用静态 pair 的 `+8/+0x10` 并增加 control 强引用，然后交给 `D32138`。
-- 曾按内联数组布局找到一条表面候选，随后检查 `0x31F83DC` 发现 `+0x48` 实际经首 qword 指向独立元素数组；内联候选已作废。按正确 stride 搜索全部可读提交映射后，未找到同时满足固定 worker-context 双 vptr、vector 元素地址、全局对象与相同 control block 的候选。扫描覆盖 2,274 个 region、每轮约 901 MB，出现 3 次局部读取不足；因此 collection membership 仍为 unknown，有限可读扫描不作为全内存否定证据。
-- 该现场结果收窄为：全局对象在一个 TLS 项中；`+0x58` 是真实 Windows TID，五次采样都没有当前活动线程匹配；全局对象是否属于 `worker+0x48` collection、TLS 项是否承担 callback consumer、线程退出/迁移及 stop/cancel/drain/quiescence 仍未闭合。没有 native invocation，因此没有 callback-enter/enqueue/drain 证据。
+- 固定 hash 的静态 import 表确认 `0x7879D0` 经 IAT 调用 `KERNEL32!GetCurrentThreadId`。函数起点 `.pdata` scan 覆盖 525,291 个函数范围、18,889,360 条指令；`ThreadTaskManagerImpl::0x217D8CC` 使用 `this+0x2C` 计数，调用 `0x31F83DC` 从 `this+0x48` 的 pointer-backed task vector 取 `{object, control}` 16-byte pair，再调用 `0x31F90B0` 写当前 TID。发送侧 `0xB7CE8A` 调用 singleton getter `0xB816E8`，使用静态 pair 的 `+8/+0x10` 并增加 control 强引用，然后交给 `D32138`。
+- 曾按内联数组布局找到一条表面候选，随后检查 `0x31F83DC` 发现 manager `+0x48` 实际经首 qword 指向独立元素数组；内联候选已作废。按正确 stride 搜索全部可读提交映射后，未找到同时满足固定 manager 双 vptr、vector 元素地址、全局对象与相同 control block 的候选。扫描覆盖 2,274 个 region、每轮约 901 MB，出现 3 次局部读取不足；因此 global dispatcher 是否属于 manager task vector 仍 unknown，有限可读扫描不作为全内存否定证据。
+- 静态构造后的 `0x217D58C` 按 `this+0x2C` 配置数构造任务，并通过 `0x31F8378` 放入 `this+0x48` vector；`0x217D8CC` 随后遍历同一 vector 并设置各 dispatcher 的 `+0x58` TID，析构 `0x217D4FA` 则经 `0x31F8372` 清理该 vector。由此确认 `+0x48` 是 `ThreadTaskManagerImpl` 的 dispatcher task vector；T5 仍未证实 global dispatcher 是其中成员。
+- 该现场结果收窄为：全局对象在一个 TLS 项中；`+0x58` 是真实 Windows TID，五次采样都没有当前活动线程匹配；全局对象是否属于 `ThreadTaskManagerImpl+0x48` task vector、TLS 项是否承担 callback consumer、线程退出/迁移及 stop/cancel/drain/quiescence 仍未闭合。没有 native invocation，因此没有 callback-enter/enqueue/drain 证据。
 - 原始 T5 observer、只读扫描和地址映射验证均保存在本机 `local-evidence/n4-r2-field-20261014-000619/`；脱敏计数见 `summary-t5-redacted.json`，新增 RTTI/manager caller 静态摘要为 `summary-r2-manager-static-redacted.json`。之前四次原始报告及现场范围记录留在 `local-evidence/n4-r2-field-20261013-224510/`。
 
 R2 owner/consumer/lifetime 与历史 `0xC0000005` 根因仍开放；R3 stable identity 与 sender UID→UIN 仍未闭合。R4 的 R1–R3 准入门未满足，本次没有执行原生发送。产品状态继续 NOT READY。
