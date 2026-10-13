@@ -225,6 +225,13 @@ feat-005 / feat-006 保持 blocked，整个项目保持 NOT READY。
 - 使用 Linux Docker 内的 descriptor-anchored provenance helper 复读计划并重算 schema-2 snapshot：计划 digest `sha256:7ffaf98b4b4a25f5083fa91feab3655a5dab84272dfc15a3529c467ade1dee3f`，39 个引用路径均存在；计划 HEAD `0f5b4834dc17534083a0c503b2a0223ab44e3451` / dirty digest `298284fa9c9bade8a54b6baccf9cb982f6f5d27d399b2cac701604f3d82daeff` 与重锚时 HEAD `4da7167966e8ea3c1ddf63c9d93951f305bd0429` / dirty digest `cd8fda719e873b6bd580aa8bf89130c6c7afee28e816dd0e6955951b7e6262e2` 不同，差异来自本计划已执行的提交。重锚时唯一额外未跟踪目录 `.agents/` 是用户 harness，已保留且不纳入本次提交；计划正文未改。
 - 此静态增量只加强 op=1/op=3 用法，不闭合 op=1/op=2 全部调用点、manager-table 归属、arena 分支、线程、QQ dispatcher quiescence、历史 `0xC0000005` 或 R3 identity。feat-005/006 仍 blocked，产品 NOT READY；R4 不准入。按本轮限制没有运行 QQ 或 Cargo 测试。
 
+### 2026-10-14 R2 manager table owner 与 op=2 调用筛查（静态）
+
+- 再验固定安装磁盘 `wrapper.node` SHA-256：`63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。本次只读 PE/`.pdata` 并用 Capstone 按精确函数范围检查，没有启动/读取 QQ 进程、调用原生函数或触碰 SnowLuma。可复现筛查器与文本输出在本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\op2-caller-screen-20261014\`。
+- 有界直接调用筛查在目标集找到 41 个 `E8 rel32` 命中；`73BBF8` 的两个直接 caller 分别为 `0x732A80` 外部构造路径与 inline manager op=0 clone 路径 `0x73BC5C+0x81`。builder 的 arena 分支选择 inline manager/invoker，fallback 分支选择 heap manager/invoker 并走 0x40 wrapper 分配。它连接了表身份与 builder，不证明下游回调所有权或寿命。
+- 全可执行节筛查 `mov edx,2` 有 5,496 个候选点/4,801 个 `.pdata` 函数；同基本块首个 `[reg+0x10]` 调用筛出 12 个形状候选，均不能绑定至已知 callback manager table，其中已知 lookalike 的返回字节形状与 manager 的 void op=2 不符。这是有界筛查结果，不是完整 xref，也不能推出没有 op=2 调用者。
+- 仍开放：op=2 外部合同/全调用者、manager 外层 owner teardown、arena 分支寿命、callback consumer thread、QQ dispatcher stop/cancel/drain/quiescence、旧 AV 根因和 R3 强身份。R4 前置门不变；未做 QQ、Cargo 测试或消息发送。
+
 ### 2026-10-13 R2 指定 QQ 实例 dispatcher 外部只读复采
 
 - 用户明确授权使用最新启动的指定测试 QQ 实例。通过进程创建时间、父进程关系、主窗口句柄与 CUA 返回窗口句柄交叉确认目标；对应 `wrapper.node` 已加载路径的磁盘 SHA-256 与冻结 profile 一致，磁盘文件字节数也匹配。QQ 窗口最小化；为避免读取聊天正文，没有激活窗口或打开任何会话。

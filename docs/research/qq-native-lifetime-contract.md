@@ -153,6 +153,16 @@ R2 的三条 getter 使用审计（`1760`/`15C0`/`4C40` 只取首 qword、不释
 
 这补强了共享接口的 op=1/op=3 consumer 用法；仍未证明这些对象确实使用 inline 表 `0x3F7052C` 或 heap 表 `0x3F70540`，也未穷尽 op=1/op=2 调用者或解析 op=2 外部合同。arena 分支、owner/consumer thread、QQ dispatcher stop/cancel/drain/quiescence 和历史 AV 根因继续开放；R4 不准入。
 
+### 7.5 Callback manager table owner 与 op=2 bounded caller screen（2026-10-14，静态）
+
+再次核验安装磁盘样本 `D:\Program Files\Tencent\QQNT\versions\9.9.33-52230\resources\app\wrapper.node`，SHA-256 仍为 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。筛查器只读取 PE 可执行节与 `.pdata` 函数范围，不启动或读取 QQ 进程、不调用函数、不操作 SnowLuma；脚本与地址级输出留在本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\op2-caller-screen-20261014\`。
+
+- 限定 `.pdata` 中的直接 `E8 rel32` 调用后，冻结目标集合共 41 个匹配；`73BBF8` 仅见外部直接调用 `0x732A80 → 0x73BBF8`，另一个是 inline manager 的 op=0 路径 `0x73BC5C+0x81 → 0x73BBF8`。`73BBF8` 在 `4D3588` 返回 arena 地址时选择 `{manager=73BC5C, invoker=73BD08}`；未返回时以 `24C0(0x40)` 分配并选择 `{manager=73C2AA, invoker=73C34C}`。这把两种 manager table 形状连接到共同的 builder，但不证明 arena 分支对象寿命或下游 consumer 的停止/排空。
+- 在全部可执行节内筛选精确 `mov edx,2` 编码并映入 `.pdata`，得到 5,496 个候选指令、4,801 个函数；限定同一基本块里的首个调用且调用形状为 `[reg+0x10]` 后有 12 个候选。它们显示为对象虚表调用形状（其中 `0x970E2A`、`0x982F4E` 的返回字节被保存/序列化），没有一个能以已知 manager slot 调用形状或具体对象字段，绑定到 `73BC5C/73C2AA` op=2。原有排除仍适用。
+- 该筛查仅覆盖固定 immediate 编码、有限指令形状与直接调用；间接引用、不同参数准备/编码、未识别 wrapper 及数据流路径仍可能存在。结果只支持“本次 bounded screen 未找到可归属的 op=2 caller”，不支持“没有 op=2 caller”，也不闭合完整调用者集合或外部合同。
+
+可复现材料：`r2-op2-caller-screen.py` 与 `r2-op2-caller-screen.txt`（同目录）。新证据仍不闭合 op=1/op=2 全调用者、arena 寿命、callback owner/consumer thread、QQ stop/cancel/drain/quiescence、历史 `0xC0000005` 或现场准入；R4 继续不准入。
+
 ## 8. 对实现的硬约束
 
 1. Rust FFI 声明只能引用本文 `[verified]` 的几何与函数地址；`[inferred]` 项进入实现前必须先闭合。
