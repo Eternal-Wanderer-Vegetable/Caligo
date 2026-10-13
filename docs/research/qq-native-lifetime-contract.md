@@ -101,7 +101,7 @@ R2 的三条 getter 使用审计（`1760`/`15C0`/`4C40` 只取首 qword、不释
 **开放（下一增量，均列计划未决问题）**：
 1. control-block vtable slot1（`59F40`）的完整托管对象析构/弱计数关系，以及 pair counter 的完整拥有者模型；
 2. callback manager `op=0` 的 clone、move wrapper 源清空及 `2632→op=3` dispose 有静态调用证据；`7328EA` 会销毁 nested callback 并递减 metadata strong count。op=1 的调用者/准确语义、其它 op 与重入/失败分支尚未穷尽；
-3. `73BD6C` 到用户 invoker 是同步直接调用，thread contract §10 将现场 callback 归于 QQ worker/dispatcher；目标实例的当前线程身份仍需按新会话核实；
+3. `73BD6C` 到用户 invoker 是同步直接调用；固定样本上的用户 invoker ABI 为五参（见 §7.3），thread contract §10 将现场 callback 归于 QQ worker/dispatcher；目标实例的当前线程身份仍需按新会话核实；
 4. 观察者注册方（谁构造 LoginRequestImpl、以何观察者 pair）——session-ready 充分条件；
 5. dispatcher consumer 的 stop/cancel/drain、join/quiescence；没有证明断开/销毁后不再迟到回调。
 
@@ -109,9 +109,34 @@ R2 的三条 getter 使用审计（`1760`/`15C0`/`4C40` 只取首 qword、不释
 
 - 在任何 Caligo callback context 可发布前，`consumer_probe::leak_ctx` 通过 `GetModuleHandleExW(FROM_ADDRESS | PIN, consumer_invoke)` 固定包含 delegate 函数指针的 bridge image；失败则返回不可用，调用方在 native submit 前停止。
 - PIN 由 Windows loader 保证模块保持映射直到宿主进程终止，即使收到 `FreeLibrary`；调用不保存或释放返回句柄。[Microsoft API contract](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandleexw)
-- `caligo_native_resident_run` 与 `caligo_g3_send_run` 都先经该 context gate 再构造 callback delegate。常驻 generation 停止时先封闭回调准入，等待已进入的回调离开；之后的迟到 callback 只增加 `late_callbacks_rejected` 审计计数，不读取错误/跨度指针，也不进入 256 项响应槽。没有已登记 generation 的回调按 orphan 计数，也不进入共享槽。对应离线测试验证上述隔离行为。
+- `caligo_native_resident_run` 与 `caligo_g3_send_run` 都先经该 context gate 再构造 callback delegate。常驻 generation 停止时先封闭回调准入，等待已进入的回调离开；之后的迟到 callback 只增加 `late_callbacks_rejected` 审计计数，不读取错误诊断指针，也不进入 256 项响应槽。没有已登记 generation 的回调按 orphan 计数，也不进入共享槽。对应离线测试验证上述隔离行为。
 - `native_resident_run` 保留 pump、receive 与 daemon worker 句柄；stop 后有界 join，超时写失败阶段并返回非零。此项只证明 Caligo 自有 worker 的停止结果，不能证明 QQ consumer 已停止、不能取消 QQ 已排队工作，也不证明最终结果已持久交付。
 - 这些改动只消除了 bridge 被卸载后 callback 指针悬空、停止后的持续迟到调用占满共享响应槽，以及把固定 sleep 当作自有 worker 已退出的风险。等待的是 Caligo 已准入回调并 join 自有 worker，不是 QQ dispatcher quiescence；owner thread、op 完整性、原生 stop/cancel/drain/join/quiescence 与历史 AV 继续开放。不得把 PIN/本地准入栅栏解释成 G-THREAD 或现场准入通过。
+
+### 7.2 Callback manager operation dispatch 静态补充（2026-10-13）
+
+针对本机冻结样本 `E:\stella\_reference\qq-native-r2-20261008\inputs\wrapper.node`，SHA-256 为 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。使用 Ghidra 12.1.4 `-noanalysis`，由固定哈希脚本定向导出 `73C2AA`、`73BC5C` 两个 manager；再读取它们的相对跳转表并反汇编八个 operation 入口。该过程只处理磁盘文件，不加载或调用 QQ 进程。
+
+| manager 布局 | op | 跳转目标 | 静态可见行为 |
+|---|---:|---:|---|
+| inline `73BC5C` | 0 | `73BCBE` | 经 `4D3588`、`73BBF8` closure 路径处理并调用 `7328EA`；与 `31C5F8` 的 op=0 调用及源 pair 清空相容，准确调用语义仍以已见 move-like 用法为限。 |
+| inline `73BC5C` | 1 | `73BCF3` | 以 `R8/R9` 调 `4D3588` 后返回；该路径没有在此函数内改写 manager/invoker 字段。准确调用者与请求语义未定。 |
+| inline `73BC5C` | 2 / 3 | `73BC7F` | 调 `4D3588` 与 `7328EA`；仅 op=2 随后把 manager/invoker 改为空函数 `72D596/72D5C8`，op=3 不做该改写。op=3 的已知外层调用仍是 `2632`。 |
+| heap `73C2AA` | 0 | `73C30F` | 将 `R8` 指向的 holder 内容写入输出，并设置 heap manager/invoker `73C2AA/73C34C`；`31C5F8` 随后清空源 pair。 |
+| heap `73C2AA` | 1 | `73C32A` | 直接函数尾返回，没有在该分支内读写 closure 字段；调用语义未定。 |
+| heap `73C2AA` | 2 / 3 | `73C2DA` | 经 `7328EA` 清理 closure，随后以 closure 指针与 `0x40` 参数调用 `1FD0`；该目标的释放语义未单独导出。仅 op=2 随后重置 manager/invoker，op=3 不重置。 |
+
+两 manager 都直接用 operation 值索引跳转表；入口没有看到范围检查。这里确认的是固定样本中 0–3 的机器码分支，不证明其它值可用，也不证明所有调用点只传这些值。`op=0` 的 move-like 用法、`op=3` 的 dispose 用法有可定位包装调用；`op=1` 的调用者和完整语义、op=2 的调用合同及所有调用点仍未闭合。下一步不得主动调用未知 operation。
+
+原始本机输出位于 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\manager-dispatch\`：`dispatch.tsv`、`range_73bc5c.asm`、`range_73c2aa.asm`、对应反编译文件及 `target-hash.txt`。这项静态增量不闭合 owner/consumer thread、QQ dispatcher stop/cancel/drain/quiescence、historical AV 或现场准入。
+
+### 7.3 `73BD6C` 用户 invoker 五参 ABI 与 Rust 对齐（2026-10-13）
+
+对象仍是 §7.2 固定磁盘样本及相同 SHA-256。Ghidra 12.1.4 `-noanalysis` 导出位于本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\callback-contract\assembly\73bd6c.txt`。在调用 `[RSI+0x30]` 前，机器码将 `RDI` 写入调用者 `[RSP+0x20]`，并设置 `RCX=RSI+0x18`、`RDX=0x10`、`R8D=EBX`、`R9=RBP-0x28` 后 `CALL RAX`；调用者在此 call 前未设置 `[RSP+0x28]`。按 Windows x64 ABI，这是一条五参调用：`(inner, 0x10, errCode, errStr, responseUid)`，没有被证明的第六参。该局部 string-like 值在回调返回后由 `0x290A` 清理，与 `response-consumer-scope.md` 记录的 `resp+0x38` msgUid 形状相容，但本段不证明其编码细节或与 Caligo request cookie 的身份对应。
+
+因此原 `consumer_invoke` 六参声明中的 `extra` 没有对应的已传参；继续读取它会把未定义的调用者栈内容误作 span。Rust 入口现按五参声明，保留第五参为 opaque response UID pointer，不解引用；错误码与错误文案仍进入既有有界槽，span-shape 猜测字段/读取已移除。测试用函数指针类型锁定五参 ABI，并以不可读第五参验证捕获路径不依赖它。离线编译/测试不证明 QQ 现场回调已发生，也不证明 response UID 与发送 cookie 相等。
+
+本节关闭的是固定样本 `73BD6C` 用户 invoker 参数个数与源码声明不匹配这一 ABI 子项。callback manager op 0–3 的完整调用合同、owner/consumer thread、原生 stop/cancel/drain/quiescence、稳定 native identity 及历史 `0xC0000005` 仍开放，R4 准入不变。
 
 ## 8. 对实现的硬约束
 

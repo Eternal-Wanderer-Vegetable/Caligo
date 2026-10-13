@@ -119,7 +119,6 @@ struct CallbackCapture {
     err: [u8; MAX_ERR_BYTES],
     err_len: u16,
     err_flags: u8,
-    span_shape: u8,
 }
 
 impl CallbackCapture {
@@ -130,7 +129,6 @@ impl CallbackCapture {
         err: [0; MAX_ERR_BYTES],
         err_len: 0,
         err_flags: 0,
-        span_shape: 0,
     };
 }
 
@@ -362,40 +360,6 @@ fn capture_error(addr: usize, out: &mut CallbackCapture) {
     out.err_flags = 1;
 }
 
-// 0 unknown, 1 valid empty, 2 valid bounded span, 3 malformed/unreadable,
-// 4 valid but too large. Span body bytes are deliberately never dereferenced.
-fn capture_span_shape(addr: usize) -> u8 {
-    if addr < 0x10000 {
-        return 0;
-    }
-    let begin = match safe_read_qword(addr) {
-        Some(v) => v,
-        None => return 3,
-    };
-    let end = match safe_read_qword(addr.saturating_add(8)) {
-        Some(v) => v,
-        None => return 3,
-    };
-    let _cap_end = match safe_read_qword(addr.saturating_add(16)) {
-        Some(v) => v,
-        None => return 3,
-    };
-    if begin == 0 && end == 0 {
-        return 1;
-    }
-    if end < begin {
-        return 3;
-    }
-    let len = end - begin;
-    if len == 0 {
-        1
-    } else if len <= 512 && begin > 0x10000 {
-        2
-    } else {
-        4
-    }
-}
-
 fn enqueue_capture(mut capture: CallbackCapture, context: Option<&'static ConsumerCtx>) {
     let start = WRITE_HINT.fetch_add(1, Ordering::Relaxed) % RESPONSE_CAPACITY;
     for offset in 0..RESPONSE_CAPACITY {
@@ -509,15 +473,15 @@ pub unsafe extern "system" fn consumer_manager(
 /// the worker resolves the generation and performs request correlation.
 ///
 /// # Safety
-/// `this`, `err_str`, and `extra` must be readable under the profiled callback
-/// contract. RPM protects ordinary bad reads but cannot catch every SEH fault.
+/// `this` and `err_str` must be readable under the profiled callback contract.
+/// The fifth argument is an opaque response-UID pointer and is not dereferenced.
+/// RPM protects ordinary bad reads but cannot catch every SEH fault.
 pub unsafe extern "system" fn consumer_invoke(
     this: *mut c_void,
     _tag: u32,
     err_code: i32,
     err_str: *const c_void,
-    _writer: *const c_void,
-    extra: *const c_void,
+    _response_uid: *const c_void,
 ) {
     with_ffi_panic_boundary(|| {
         if this.is_null() {
@@ -550,7 +514,6 @@ pub unsafe extern "system" fn consumer_invoke(
         capture.cookie[8..].copy_from_slice(&hi.to_le_bytes());
         capture.err_code = err_code;
         capture_error(err_str as usize, &mut capture);
-        capture.span_shape = capture_span_shape(extra as usize);
         enqueue_capture(capture, Some(context));
     });
 }
@@ -630,8 +593,8 @@ pub fn drain_responses() -> Vec<(crate::native_response::Cookie, i32, String)> {
             append_line(
                 ctx,
                 &format!(
-                    "{{\"kind\":\"consumer_result\",\"generation\":{},\"err_code\":{},\"err\":{:?},\"span_shape\":{}}}",
-                    ctx.generation, capture.err_code, err, capture.span_shape
+                    "{{\"kind\":\"consumer_result\",\"generation\":{},\"err_code\":{},\"err\":{:?}}}",
+                    ctx.generation, capture.err_code, err
                 ),
             );
         }
@@ -775,16 +738,17 @@ mod tests {
             ]
         );
         let err = short_string(b"ok");
-        let empty_span = [0u64; 3];
-        // SAFETY: callback inputs are local, readable buffers.
+        let _: unsafe extern "system" fn(*mut c_void, u32, i32, *const c_void, *const c_void) =
+            consumer_invoke;
+        // SAFETY: error string is readable; the opaque fifth argument is
+        // deliberately invalid to prove that capture never dereferences it.
         unsafe {
             consumer_invoke(
                 dest.as_mut_ptr().cast(),
                 0x10,
                 0,
                 err.as_ptr().cast(),
-                core::ptr::null(),
-                empty_span.as_ptr().cast(),
+                1usize as *const c_void,
             );
         }
         assert!(!report.exists(), "callback thread must not write reports");
@@ -794,7 +758,8 @@ mod tests {
         assert_eq!(drained[0].1, 0);
         assert_eq!(drained[0].2, "ok");
         let output = std::fs::read_to_string(report).unwrap();
-        assert!(output.contains("\"span_shape\":1"), "empty span is valid");
+        assert!(output.contains("\"err_code\":0"));
+        assert!(!output.contains("span_shape"));
     }
 
     #[test]
@@ -807,6 +772,7 @@ mod tests {
         cookie.0[8..].copy_from_slice(&7u64.to_le_bytes());
         let cb = build_cb_for_cookie(&cookie);
         let err = short_string(b"late");
+        let response_uid = short_string(b"response-uid");
         // SAFETY: callback input storage is live for the duration of the call.
         unsafe {
             consumer_invoke(
@@ -814,8 +780,7 @@ mod tests {
                 0x10,
                 0,
                 err.as_ptr().cast(),
-                core::ptr::null(),
-                core::ptr::null(),
+                response_uid.as_ptr().cast(),
             );
         }
         assert_ne!(old.generation, new.generation);
@@ -836,7 +801,7 @@ mod tests {
         cookie.0[..8].copy_from_slice(&ctx.generation.to_le_bytes());
         let cb = build_cb_for_cookie(&cookie);
         let err = short_string(b"x");
-        let span = [0u64; 3];
+        let response_uid = short_string(b"response-uid");
         for _ in 0..=RESPONSE_CAPACITY {
             // SAFETY: callback inputs point to live stack buffers.
             unsafe {
@@ -845,8 +810,7 @@ mod tests {
                     0x10,
                     0,
                     err.as_ptr().cast(),
-                    core::ptr::null(),
-                    span.as_ptr().cast(),
+                    response_uid.as_ptr().cast(),
                 );
             }
         }
@@ -868,7 +832,7 @@ mod tests {
         cookie.0[8..].copy_from_slice(&7u64.to_le_bytes());
         let delegate = build_cb_for_cookie(&cookie);
         let err = short_string(b"before-stop");
-        let span = [0u64; 3];
+        let response_uid = short_string(b"response-uid");
 
         // An active generation still captures its response normally.
         unsafe {
@@ -877,23 +841,21 @@ mod tests {
                 0x10,
                 0,
                 err.as_ptr().cast(),
-                core::ptr::null(),
-                span.as_ptr().cast(),
+                response_uid.as_ptr().cast(),
             );
         }
         assert_eq!(drain_responses().len(), 1);
 
         let guard = GenerationGuard::new(ctx.generation);
         guard.quarantine();
-        // Invalid diagnostic pointers prove the quarantine check returns
-        // before touching callback-owned error/span memory.
+        // The quarantine check returns before touching the error pointer; the
+        // fifth response-UID argument is opaque.
         unsafe {
             consumer_invoke(
                 delegate.as_ptr().cast_mut().cast(),
                 0x10,
                 0,
                 1usize as *const c_void,
-                core::ptr::null(),
                 1usize as *const c_void,
             );
         }
@@ -939,14 +901,14 @@ mod tests {
         let (_ctx, _report, _wide) = context();
         let unknown = [u64::MAX, 7, 0, 0];
         let orphaned_before = ORPHAN_CALLBACKS.load(Ordering::Relaxed);
-        // Unknown callback identity returns before error/span pointers are read.
+        // Unknown callback identity returns before the error pointer is read;
+        // the opaque fifth argument is never dereferenced.
         unsafe {
             consumer_invoke(
                 unknown.as_ptr().cast_mut().cast(),
                 0x10,
                 0,
                 1usize as *const c_void,
-                core::ptr::null(),
                 1usize as *const c_void,
             );
         }
@@ -975,7 +937,7 @@ mod tests {
                     let cookie = make_cookie(generation, base);
                     let delegate = build_cb_for_cookie(&cookie);
                     let err = short_string(b"parallel");
-                    let span = [0u64; 3];
+                    let response_uid = short_string(b"response-uid");
                     for n in 0..100u64 {
                         let mut per_call = delegate;
                         per_call[1] = base + n;
@@ -986,8 +948,7 @@ mod tests {
                                 0x10,
                                 0,
                                 err.as_ptr().cast(),
-                                core::ptr::null(),
-                                span.as_ptr().cast(),
+                                response_uid.as_ptr().cast(),
                             );
                         }
                     }

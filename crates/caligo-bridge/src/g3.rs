@@ -839,8 +839,8 @@ pub struct G3SendCtx {
     pub use_ch: u32,
     /// N3R30 消费者实验:0 = QQ 空函数 delegate(现状);非 0 = 我们的
     /// 响应消费者 delegate(v4 = consumer_probe L1 {ctx,1,manager,invoke},
-    /// manager op=4 答 0 = 非空可调用)—— 响应经 73bd6c 门后以 6 参 invoke
-    /// (errCode/errStr/writer/extra)到达,写入报告。
+    /// manager op=4 答 0 = 非空可调用)—— 响应经 73bd6c 门后以 5 参 invoke
+    /// (inner,0x10,errCode,errStr,responseUid)到达。responseUid 保持 opaque。
     pub use_consumer: u32,
 }
 
@@ -1357,7 +1357,7 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     if (*ctx).use_consumer != 0 {
         // v4(N3R34):响应消费者 delegate —— cb = L1 {ctx, 1, manager, invoker}。
         // 732A80 把 arg5 内层 delegate 移入捕获块,响应经 0x73C34C → 73bd6c
-        // 门(manager op=4 答 0 = 非空)→ invoke(6 参:errCode/errStr/…)。
+        // 门(manager op=4 答 0 = 非空)→ invoke(5 参:inner/tag/errCode/errStr/responseUid)。
         // 防御式实现(consumer_probe;RPM-self 安全读,布局误判不崩)。
         let c = match crate::consumer_probe::leak_ctx(wrapper_base, report_path, 0) {
             Some(c) => c,

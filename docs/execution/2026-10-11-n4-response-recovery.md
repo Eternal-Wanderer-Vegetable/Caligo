@@ -192,3 +192,18 @@ feat-005 / feat-006 保持 blocked，整个项目保持 NOT READY。
 - 全仓首次 `init.ps1 -Mode all` 在 `caligo-bridge` lib test process 以 `0xc0000005` 退出；同二进制默认构建串行诊断 `cargo test -p caligo-bridge --lib --locked --offline --target-dir target-harness -- --test-threads=1` PASS（58/58）。第二次全仓运行在 `full_chain_send_event_and_stop` 失败，源码核对确认测试 fixture 多测试共享 `CHAIN_SENDS` 全局计数，导致 `NM-1` 断言会受并行用例污染；已改为每个 `ChainHost` 独立计数。该用例单独 PASS、并行 `daemon_chain` 5/5 PASS。第三次 `init.ps1 -Mode all` PASS；首次 bridge AV 仍保留为未解释失败，后续通过不证明其根因已解决。
 - 本次 touched Rust paths 的 `rustfmt --edition 2021 --config skip_children=true --check ...` PASS；`git diff --check` PASS；`feature_list.json` JSON 解析 PASS；`init.ps1 -Mode all` 文档门 PASS（9 live docs / 163 local links / 33 historical entries / 10 features）。全仓 `cargo fmt --all -- --check` 曾报告多处既有源文件格式差异，因此未对无关工作区运行全量格式化。
 - R6 交付层级仅为普通构建 transport 接线和本机合成协议合同。真实 NoneBot/Koishi 互通、native receive projection、私聊 UID→UIN、同消息 source/request/receipt/store/event 现场链，以及计划中 N4/T14–T17 的完整矩阵均未验收；R2 callback ABI/thread/quiescence 与 R3 stable identity 前置仍开放，R4 不准入。feat-006 保持 blocked，产品保持 NOT READY；没有启动 QQ、注入、发送真实消息或改变 SnowLuma 连接。
+
+### 2026-10-13 R2 callback manager dispatch 静态补充
+
+- 只读复核本机冻结 `wrapper.node`，磁盘 SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`；Ghidra 12.1.4 使用 `-noanalysis`，定向脚本固定校验 hash。没有启动、读取或操作 QQ 进程，也没有改变 SnowLuma 连接。
+- 从 `73BC5C` 的表 `0x3F7052C` 和 `73C2AA` 的表 `0x3F70540` 解出 op 0–3：inline 分支目标分别为 `73BCBE`、`73BCF3`、`73BC7F`、`73BC7F`；heap 分支为 `73C30F`、`73C32A`、`73C2DA`、`73C2DA`。定向补充反汇编确认 op=1 的 inline/heap 路径差异、op=2/3 的清理路径以及仅 op=2 重置 manager/invoker；没有给未知调用语义补猜测名称。
+- 固定样本中两个 manager 都直接按 op 索引相对跳表，入口未见范围检查。`31C5F8` 已知传 op=0，`2632` 已知传 op=3；op=1/op=2 的全部调用者/合同与其它输入值处理仍未证。heap 路径的 `1FD0` 收到 closure 指针与 `0x40` 参数，但本次未确认该目标的释放语义。原始本机输出：`E:\stella\_reference\n4-r2-callback-manager-static-20261013\manager-dispatch\`（dispatch 表、机器码、反编译、目标 hash）；不入库。
+- 本增量只收窄 manager 分支代码形状，不等于完整 callback ABI：当前 owner/consumer thread、QQ dispatcher stop/cancel/drain/quiescence、旧 `0xC0000005` 根因及 R3 强身份仍开放；R4 不准入，feat-005/006 继续 blocked，产品仍 NOT READY。
+
+### 2026-10-13 R2 `73BD6C` 用户 invoker ABI 修正（离线）
+
+- 固定磁盘样本 SHA-256 仍为 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。只读 Ghidra 导出 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\callback-contract\assembly\73bd6c.txt` 显示 `[RSI+0x30]` 调用前提供 RCX/RDX/R8/R9 四个寄存器参数和 `[RSP+0x20]` 第五参数；未设置第六参栈槽。固定样本合同为 `(inner, 0x10, errCode, errStr, responseUid)`。
+- `consumer_invoke` 从 6 参改为 5 参；第五参保持 opaque、不解引用；移除把未传入第六参当 span 读取的 `capture_span_shape` 及误导性 `span_shape` 日志。离线单测用 5 参函数指针类型锁定声明，并以不可读第五参覆盖不读取合同。没有对 QQ/SnowLuma 做调用或发送。
+- 此项只闭合固定-hash `73BD6C` 用户 invoker 参数个数与 Caligo 声明的一致性。第五参 UID 编码/与 request cookie 的关系、manager op 1/2 全调用者与语义、owner/consumer thread、QQ dispatcher stop/cancel/drain/quiescence 和历史 `0xC0000005` 仍开放；R3 stable native identity 缺口未变，R4 仍不准入。
+- `cargo test -p caligo-bridge --lib --features research consumer_probe::tests --locked --offline --target-dir target-harness -- --test-threads=1` PASS（7/7）；`rustfmt --edition 2021 --config skip_children=true --check crates/caligo-bridge/src/consumer_probe.rs crates/caligo-bridge/src/g3.rs` PASS；`.\init.ps1 -Mode all` PASS，docs 9 live docs / 168 local links，普通与 research workspace 均完成。构建保留已有 warnings。
+- 最终 `git diff --check` PASS。GitNexus 在脏工作树下已刷新到当前 base HEAD 并经 `status --json` 确认为 `up-to-date`/runner `current`/content `current`；post-commit detect gate 在本节收尾完成后核验。以上均为离线验证，不构成 QQ 现场或生产验收。
