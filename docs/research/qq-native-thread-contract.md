@@ -251,3 +251,9 @@ R2 owner/consumer/lifetime 与历史 `0xC0000005` 根因仍开放；R3 stable id
 - 固定-hash RTTI 将 `0x217D35E` 构造的 manager 控制块识别为 `shared_ptr<ThreadTaskManagerImpl>`；构造路径把 manager strong pair 转为 `ThreadTaskManagerImpl+0x10` weak self-reference。初始化各 `TaskQueue` 时，manager `+0x10` 经 weak-lock shaped helper 获取临时 strong pair，再由 `0x31F8F5E` 将 weak pair 写入 `TaskQueue+0x48`。TaskQueue 自身的 shared control block RTTI 为 `TaskQueue`。详见[寿命合同 §7.22](qq-native-lifetime-contract.md#722-threadtaskmanager-与-taskqueue-间的弱引用边-2026-10-14固定样本静态)。
 - `ThreadTaskManagerImpl+0x48` vector 项和命中 selector 后的 manager `+0x30/+0x38` 都持有 TaskQueue strong pair；`TaskQueue+0x48` 回指 manager 的边为 weak。因此仅能排除这一条指定强引用环，不能推出 manager 无其他 owner、最后 owner/析构已知、所有 dispatcher 已停止或 callback 已排空。R2 teardown/quiescence、R3 stable identity 与历史 AV 仍未闭合；R4 未准入。
 - 脚本和报告 hash、counter 解释边界见寿命合同 §7.22。只做固定磁盘静态分析；未操作 QQ/SnowLuma、未调用 native、未发送消息。
+
+## 18. 2026-10-14 TaskRunner manager 弱引用与候选强环复核（固定样本静态）
+
+- `0x31F878C` 将 manager/control 指针写入 `TaskRunner+0x8/+0x10`，递增控制块 weak counter `+0x10`；相同布局的 strong counter 是 `+0x8`，`0x168CE` 是已核对的 weak-copy helper。故 TaskRunner 对 `ThreadTaskManagerImpl` 的这条回指为 weak pair。TaskRunner slot 0/3 从该字段经 `0x3F70` 取临时对象再检查 manager TID；细节、机器码范围与文件 hash 见[寿命合同 §7.23](qq-native-lifetime-contract.md#723-taskrunner-的-manager-弱引用与-nte-engine-parent-release2026-10-14固定样本静态)。
+- manager vector strong 持有 `TaskQueue`，TaskQueue strong 持有其 `TaskRunner`，但 `TaskRunner→manager` 为 weak；这排除了该三边上的强引用环，不代表没有其他 manager owner，也不识别 runtime 实例或其析构时机。
+- NTEngine 的候选析构路径会对其 `+0xE8` runner pair 调 slot 0，随后释放 `+0xE8` 和 child `+0xE0`；dtor 实际触发者、manager last owner、所有任务停止及 callback drain/quiescence 仍未知。仅固定磁盘静态分析，无 QQ/SnowLuma 操作、native invocation 或消息发送；R2/R3 未闭合，R4 不准入。
