@@ -260,3 +260,11 @@ R2 owner/consumer/lifetime 与历史 `0xC0000005` 根因仍开放；R3 stable id
 ## 19. 2026-10-14 `MSFThread_xpng` manager-holder owner path (fixed-sample static)
 
 The fixed-hash lifetime evidence in [§7.28](qq-native-lifetime-contract.md#728-msfthread_xpng-owner-path-to-threadtaskmanagerimpl-2026-10-14-fixed-sample-static) identifies an additional path: `MSFThread_xpng` vtable slot 2 calls `D31686` for its inner payload at `+0x8`, where the manager holder is installed at payload `+0x110`; the wrapper's deleting destructor calls `D31356` on that payload. Three static construction call sites lead to the slot-2 call. The payload constructor target `0x180D30FF0`, final strong owner, actual destructor trigger, successful wait, full task stop, and dispatcher/callback quiescence remain unknown. This is disk-only static evidence and does not admit R4.
+
+## 20. 2026-10-14 ThreadPoolImpl manager setup and conditional stop/release path (fixed-sample static)
+
+The fixed-hash RTTI vtable maps `ThreadPoolImpl@internal@xpng` slot 2 to `0x290C746`, which stores a pair-shaped value at `this+0xA0` and invokes `D31686` on its first qword. Its slot-0 teardown route reaches `0x290C612`; only when its state check succeeds does it call `D313D6([this+0xA0])` and reset the pair. The helper clears the two field qwords before releasing its copied 16-byte value. This closes one class-specific static setup-to-stop/release edge, not the manager's final strong owner or global quiescence. The D313D6 wait result, actual destructor execution, callback consumer/thread, R3 identity, and historical AV remain unresolved; see lifetime contract §7.29 and its hash-pinned local artifact.
+
+## 21. 2026-10-14 FileDragManagerWin child stop and holder release (fixed-sample static)
+
+The `FileDragManagerWin@nt` RTTI vtable slot 2 `0x9C4852` installs a child pointer at `this+0xA8` and calls `D31686` on it. The slot-0 teardown chain reaches `0x9C47DE → 0x4E6872 → 0x4E91A6`; for a non-null old child, `0x4E91BE` invokes `D31356` before freeing the child, which reaches the established `D313D6` stop path and releases child `+0x110`. Actual object lifetime, manager last-owner status, successful wait, full dispatcher quiescence, and callback consumer ABI/thread remain unknown; see lifetime contract §7.30 and its hash-pinned artifact.

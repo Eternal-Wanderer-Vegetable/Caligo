@@ -447,3 +447,23 @@ Reproducible local-only artifacts under `E:\stella\_reference\n4-r2-callback-man
 - manager setup method `.py/.txt`: `FA211374C6B6F9B293F8D6CA4F9680CF1D5FB494CA45F57F58A460A5E5A0DED1` / `48AF450B0A11D0FE4884DE0DEF5A16030567A9556A2741FD4BD3636C14A77005`;
 - vtable method references `.py/.txt`: `E8DB92387F93C5C5A084D2BA39CF8BA1A6BEF7750C92CC796AFB8C09CAF0B2DE` / `82D6B7981C49CE25F978A557B7C97D7DB4DEC8878D41D715768BF0C6B1B555C1`;
 - vslot-2 callers `.py/.txt`: `AFB80F0AED9A8801721A074553E653A597004B06B644E1BDE9A9E392C868022A` / `03481711C4C31BD7B050DC612858E065D3FA926404C93C48CCD30EA924514098`.
+
+### 7.29 `ThreadPoolImpl` callback-manager owner-stop path (2026-10-14, fixed-sample static)
+
+The same frozen `wrapper.node` was rechecked by bounded Capstone decoding after validating SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`.
+
+- RTTI identifies the vtable at RVA `0x4300918` as `.?AVThreadPoolImpl@internal@xpng@@`; slot 2 is `0x290C746` and slot 0 is `0x290DA46`. In slot 2, `0x290CC0F` produces a local pair-shaped value, `0x2EC8` assigns it to `this+0xA0`, and the method loads the field's first qword before direct call `0x290C85C → 0xD31686`. This is a type-specific manager setup edge; the pair pointee's dynamic identity is not established here.
+- Slot 0 reaches `0x290C59C → 0x290C612`. If the `this+0x20` state check through `0x69A08(..., 2)` takes its cleanup branch, `0x290C612` passes `[this+0xA0]` to `0xD313D6`, then calls `0x504AEC` on the pair field. That helper copies 16 bytes, zeroes both source qwords, and releases the copied pair through `0x1DB2`; the outer cleanup wrapper also reaches `0x1DB2` for `this+0xA0` after the conditional base cleanup.
+- This adds a concrete `ThreadPoolImpl` setup-to-stop/reset/release path. It remains conditional static code: it does not prove an instance reached setup or teardown, that `+0xA0` is the final strong owner, that `D313D6`'s wait succeeded, that all callback work drained, or that this relates to the historical AV. The manager payload RTTI, indirect consumer ABI/thread, dispatcher-wide quiescence, and stable native identity remain open; R1–R3 stay open and R4 is not admitted.
+
+Local fixed-sample artifacts in `E:\stella\_reference\n4-r2-callback-manager-static-20261013\manager-method-scope-20261014\` (the script asserts the frozen image hash): `r2-threadpool-manager-owner-stop-chain-20261014.py/.txt`, SHA-256 `C5D69CE9ABCC3BD1EC657FB815F401478B105A60EDF1F92C029128EC9202F8EE` / `A0AE6A23EB7117F3A35F09443E96E22AB4A4F1477BC853FE148F86F86DFCC9BE`.
+
+### 7.30 `FileDragManagerWin` owner-to-child destructor path (2026-10-14, fixed-sample static)
+
+The same frozen `wrapper.node` hash was checked by a separate bounded Capstone/RTTI script: `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`.
+
+- RTTI identifies the vtable at RVA `0x3FADD38` as `.?AVFileDragManagerWin@nt@@`; slot 2 is `0x9C4852`, slot 0 is `0x9C5462`. Slot 2 transfers the first qword from a local pair-shaped value into owner field `this+0xA8`, reloads that field, and calls `0x9C4951 → 0xD31686` with the default manager config. The manager holder is installed in the child payload at `+0x110`; this static path does not identify the payload's dynamic RTTI.
+- Slot 0 reaches `0x9C47DE`, which clears the owner field through `0x4E6872 → 0x4E91A6`. If the old payload pointer is non-null, `0x4E91BE` calls `0xD31356` on it and tail-calls `0xB75029` to free it. The established `D31356` body reaches `D313D6` and releases the child `+0x110` manager holder.
+- This is an additional static owner-to-child teardown path. It does not prove runtime construction or destructor execution, manager last-owner status, successful wait, all-task stop, callback drain/quiescence, response-consumer ABI/thread, stable native identity, or the historical AV cause. R1–R3 remain open and R4 remains not admitted.
+
+Local artifacts in `E:\stella\_reference\n4-r2-callback-manager-static-20261013\manager-method-scope-20261014\` (the script asserts the frozen image hash): `r2-filedrag-manager-owner-stop-chain-20261014.py/.txt`, SHA-256 `EAE21E4CE8660D1C3852DF941D8C6517AE222F86DF27924A76450183E7B8A66A` / `FBF5CD676007342D1E0A3D2D97170A0D1BD56BFD262CA8D050E37DD85C7B837C`.
