@@ -300,6 +300,28 @@ R2 的三条 getter 使用审计（`1760`/`15C0`/`4C40` 只取首 qword、不释
 - 可复核本机产物位于 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\response-consumer-followup-20261014\`：`r2-response-consumer-direct-calls-20261014.py/.txt` SHA-256 `864BACD0E75B5DF8ACC0DD447B1AC5E434D782EFABDA392AC4DA67461AE6DA41` / `9DB4C279B77C045E476B02D7A7CF2B1C8AD24F064CF52AD2DE12A8565298CD1C`；`r2-response-consumer-msfservice-vtable-verified-20261014.py/.txt` SHA-256 `F5B985411E1F359712BAF0363CC87E2343C1082F941ED07DE5CA85627B066E23` / `0155E446D470A7456602C6C67D8D56BFB4992B4CE6D180A8DED82481DB1E449B`。脚本均拒绝非预期模块 hash；直接调用筛查只覆盖固定映像可识别 `.text` rel32 `E8`，RTTI 脚本只验证这两处方法地址与指定 MSFService vtable slot。所有间接调用及映像外路径仍在范围外。
 - 本增量仅定位静态提交入口；R2 consumer ABI/thread、last-owner/teardown/quiescence 与旧 AV、R3 identity 仍 open。R1–R3 门未满足，不准入 R4；产品 NOT READY。未访问 QQ/SnowLuma、未调用 native、未发送消息或运行 Cargo tests。
 
+### 7.37 `MSFService` callback wrapper reaches an unresolved transport vtable slot (2026-10-14, fixed-sample static)
+
+继续只读固定 `wrapper.node`，SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。脚本按 `.pdata` 函数范围解码目标窗口，并逐个验证这条回路中的 9 个直接 `E8` 调用边界。
+
+- RTTI 已将 `0x7333AC` 归到 `MSFService@nt` vtable slot 4（§7.36）。它调整 `this-0x10`，在第五个参数构造带两函数指针的临时值：`0x2D338` 与 `0x2D36A`，再以 `r9=0` 调用 `0x732A80`。两函数分别对传入上下文的 `+0x3C8` 调 `1DB2`、对 `+0x420` 调 `75B8E0`；这里只记录机器码行为，不把它们命名成业务回调。
+- `0x732A80` 将额外描述符经 `31C5F8` 移入局部捕获，调用 `0x73BB94` 转移 manager 值，再调用 `0x73BBF8` 构造 manager-backed callback wrapper。`0x73BBF8` 在 `4D3588` 返回非空时选 inline wrapper `0x73BC5C/0x73BD08`；为空时分配 `0x40` 并选 heap wrapper `0x73C2AA/0x73C34C`。两条 invoke wrapper 都会到 `0x73BD6C`。
+- 提交点先检查 `MSFService+0x60`，非空时读取其中对象的 vtable slot 7（vtable `+0x38`）并间接调用。此调用同时传入请求、捕获上下文、manager callback，以及两个栈上传入值。`MSFService` 构造函数 `0x72DF56` 将包含 `+0x60` 的字段区清零；本轮没有找到运行期写入者或该对象的动态 RTTI 类型。故已知的是接口槽与 callback wrapper 的静态传递，未知仍包括实际 transport 对象/目标方法。
+- `0x73BD6C` 最终经 `param+0x30` 的函数指针调用 consumer，参数形状为 `(param+0x18, 0x10, errCode, errString, msgUid)`；`msgUid` 来自响应对象 `+0x38`。这补充了结果 invoker 的静态 ABI，仍不能确定现场 consumer 身份、线程、线程切换位置或 callback queue teardown。
+
+本机固定样本产物在 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\response-consumer-followup-20261014\`：`r2-msfservice-callback-transfer-20261014.py/.txt` SHA-256 `72448F186E92FC2935FC5CF0B56135189A31D0C5AE38AED00FBC54BEB6C3E52B` / `BA619295843FA0886EAF1ABF60C4053B74FFBEECBC1093B783CEAE559350C5E2`。脚本拒绝非目标模块 hash；9 条直接调用均经 Capstone 指令边界与 `.pdata` 归属复核。它不覆盖间接调用目标的现场解析、间接 manager callers、owner last-release、stop/cancel/drain/quiescence 或旧 AV 根因。R2/R3 未闭合，R4 不准入，feat-005/006 blocked，产品 NOT READY；未访问 QQ/SnowLuma、未调用 native、未发送消息或运行 Cargo tests。
+
+### 7.38 `MSFService+0x60` 固定样本动态类型链至 `MSFMessengerImpl`（2026-10-15 静态）
+
+继续只读同一 `wrapper.node`，SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。本节把 §7.37 未知的 `+0x60` writer/动态类收窄到固定映像 RTTI/vtable；不把静态对象构造路径等同现场实例或线程验收。
+
+- RTTI 识别 `MSFService@nt` primary vftable `0x3F6DED8` 的 slot 16 为 `0x72EC24`。方法以 `rsi=this`：`0x72F4B0` 取 `this+0x50` 地址，`0x72F4C1` 通过 16-byte move helper `0x2EC8` 安装其 shared pair；稍后在 `0x72F56D` 取该 pair pointee，并于 `0x72F59A` 调其 vtable `+0x48`（slot 9）。该结果 pair 再于 `0x72F5AB` move 到 `this+0x60`。故两字段均有静态 writer，且 `+0x60` 值来自 `+0x50` 对象的 slot 9 返回路径。
+- `0xB78200` 为 `+0x50` 创建 0x310-byte 对象并调用 `0xB78380`。对象构造 vptr 的 COL/RTTI 为 `MSFSessionImpl@msf`，primary slot 9 的地址为 `0xB7C6C0`。该方法分配 0x70-byte 对象并调用 `0x1B4DFF8` 构造；此处 vptr 的 COL/RTTI 为 `MSFMessengerImpl@msf`。随后 `0xB7C89C` 建 shared ownership pair 回给 `MSFService` 的 `+0x60`。
+- `MSFMessengerImpl@msf` primary vftable `0x41403B8` 的 slot 7（vtable `+0x38`）为 `0x1B4E4EC`。这与 §7.37 `0x732A80` 从非空 `MSFService+0x60` 加载 vtable slot 7 的间接 call 汇合。`0x1B4E4EC` 继续到 `0xB7CE8A`；其路径读取 `0xB816E8` 返回对象状态，并最终在 `0xD32138` 对所得对象间接调用 vtable slot 0。
+- 由此闭合固定样本中的 service submission → `MSFSessionImpl` slot 9 → `MSFMessengerImpl` slot 7 → callback/dispatch continuation 的静态类型边。仍未知：`0xB816E8`/`0xD32138` 最终对象的动态 RTTI 与调用目标、consumer TID/线程切换、manager 全部 owner 的 last release、停止/取消/队列 drain/quiescence，以及历史 AV 根因。R2/R3 完成门未满足，R4 不准入、feat-005/006 blocked、产品 NOT READY。
+
+hash-gated 脚本/报告保存在本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\response-consumer-followup-20261014\`：`r2-msfservice-messenger-vtable-chain-20261015.py/.txt` SHA-256 `5FB98AB88FCDA6C6BA847E91CA5D63064E9D4716229552D69B250484680EE505` / `8FF3B7F636B25066AA9B8A8F4B7C0C8FC5CAEA877F73500241A9318E99BD7BAB`。脚本校验 PE `.pdata`、COL/RTTI、三张 vtable 的指定 slot 与关键 call 指令；不执行 QQ/native。
+
 ## 8. 对实现的硬约束
 
 1. Rust FFI 声明只能引用本文 `[verified]` 的几何与函数地址；`[inferred]` 项进入实现前必须先闭合。

@@ -472,3 +472,20 @@ feat-005 / feat-006 保持 blocked，整个项目保持 NOT READY。
 - 固定样本 `.rdata`/COL/RTTI 将 vtable RVA `0x3F6E1C8` 的 slot 3=`0x7329F6`、slot 4=`0x7333AC` 归于 `MSFService@nt` `+0x10` secondary table。有效 `.pdata` 函数中的两个直接 `E8` 分别为 `0x732A3E → 0x732A80` 和 `0x7333E6 → 0x732A80`；slot 4 指令把 `this` 减 `0x10` 后进入 dispatcher。此处闭合的是 MSF service 静态提交入口，不是 `0x73BD6C` 的具体 callback target。
 - 固定-hash scripts/output 及完整边界见 [lifetime contract §7.36](../research/qq-native-lifetime-contract.md)。R2 的实际 consumer 对象/线程、manager 所有者最终释放、dispatcher stop/cancel/drain/quiescence 与旧 AV 根因、R3 stable identity 仍未闭合；R4 不准入，feat-005/006 blocked，产品 NOT READY。
 - 只读固定磁盘样本；未访问 QQ/SnowLuma、未调用 native、未写目标、未发消息、未运行 Cargo tests。
+
+### 2026-10-14 N4-R2 callback transfer and result invoker (fixed-sample static)
+
+- 重新读取原计划 receipt：canonical path `docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md`，digest `sha256:7ffaf98b4b4a25f5083fa91feab3655a5dab84272dfc15a3529c467ade1dee3f`，39 个 cited paths；schema-2 pinned HEAD `0f5b4834dc17534083a0c503b2a0223ab44e3451`。本轮 re-anchor 时 HEAD 为 `7245209fc53adcfaece6a3501536bba4e732bf91`，global dirty digest 为 `3e4f83ba14e4a34b64324155e0e013ef2848ef172a28812c05dd7751ef8f3dc4`。既有 `.agents/` harness 仍是未跟踪用户数据，不纳入本次改动。
+- 固定-hash 新增数据流见[寿命合同 §7.37](../research/qq-native-lifetime-contract.md#737-msfservice-callback-wrapper-reaches-an-unresolved-transport-vtable-slot-2026-10-14-fixed-sample-static)：MSFService slot 4 将描述符送入 `0x732A80`；该函数包装 manager 后，从 `MSFService+0x60` 所指对象调用 vtable slot 7；inline 与 heap wrapper 最终都进入 `0x73BD6C`，再经对象 `+0x30` invoker 传递 error/result/UID。
+- 此证据收窄了 callback wrapper 的静态 ABI 和提交槽位，但 `MSFService+0x60` 的运行期写入者/动态类、目标方法、consumer TID、owner teardown、QQ stop/cancel/drain/quiescence 与历史 AV 根因仍 open。R2/R3 继续 blocked，R4 不准入；没有做 QQ/SnowLuma 操作、native 调用或真实消息发送。
+- 固定-hash脚本与报告：`E:\stella\_reference\n4-r2-callback-manager-static-20261013\response-consumer-followup-20261014\r2-msfservice-callback-transfer-20261014.py/.txt` SHA-256 `72448F186E92FC2935FC5CF0B56135189A31D0C5AE38AED00FBC54BEB6C3E52B` / `BA619295843FA0886EAF1ABF60C4053B74FFBEECBC1093B783CEAE559350C5E2`。
+
+### 2026-10-15 N4-R2 MSFService transport dynamic type chain (fixed-sample static)
+
+- 在同一精确 `wrapper.node` hash 下，RTTI/vtable 将 `MSFService@nt` primary slot 16 绑定到 `0x72EC24`。该方法经 `0x2EC8` move helper 写入 `MSFService+0x50`，随后调用其 pointee slot 9 并将返回 shared pair 写入 `MSFService+0x60`。
+- `+0x50` 构造对象由 `0xB78200/0xB78380` 生成，RTTI=`MSFSessionImpl@msf`；slot 9=`0xB7C6C0` 分配并构造 `MSFMessengerImpl@msf` 对象，返回 shared pair 到 `+0x60`。`MSFMessengerImpl` vtable slot 7=`0x1B4E4EC`，与 `0x732A80` 对 `+0x60` 的间接调用汇合。
+- `0x1B4E4EC → 0xB7CE8A → 0xD32138` 静态延伸到一个未知动态对象的 vtable slot 0。当前仍未解析该 object/state 的 RTTI、slot 0 目标、TID/线程切换、manager last owner 和队列 drain/quiescence；它们不能由 `MSFMessengerImpl` 类型单独推断。R2/R3 未闭合，R4 不准入；未访问 QQ/SnowLuma。
+- 固定-hash 复核产物 `r2-msfservice-messenger-vtable-chain-20261015.py/.txt` 位于本机 `_reference/.../response-consumer-followup-20261014/`，SHA-256 `5FB98AB88FCDA6C6BA847E91CA5D63064E9D4716229552D69B250484680EE505` / `8FF3B7F636B25066AA9B8A8F4B7C0C8FC5CAEA877F73500241A9318E99BD7BAB`。
+- GitNexus 1.6.12 索引在增量刷新间曾给出不一致 gate：staged detect 分别出现 426、439、447 affected processes / critical，另一次显示 changed hunks 没有 indexed symbols；其中一个中间图快照将空 `Section.id` 传入 `n.id IN $ids`，Cypher `n.id=''` 命中 426 processes / 1503 条 `STEP_IN_PROCESS` edges，四个变更文档 Section 本身没有此类边。具体 439/447 快照差异无法重现，增量刷新产生 no-overlap 也不能视为 clean。随后执行 `gitnexus analyze --force --index-only --pdg /repo` 完整重建，恢复文档 Section 的唯一 ID；当前 staged detect 为 4 files / 14 Markdown Section symbols / 0 affected processes / low。当前图中这批文档 Section 的直接 process edges 为 0，故先前 critical 为索引状态/空 ID 误归因，不是 Rust 调用路径变化。
+- 最终强制索引状态：18,491 nodes / 49,348 edges / 148 clusters / 459 flows；HEAD/index `7245209`，272 个覆盖文件内容匹配，status up-to-date。仍有 callable-flow cap、REACHING_DEF、CDG、跨语言 scope 与 flow truncation 警告；它们限制缺边解释。本次仅文档和静态研究，未运行 Cargo tests、未访问 QQ/SnowLuma。
+- 本轮仅只读固定磁盘样本并更新研究记录；未访问 QQ/SnowLuma、未调用 native、未发送消息、未运行 Cargo tests。
