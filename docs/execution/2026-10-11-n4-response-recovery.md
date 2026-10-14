@@ -408,3 +408,12 @@ feat-005 / feat-006 保持 blocked，整个项目保持 NOT READY。
 - `init.ps1 -Mode docs` PASS：9 live docs、202 local links、33 historical entries、10 features。`git diff --check` exit 0；Git 提示四份本次文档下次写入时会按仓库规则转为 CRLF，没有 whitespace error。未运行 Cargo tests，因为本轮只新增固定样本研究证据与状态文档。
 - Docker GitNexus 1.6.12 / Node 22.23.2 以 `--force --pdg --skip-agents-md --skip-skills` 刷新；status `up-to-date`、runner identity current、content current（272 files）、`incompleteReasons=[]`，索引 HEAD `4dedd08ffccd33f8f54663d86555130d3274ecad`。最终 `detect-changes --scope all` 映射 4 files / 14 Section symbols / 0 affected processes / low risk，均为文档变更。
 - 分析仍有已知覆盖警告：callable flow 候选超过 cap、REACHING_DEF 对 `caligo-cli` 丢弃 311/4311 条、一个 CDG skipped，以及流程入口/分支截断（336/536 候选未排名、902 callees 跳过、14 walks budget-cut）。因此 0 affected processes 只表示本轮文档图映射结果，不能扩成项目代码全局无影响结论。
+
+### 2026-10-14 N4-R2 TLS detach callback producer follow-up（固定样本静态）
+
+- 对固定 `wrapper.node` 增补 callback dispatch 与节点释放路径：TLS head 节点中的 callback 指针经 `.rdata 0x4909B18 → 0x3EB1DE0 (jmp rax)` 执行；`0x3E94F90 → 0x3EA01D0` 调用 KERNEL32 `HeapFree` 释放旧节点。节点 producer 仍未找到。
+- 扩展 TLS index 数据流追踪覆盖 1499 个 `.pdata` 候选、37 个首层 TLS 参数直接调用、46 个 helper 转发边和 50 个函数/参数状态；其中无 helper 访问 `TLS+0xB0`，8 个间接调用均解析为 `AcquireSRWLockExclusive`、`GetCommandLineA`、`GetLastError` 或 `SetLastError`。该有限切片没有证明不存在其他注册路径；NTEngine dtor 是否加入 TLS detach list 仍 unknown。固定样本地址与 artifact hashes 见[寿命合同 §7.26](../research/qq-native-lifetime-contract.md#726-tls-detach-callback-dispatch-与-producer-有界追踪-2026-10-14固定样本静态)。
+- R2 manager last-owner、child holder release、全任务 stop/drain/quiescence、consumer ABI/thread 与 R3 identity 继续未闭合；R4 不准入，feat-005/006 blocked，产品 NOT READY。只读磁盘样本；未访问 QQ/SnowLuma、未调用 native、未发送消息、未运行 Cargo tests。
+### 2026-10-14 Plan re-anchor for bounded R2 continuation
+
+`read-plan` 在 Linux 容器 `/repo` 上通过 descriptor-safe receipt 读取 canonical path `docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md`；bytes `75673`，digest `sha256:7ffaf98b4b4a25f5083fa91feab3655a5dab84272dfc15a3529c467ade1dee3f`，与 `evidence_provenance.generated_plan_path` 精确一致。计划 pinned HEAD 为 `0f5b4834dc17534083a0c503b2a0223ab44e3451`；schema-2 snapshot 当前 HEAD 为 `db5c8a1ab54272255e3b79c70121d6c902099337`，39 条 cited manifest 中 35 条层摘要与 pin 不同、现均为已提交/clean 状态；global dirty digest 从 `298284fa9c9bade8a54b6baccf9cb982f6f5d27d399b2cac701604f3d82daeff` 变为 `efb41f833e65026d4c2e7dc141d71b59b348ce8d44e0e229d13fa9dd4bd19f0a`。当前未引用的 `.agents/` 用户 harness 保留且未纳入改动。计划 avoid、R1–R3/R4 门和 N4 产品状态经计划 receipt 与当前 progress/lifetime evidence 核对仍一致；本次工作继续限于固定-hash静态证据和文档，没有更改计划正文或产品状态。

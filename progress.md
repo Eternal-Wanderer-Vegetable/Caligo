@@ -266,3 +266,10 @@
 - 文档检查：`init.ps1 -Mode docs` PASS（9 live docs / 200 local links / 33 historical entries / 10 features）；`feature_list.json` JSON PASS；`git diff --check` PASS（Git 仅提示 LF→CRLF）。GitNexus 强制重建后，Markdown Sections 数量为 execution/lifetime/thread/progress/handoff = 42/35/25/29/6；staged detect 映射 6 files / 64 symbols / 0 affected processes / low risk。JSON 没有 line-bearing Section node；已手动审阅只涉及 `updated`、feat-005 evidence 和 evidence_paths，状态仍 blocked。
 - 六个 tracked 状态/证据文件已提交为本次文档快照；未跟踪 `.agents/` harness 保留。提交后 Docker GitNexus 1.6.12 / Node 22.23.2 的 schema-4 status 与当前 HEAD 匹配，272 covered files、runner/content current、无 incomplete reasons；`detect-changes --scope all` 返回 `No changes detected`。忽略日志位于 `target-harness/n4-r2-weakref-{index,status,detect,detect-staged,postcommit-index,postcommit-status,postcommit-detect,plan-snapshot}.log`；未运行 Cargo、未操作 QQ/SnowLuma、未调用 native、未发送消息。
 - N4 计划 receipt 原文未改：canonical path `docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md`，75,673 bytes，SHA-256 `7ffaf98b4b4a25f5083fa91feab3655a5dab84272dfc15a3529c467ade1dee3f`，39 cited paths。GitNexus 分析仍有 callable-flow、REACHING_DEF、CDG、跨语言字段拒链及 process trace 截断；不以 missing graph edges 证明路径不存在。
+
+## 2026-10-14 N4-R2 TLS detach callback producer follow-up
+
+- 固定样本静态追踪补足 TLS detach 链：`0x3E67F70` 从 `TLS+0xB0` 链表逆序调用 callback，调用槽 `0x4909B18` 指向 `0x3EB1DE0 (jmp rax)`；`0x3E94F90` 跳转至调用 `HeapFree` 的释放函数。
+- TLS writer hunt 扩展至 1499 个 `.pdata` index-reference 候选、37 条首层参数边、46 条 helper 转发边和 50 个函数/参数状态，仍未在此覆盖内发现 producer。NTEngine destructor registration/执行仍未知；R2/R3 blockers 与 R4 hard gate 保持。
+- 新证据与扫描边界见[寿命合同 §7.26](docs/research/qq-native-lifetime-contract.md#726-tls-detach-callback-dispatch-与-producer-有界追踪-2026-10-14固定样本静态)和[N4 execution log](docs/execution/2026-10-11-n4-response-recovery.md)。本轮没有 QQ/SnowLuma/native/message/Cargo 行为；user-owned `.agents/` harness 保留。
+- N4 schema-2 计划按 `gitnexus-work` re-anchor：descriptor-safe receipt digest `7ffaf98b...1dee3f`，pinned HEAD `0f5b483`，当前 `db5c8a1`；39 个 cited entries 中 35 个摘要随已提交工作变化，当前未引用 `.agents/` user harness 保留。R1–R3/R4 gate 与 NOT READY 未变；详见执行记录计划重锚段。
