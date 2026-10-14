@@ -10,7 +10,7 @@
 
 1. `D32138` 的语义需要更正：它不是"执行器派发"，而是**通用任务调用原语**——对传入对象的 vtable **slot0** 做一次 4 参间接调用 `[verified]`。
 2. 任务提交的目标对象来自**每线程 TLS 槽**（index 单例 RVA `6753454`），槽内是 `{对象, 控制块}` pair，安装时对控制块 `+8` 做原子强引用递增 `[verified]`。
-3. 该 TLS 目标对象的安装点已定位到 worker 线程上下文初始化（`217D8CC → 217DA24 → D32E5A`），对象本体是 worker 上下文 `+0x30` 成员 pair 的首 qword `[verified]`；**其具体类别与 slot0 函数体仍未闭合** `[unknown]`。
+3. 该 TLS 目标对象的安装点位于 `217D8CC → 217DA24 → D32E5A`。2026-10-14 的字段复核更正早期来源简写：slot2 从 `ThreadTaskManagerImpl+0x30` 取 pointee，再复制该 pointee 自身 `+0x38/+0x40` pair 到新 holder 并安装；不是已证的 manager `+0x30` pair 首 qword。**该 pointee 的具体类别、TLS slot0 实际对象类别与函数体仍未闭合** `[unknown]`，详见 §13。
 4. R2 的 Core executor 单例（`9C0C68` 构造、静态存储 `750088`、vtable `3FAD868`/`3FAD8A8`）被证实存在且结构完整，但**它与 TLS 安装的 dispatcher 是否同一对象尚无证据**；R2"共同调用 D32138 不构成同一线程模型"的告诫被进一步强化 `[corrected]`。
 5. 发送主链 `732A80` 在 `732EB9` 处 `this+0x60` 的 vtable+0x38 调用，其安装来源在本轮有界扩展（ctor、getter 全部调用方、77 个 MSF vtable 槽、executor 辅助链、login 链）内**仍未找到写入者**；候选淘汰表见 §6，按计划失败分支转受控观测方案 `[unknown]`。
 6. login 观察者接口形状已闭合：`LoginRequestImpl`（RTTI 名 `nt::login::LoginRequestImpl`）vtable slot1 = 成功记录通知、slot2 = 状态码通知，均经 `this+0x20` 弱 pair 锁定后调用 `[verified]`。**session-ready 的充分条件仍未知** `[unknown]`。
@@ -48,16 +48,17 @@
 ### 3.2 安装点链
 
 ```
-217D8CC (worker 线程上下文收尾/初始化)
-  ├─ TlsSetValue(217D40D 的 index, worker 上下文自身)     ; 另一个 TLS 槽(工作上下文)
-  ├─ 63EC4(worker+0x30, out)                             ; 取 worker 的 dispatcher pair
-  └─ 217DA24(&newpair, dispatcher_pair)
-        └─ D32E5A(newpair, dispatcher_pair)              ; 写入 D32DAD 的 TLS 槽
+217D8CC (ThreadTaskManagerImpl slot 2)
+  ├─ 104C1C8(217D40D 的 TLS context, manager this)       ; context TLS 槽
+  ├─ 63EC4([manager+0x30], out)                          ; 复制该 pointee 的 +0x38/+0x40 pair
+  └─ 217DA24(&holder_ptr, source_pair)                   ; 分配 0x10 pair holder
+        └─ D32E5A(holder, source_pair)                   ; clone + strong incref，安装到 D32DAD TLS
+  └─ manager+0x40 = holder                               ; manager 保存同一 holder pointer
 ```
 
 证据：[phaseE/functions/217da24.c](E:/stella/_reference/qq-native-r3-p1-20261008/phaseE/functions/217da24.c)、[phaseF/functions/217d8cc.c](E:/stella/_reference/qq-native-r3-p1-20261008/phaseF/functions/217d8cc.c)。
 
-**推断（[inferred]）**：每个 worker 线程启动时把"自己的 dispatcher"装进自己的 TLS 槽；任务提交者（任意线程）读取 TLS 槽得到的是**本线程**的 dispatcher。该推断若成立，意味着"提交发生在哪条线程"决定哪个 dispatcher 执行——这正是 Caligo 合同必须显式约束的点；但 dispatcher 类别/slot0 体未闭合前，不得据此宣布任何线程合法。
+**推断（[inferred]）**：每个 worker 线程启动时把一个从 `ThreadTaskManagerImpl+0x30` pointee 派生的 pair holder 装进该线程 TLS 槽；TLS 中对象与该 worker 的调度关系尚未闭合。若提交目标确实随调用线程而变，则“提交发生在哪条线程”会决定目标对象——这是 Caligo 合同必须显式约束的点；在 slot0 实际目标类/函数体未闭合前，不得据此宣布任何线程合法。
 
 ## 4. MSFService 接收链的目标对象 [verified 结构, unknown 主体]
 
@@ -223,3 +224,30 @@ R2 owner/consumer/lifetime 与历史 `0xC0000005` 根因仍开放；R3 stable id
 
 - 固定 hash 的 `.rdata` 虚表在文件偏移 `0x425EC48`（RVA `0x4260448`）含 `0x217DD98` 函数项；前置 Complete Object Locator 的 TypeDescriptor 名为 `.?AVThreadTaskManagerImpl@internal@xpng@@`。该类析构路径为 `0x217DD98 → 0x217D4FA → 0x217D556 → 0x31F8372 → 0x14830`；末端遍历 shared-pair vector、逐项调用 `0x1DB2`，再以 16-byte 元素数调用 `0x1FD0` 释放缓冲区。这确认 manager 类存在该清理实现，但没有证明谁销毁对象、析构如何触发、线程退出关系、停机等待或异步 callback quiescence。
 - `.pdata` 全函数范围 xref 进一步确认 `0x217D242` 写入该双 vptr，是 `ThreadTaskManagerImpl` 构造函数；唯一直接构造调用点为 `0x217D16C`。后者分配 `0xF0` 字节对象、调用构造函数，再经 `0x217D35E` 建立 shared holder。`0xD31686` 调用该 factory，将 holder 转入自身 `+0x110`，再调 `0x217D58C`；其多个直接调用者包括全局发送初始化邻近路径 `0xB81758`。这些路径把 manager 实例与 holder/外层对象字段联系起来，但没有定位其销毁者，也未证明退出时执行析构或 callback drain。
+
+## 13. 2026-10-14 TLS pair 来源与 manager 字段边界更正（固定样本静态）
+
+固定磁盘 `wrapper.node` SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。本节修正 §1.3 与 §3.2 的早期来源简写，细节及可复核地址导出见[寿命合同 §7.18](qq-native-lifetime-contract.md#718-threadtaskmanager-tls-pair-来源与字段边界更正-2026-10-14-固定样本静态)。没有访问 QQ/SnowLuma、调用 native 或发送消息。
+
+- `ThreadTaskManagerImpl` 构造函数 `0x217D242` 将 `+0x30/+0x38` 作为 16-byte pair 清零，将 `+0x40` 单独清零；析构 `0x217D4FA` 分别对 `+0x40` 执行 holder 清理、对 `+0x30` 调 `0x1DB2` 释放 pair。
+- `0x217D8CC` 的 TLS 安装源并非已证的 manager `+0x30` pair 首 qword。该函数加载 `[manager+0x30]` 的 pointee，`0x63EC4` 从 pointee `+0x38/+0x40` 复制 pair；`0x217DA24` 分配 16-byte holder，`0xD32E5A` clone pair 并安装到 TLS，同时将同一 holder pointer 写入 manager `+0x40`。该 pointee 的 RTTI/业务类别仍未知。
+- `0x217DA96` 也从 `[manager+0x30]` 取 pointee并投影其 `+0x38/+0x40` pair。与此不同，`0x31F88EA` 的 TID 不相等路径把 manager 本身传给 `0x63EC4`，机械读取 manager `+0x38/+0x40`。这些偏移分别落在 manager `+0x30` pair 的控制块 qword与独立 `+0x40` holder pointer；把它们称作已识别的 manager-owned pair 已被撤回。该 projection 结果和 `D32138` 目标仍 unknown，不能由 slot3 路径外推。
+- 这一静态更正不改变 T1–T5 的只读结果，也不确定 TLS 中对象的真实类别、当前 owner、线程退出迁移、callback consumer 或 quiescence；未对 QQ 进行复采。本项不是 AV 根因结论，R4 继续受 R1–R3 门控。
+
+## 14. 2026-10-14 ThreadTaskManager `+0x30` 条件 writer（固定样本静态）
+
+固定-hash `wrapper.node` 的 `0x217D58C` 在 `r15b == byte[this+0x2D]` 分支把 `0x217D6D8` 生成的 pair 交给 `0x106E6`，写入 `this+0x30/+0x38`；`0x106E6` 增加强引用、复制 source pair 并释放旧 pair。配置写入追踪确认两个具体 setup 路径分别给出 bound/selector `{3,1}` 与 `{1,0}`，且都在 loop 中命中 selector；生成 pair 的 shared control block RTTI 指向 `TaskQueue`。详见[寿命合同 §7.19–§7.20](qq-native-lifetime-contract.md#719-threadtaskmanager-0x30-的条件写入与源-pair2026-10-14固定样本静态)。这两条静态路径不覆盖 30 个 `0xD31686` direct callsites 的全部输入，也没有映射到 T1–T5 的动态 dispatcher；slot2/slot3 全局调用顺序、manager owner/teardown 和 callback quiescence 仍 unknown。本静态结果不解释历史 AV，也不改变 R1–R3 准入门或 R4 状态。
+
+## 15. 2026-10-14 ThreadTaskManager 初始化配置与 TaskQueue pair（固定样本静态）
+
+`0x9C0C68 → 0xD31686` 的 constructor path 经 `0xD32508/0xD32512/0xD3251C` 将 `{0,0,0,0,3,1}` 传给 manager；另一直接调用点 `0xB81758 → 0xD31686` 传 `{0,0,0,0,1,0}`。这两种输入都确保 `0x217D58C` 条件写入 index 命中；线程创建 helper `0xD33418` 在该初始化返回后才调用。shared control-block RTTI 是 `std::__shared_ptr_emplace<TaskQueue,...>`。证据哈希与地址路径见[寿命合同 §7.20](qq-native-lifetime-contract.md#720-threadtaskmanager-配置字节taskqueue-rtti-与两个命中路径2026-10-14固定样本静态)。其它 direct callsites、现场实例对应关系、slot2/slot3 全局调用顺序、owner teardown、stop/drain/quiescence 及历史 AV 根因仍开放；R4 不准入，产品 NOT READY。
+
+## 16. 2026-10-14 全部直接 `D31686` caller 的配置覆盖（固定样本静态）
+
+后续固定样本枚举找到 30 个 rel32 `E8` 直接 callsite，并逐点核对传入的六字节配置：28 个使用 `0x4E6E5A` 默认初始化器，1 个（`0x01B63FF7`）直接以 `0xD324EC` 写同一默认尾字节，均得到 `{0,0,0,0,1,0}`；1 个（`0x009C0EE1`）覆盖尾字节为 `{3,1}`，得到 `{0,0,0,0,3,1}`。这 30 个静态 setup 输入分别令 `0x217D58C` 的 loop 选择 index 0 或 index 1，因而 writer 分支在各调用代码路径中可达；它不证明 30 个 setup 均在运行时执行、source pair 的动态有效性或具体现场 manager 的身份。完整 callsite 列表、逐点窗口和脚本哈希见[寿命合同 §7.21](qq-native-lifetime-contract.md#721-全部-30-个-d31686-直接调用点的-manager-配置来源2026-10-14固定样本静态)。manager owner / dispatcher membership / global slot2-slot3 调用次序 / teardown / stop-drain-quiescence / R3 identity / 历史 AV 均继续开放；R4 不准入，产品 NOT READY。
+
+## 17. 2026-10-14 manager/TaskQueue backreference ownership（固定样本静态）
+
+- 固定-hash RTTI 将 `0x217D35E` 构造的 manager 控制块识别为 `shared_ptr<ThreadTaskManagerImpl>`；构造路径把 manager strong pair 转为 `ThreadTaskManagerImpl+0x10` weak self-reference。初始化各 `TaskQueue` 时，manager `+0x10` 经 weak-lock shaped helper 获取临时 strong pair，再由 `0x31F8F5E` 将 weak pair 写入 `TaskQueue+0x48`。TaskQueue 自身的 shared control block RTTI 为 `TaskQueue`。详见[寿命合同 §7.22](qq-native-lifetime-contract.md#722-threadtaskmanager-与-taskqueue-间的弱引用边-2026-10-14固定样本静态)。
+- `ThreadTaskManagerImpl+0x48` vector 项和命中 selector 后的 manager `+0x30/+0x38` 都持有 TaskQueue strong pair；`TaskQueue+0x48` 回指 manager 的边为 weak。因此仅能排除这一条指定强引用环，不能推出 manager 无其他 owner、最后 owner/析构已知、所有 dispatcher 已停止或 callback 已排空。R2 teardown/quiescence、R3 stable identity 与历史 AV 仍未闭合；R4 未准入。
+- 脚本和报告 hash、counter 解释边界见寿命合同 §7.22。只做固定磁盘静态分析；未操作 QQ/SnowLuma、未调用 native、未发送消息。
