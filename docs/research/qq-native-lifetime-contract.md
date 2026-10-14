@@ -509,3 +509,13 @@ Reproducible local scripts and outputs under `E:\stella\_reference\n4-r2-callbac
 - 这证明该父级四槽调用点没有显式检查或传播 manager-stop 的返回状态；不证明 `D313D6` 没有阻塞等待，也不构成线程退出确认。已知深层 `D313D6 → D3355C` 路径执行 `WaitForSingleObject(INFINITE)` 后忽略 wait result，见 §7.15–§7.16；所选 index-0 虚调用的任务类型与全局 callback drain/quiescence 仍未知。
 - 复核使用 §7.31 的 `r2-parent-multislot-manager-setup-context-20261014.py/.txt`（SHA-256 `692C692D337D5EB8CF407F482D625AAF135DAD84851E82E818E39DFD18700D7D` / `9F2B33C7F2EB420441DC5B23B43BF4A5D314E3B5A72E5ABD205A70448BB15993`），并用 `r2-d313d6-stop-caller-windows-20261014.py/.txt`（SHA-256 `498137BBA7DA679CE7FABC337D0C933629AB80C72D945D592A397585F9752181` / `A6F37D3AF42D69006F8DEA7AC45FD835F97137638F162B6B0F5C31E4C5B12A9C`）核对 caller windows；两脚本均断言同一固定 hash。结论只覆盖固定映像中该函数的直接静态指令流。
 - R2 last-owner/完整 teardown 与 global callback quiescence、consumer ABI/thread、R3 stable identity 和旧 AV 仍未闭合；R4 不准入、feat-005/006 blocked、产品 NOT READY。未访问 QQ/SnowLuma、未调用 native、未发送消息、未运行 Cargo tests。
+
+### 7.35 Direct parent call graph for four-slot manager setup methods (2026-10-14, fixed-sample static)
+
+继续核对同一冻结 `wrapper.node`，SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。Capstone 5.0.7 按有效 `.pdata` 函数边界验证 rel32 `E8` 指令；未访问 QQ/SnowLuma。
+
+- `0x185806A` 将入口 `RCX` 保存至 `RDI`，随后在 `0x18580A3`、`0x18580B2`、`0x18580BE` 分别以同一 `RDI` 为 `RCX` 调 `0x18584E8`、`0x18585E2`、`0x18586DC`。这三项是 §7.31 四槽 setup 方法中的三个；高层 helper 确实向同一入口对象指针调用它们。该函数还调用 `0x1858493` 并管理局部 pair，但本记录不推断其类型或完整构造语义。
+- 另一 helper `0x1858D66` 将入口 `RCX` 保存至 `RSI`，在 `0x1858D86` 和 `0x1858D9E` 以同一 `RSI` 分别调用 `0x18585E2`、`0x1858E2C`。有界 caller census 找到 `0x185806A` 的两个直接调用点 `0x1857288`（函数 `0x18570AC`）与 `0x1859D79`（函数 `0x1859B1C`）；`0x1858D66` 的直接调用点为 `0x18588D3`（函数 `0x1858889E`）。
+- 这把三个既有 setup 方法接到一个上层 helper，并为另两个 setup 方法找到独立 helper；它不证明两个 helper 操作同一运行时实例，也没有将这些 helper 识别为特定 RTTI 类、析构函数或 finalizer。§7.31 的条件性 stop/update 与 pair release 结论不变；manager last strong owner、实际触发、成功等待、完整 task stop、callback drain/quiescence、consumer ABI/thread、R3 identity 与历史 AV 仍未闭合。
+
+本机固定-hash产物在 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\manager-method-scope-20261014\`：caller xref `r2-multislot-parent-xref-verified-20261014.py/.txt` SHA-256 `606A317DB4B560BCFB0E4207F669C33102A011A44E7F762186CB5E6277A43528` / `63AC42CA2D6A81BACA60B107E5A97549976BBF533CE00F10342DDC967CE84055`；selected function disassembly `r2-selected-owner-context-20261014.py/.txt` SHA-256 `B80F0C824ABD3E64C312D597F7A3C73C686DEEFC9DBEFADD2CCCE1C04A751AD0` / `3FC4887E2B4FF7C307C80AD76DA1291ED7DD43979730D0EA995059E832C35481`。两脚本均先校验输入 hash，范围是有效 `.pdata` 中的直接调用与所选函数机器码；不能据此排除间接调用、映像外调用或未知动态类型。R1–R3 仍开放，R4 不准入，feat-005/006 blocked，产品 NOT READY。

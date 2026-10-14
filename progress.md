@@ -321,3 +321,9 @@
 - 固定样本 §7.31 的 `0x1852D42` 反汇编显示四处 manager `D313D6` call 的 `RAX` 均未被消费，下一步控制判断只检查另一个 manager 字段或保存的 `BL`。父级路径没有显式 stop-success 状态；深层 `WaitForSingleObject(INFINITE)` 返回仍按 §7.15–§7.16 忽略，不证明线程未退出，也不证明 global callback drain/quiescence。
 - 静态证据与 artifact SHA-256 见寿命合同 §7.33–§7.34。R2 last-owner/完整 teardown、consumer ABI/thread、R3 identity、历史 AV 均 open；R4 不准入，feat-005/006 blocked，产品 NOT READY。仅固定磁盘静态分析，无 QQ/SnowLuma、native invocation、目标写入、发信或 Cargo tests。
 - 验证：`./init.ps1 -Mode docs` PASS（9 live docs / 207 local links / 33 historical entries / 10 features）；`feature_list.json` JSON parse PASS；`git diff --check` exit 0（Git 仅提示 LF→CRLF 规范化）。本轮没有运行 Cargo tests。
+
+### 2026-10-14 N4-R2 four-slot setup caller graph
+
+- 固定 wrapper hash 的 `.pdata`/Capstone 反向清点将 `0x185806A` 连到三个既有 setup 方法：它保存入口 `RCX` 到 `RDI` 后，以同一对象指针调用 `0x18584E8`、`0x18585E2`、`0x18586DC`。独立 helper `0x1858D66` 以保存的入口 `this` 调 `0x18585E2` 和 `0x1858E2C`；两个 helper 的直接调用者分别已计数。详见寿命合同 §7.35 与本次 execution 记录。
+- 本轮只细化静态 caller graph；没有把 helper 命名为 RTTI 类或生命周期方法，也没有证明两 helper 指向同一实例。manager last strong owner、finalizer 触发、wait 成功、全局 task stop/drain/quiescence、consumer ABI/thread、R3 identity 与历史 AV 仍 open。用户要求如需 QQ 则暂停说明；本轮无 QQ/SnowLuma/native/message 操作，R4 不准入，产品 NOT READY。
+- 验证：`.\init.ps1 -Mode docs` PASS（9 live docs / 207 local links / 33 historical entries / 10 features）；`feature_list.json` JSON PASS；`git diff --check` exit 0（仅 LF→CRLF 规范化提示）。Docker GitNexus 1.6.12 / Node 22.23.2 强制重建为 18,485 nodes / 49,342 edges / 148 clusters / 459 flows，status up-to-date、runner/content current（272 files）、无 incomplete reasons；staged detect 为 4 files / 13 Section symbols / 0 affected processes / low risk。仍有 callable-flow cap、REACHING_DEF 丢 311/4311、CDG skip 和 flow truncation 警告；低风险结论仅限文档 Section 命中。未运行 Cargo tests，未访问 QQ/SnowLuma。
