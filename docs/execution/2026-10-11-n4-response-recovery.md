@@ -395,3 +395,16 @@ feat-005 / feat-006 保持 blocked，整个项目保持 NOT READY。
 - dtor thunk `0x9C2C6C` 的直接 E8 caller 数为 0；dtor body `0x9C15D6` 只有 thunk `0x9C2C6C` 这一直接 caller。访问器反汇编中 ctor 后只见 guard footer 调用，没有显式 dtor 指针注册；未覆盖 function pointer/on-exit/runtime-finalizer 或间接调用。因此它仍是 manager child holder 的 outer-owner 候选，finalizer 最终是否注册和执行未知。
 - 冻结映像精确 preferred-VA qword scan 对 `0x18009C2C6C` 仅在 NTEngine vtable RVA `0x3FAD868` 命中一次；dtor body、静态 object 与 guard 的精确 VA 均无 qword 命中。扫描限制仅为精确绝对 qword 表示，不能证明无 relative/function-pointer/runtime finalizer。
 - 三组固定-hash脚本/输出及 SHA-256 见[寿命合同 §7.24](../research/qq-native-lifetime-contract.md#724-nteengine-静态访问器调用面与-finalizer-未知2026-10-14固定样本静态)。R2 manager last-owner/stop/drain/quiescence 与 R3 identity 仍未闭合，R4 不准入；feat-005/006 blocked，产品 NOT READY。只做固定磁盘静态分析，无 QQ/SnowLuma、native invocation、消息发送或 Cargo tests。
+
+### 2026-10-14 N4-R2 PE TLS finalizer 与析构 RVA 引用分类（固定样本静态）
+
+- 冻结 `wrapper.node` SHA-256 仍为 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。PE TLS 目录登记 `0x3E68820`（仅 reason 2 / `DLL_THREAD_ATTACH`；固定 callback 区间 begin=end=`0x490A2A0`，无表项）与 `0x3E67F70`（reason 0/3，即 process/thread detach，处理当前 TLS `+0xB0` callback list）。`0x3EB1DE0` 仅 `jmp rax`；第二条是间接 TLS callback-list 执行路径，注册者未知，不能排除 NTEngine dtor 被间接放入该列表。导入表没有 `atexit`/`_onexit`/`__cxa_atexit` 名称；`0x3E67E74` 的间接导入是 SRW lock/condition variable API。
+- 对 `.rdata/.data/.tls/_RDATA` 的对齐 DWORD direct-RVA 和 rel32-from-next 扫描，唯一析构 body `0x9C15D6` 命中在 `.rdata 0x4C81BC8`。对应 `.pdata`/UNWIND_INFO 的 handler data 含 `0x19930522` EH func-info，unwind map 位于 `0x4C81BC0`，故该引用归类为析构自身异常/清理元数据，不是 static-exit 注册槽。析构 thunk `0x9C2C6C` 无此编码命中。
+- 对 TLS index RVA `0x6755690` 做常见 RIP-relative 候选及 `GS:[0x58] → TLS index → TLS block` 数据流筛查：1499 个有效函数候选中仅 `0x3E67F70` 显式访问 TLS block `+0xB0`；该 pass 没找到注册 writer，覆盖不包含经 helper/wrapper 传递的所有可能路径。故 process-detach TLS callback 仍是可能的间接 finalizer 通道，NTEngine dtor 是否注册/触发仍 unknown。R2 manager last-owner、全任务 stop 与 callback drain/quiescence、R2 ABI/consumer 和 R3 identity 仍未闭合；R4 不准入，feat-005/006 blocked，产品 NOT READY。仅只读固定磁盘分析，没有 QQ/SnowLuma、native 调用、发信或 Cargo tests。
+- 固定 hash 脚本、输出和 SHA-256 详见[寿命合同 §7.25](../research/qq-native-lifetime-contract.md#725-pe-tls-callbacks-与析构-rva-命中分类-2026-10-14固定样本静态)。
+
+### 本轮文档与 GitNexus 验证（2026-10-14）
+
+- `init.ps1 -Mode docs` PASS：9 live docs、202 local links、33 historical entries、10 features。`git diff --check` exit 0；Git 提示四份本次文档下次写入时会按仓库规则转为 CRLF，没有 whitespace error。未运行 Cargo tests，因为本轮只新增固定样本研究证据与状态文档。
+- Docker GitNexus 1.6.12 / Node 22.23.2 以 `--force --pdg --skip-agents-md --skip-skills` 刷新；status `up-to-date`、runner identity current、content current（272 files）、`incompleteReasons=[]`，索引 HEAD `4dedd08ffccd33f8f54663d86555130d3274ecad`。最终 `detect-changes --scope all` 映射 4 files / 14 Section symbols / 0 affected processes / low risk，均为文档变更。
+- 分析仍有已知覆盖警告：callable flow 候选超过 cap、REACHING_DEF 对 `caligo-cli` 丢弃 311/4311 条、一个 CDG skipped，以及流程入口/分支截断（336/536 候选未排名、902 callees 跳过、14 walks budget-cut）。因此 0 affected processes 只表示本轮文档图映射结果，不能扩成项目代码全局无影响结论。

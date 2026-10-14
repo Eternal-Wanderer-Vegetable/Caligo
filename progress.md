@@ -15,6 +15,10 @@
 
 **GitNexus 文档 gate：** 首次 no-overlap 来自未包含 Markdown Section ranges 的旧图；强制重建后 5 份 Markdown 文件已索引 Section（42/35/25/29/6 个），新 detect 映射 6 files / 64 Section symbols / 0 affected processes / low risk。`feature_list.json` 仍只有 File node，故已另行审阅其三处行级变更且 JSON 解析通过；此结果只界定本次文档影响，不声称项目全局零风险。当前完整记录见本次 execution/handoff。
 
+**最新固定-hash finalizer 限界：** PE TLS callback `0x3E68820` 是 thread-attach 路径且固定 callback 区间为空；`0x3E67F70` 在 process/thread detach 遍历当前 TLS `+0xB0` callback list，注册者未找到，因此仍可能是间接 finalizer 通道。析构 body `0x9C15D6` 唯一对齐 RVA 命中经 `.pdata`/UNWIND_INFO 归类为自身 EH unwind map；没有 `atexit`/`_onexit`/`__cxa_atexit` 命名导入。NTEngine dtor 是否加入 TLS list 或由其他内部 finalizer 触发仍 unknown；R2/R3 gate 开放、R4 不准入，产品仍 NOT READY。
+
+**本轮验证：** `init.ps1 -Mode docs` PASS（9 live / 202 local links / 33 historical / 10 features），`git diff --check` exit 0（仅 LF→CRLF 警告）。Docker GitNexus 1.6.12 / Node 22.23.2 PDG rebuild 后 status up-to-date、runner/content current（272 files）、无 incomplete reasons；最新 detect 为 4 files / 14 Section symbols / 0 affected processes / low risk，均是文档变更。索引日志仍有 callable cap、REACHING_DEF 丢 311/4311、一个 CDG skip 与 flow truncation；0 processes 不代表代码路径全局无影响。未运行 Cargo tests；本轮未访问 QQ/SnowLuma。
+
 ## 当前产品验收边界
 
 依据：[N 阶段台账](docs/execution/2026-10-09-snowluma-parity/ledger.md) 的
