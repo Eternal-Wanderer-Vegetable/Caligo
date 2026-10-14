@@ -481,3 +481,15 @@ Reproducible local scripts and outputs under `E:\stella\_reference\n4-r2-callbac
 - Four-field setup/stop disassembly: `r2-parent-multislot-manager-setup-context-20261014.py/.txt`, SHA-256 `692C692D337D5EB8CF407F482D625AAF135DAD84851E82E818E39DFD18700D7D` / `9F2B33C7F2EB420441DC5B23B43BF4A5D314E3B5A72E5ABD205A70448BB15993`.
 - Direct callers and data-pointer/RTTI screen: `r2-multislot-owner-method-xrefs-20261014.py/.txt`, SHA-256 `52020025E8D85AFCD107831715FED9C4C5C5B05B419CD5482DB78EFE7DDFE30C` / `9CD54F29B68EF878756BA5C6B0FEB9DEB7165156FD45C1FE9E94F38E4031B07D`.
 - Direct stop-call windows: `r2-d313d6-stop-caller-windows-20261014.py/.txt`, SHA-256 `498137BBA7DA679CE7FABC337D0C933629AB80C72D945D592A397585F9752181` / `A6F37D3AF42D69006F8DEA7AC45FD835F97137638F162B6B0F5C31E4C5B12A9C`.
+
+### 7.32 `FileBridgeHostServiceImpl` field-to-four-slot stop/update path (2026-10-14, fixed-sample static)
+
+继续复核同一冻结 `wrapper.node`（SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`），只做磁盘 PE/RTTI/Capstone 静态读取。
+
+- 直接调用者扫描把 `0xA18CB4` 精确映射到 `.rdata` RVA `0x3FB7738`；该 vtable 从 RVA `0x3FB7718` 开始，前置 COL 的 TypeDescriptor 名为 `.?AVFileBridgeHostServiceImpl@wifiphoto@nt@@`，调用者是其 slot 4。该同一 vtable 的 slot 13 为 `0xA19830`，也是 `0x1852D42` 的直接调用者（四处）；因此 RTTI 现在识别了 stop/update 的一个外层 typed caller，但不据此给 `0x1852D42` 自身或其中四槽 manager pointee 命名。
+- slot-4 函数 `0xA18CB4` 对 `this+0xD8` 做非空检查；若非空，它从该 16-byte pair 取首 qword 作为 `RCX`，将入口 `EDX` 保持为调用参数、设置 `R8B=1`，直接调用 `0x1852D42`。返回后它将 `this+0xD8` 交给 `0x504AEC` pair-reset/release helper。故固定样本中可证一条“RTTI 识别的 `FileBridgeHostServiceImpl` 对象 `+0xD8` pair → four-slot stop/update → pair reset/release”条件性代码路径。
+- 此关系只识别调用方类型与成员槽，不证明 pair pointee 的动态类、这个方法是析构流程、方法在运行时到达、该 pair 是 manager 最后 strong owner、等待成功、所有 task 停止、callback drain/quiescence、consumer ABI/thread、R3 identity 或历史 AV 根因。slot-0 不被本结果用作析构/最终化证明；间接调用和映像外路径仍未覆盖。
+
+固定 hash 的可复核产物位于 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\manager-method-scope-20261014\`：`r2-multislot-stop-caller-rtti-20261014.py/.txt` SHA-256 `78C60E446FD9DF53B2A83F506294FAB66BD93C80EDF18FDE2C7C796CDC5F7197` / `675C4F69D3B18447D3D8832A6E3D65F5ED99FD316CBCD042910F05BEFEA0EC20`；`r2-filebridge-host-slot-context-20261014.py/.txt` `1877FE18FBDAC4EBD67A6B3F838BC7015647B4BBD0B27FD5B7B28620637C5973` / `800B496261F5441832EB727570086415A24FB3A29FBDF2493C1AF4FCB1DE917E`。前一脚本复核四槽 stop/update 的 16 个直接调用者对应的精确数据指针；后一脚本输出该 FileBridge RTTI vtable 相关 `.pdata` 函数完整 disassembly。
+
+R2 manager last-owner/完整 teardown 与 global callback quiescence、consumer ABI/thread，R3 stable identity 和旧 AV 仍未闭合；R4 不准入、feat-005/006 blocked、产品 NOT READY。未访问 QQ/SnowLuma、未调用 native、未发送消息、未运行 Cargo tests。

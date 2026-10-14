@@ -436,6 +436,12 @@ feat-005 / feat-006 保持 blocked，整个项目保持 NOT READY。
 - This extends owner teardown evidence beyond the NTEngine and `MSFThread_xpng` paths. It does not prove a runtime instance, final strong-owner status, successful wait, complete task stop, callback queue drain/quiescence, response consumer ABI/thread, stable native identity, or the historical AV cause. Detailed bounded disassembly and the fixed-hash script/report hashes are in [lifetime contract §7.29](../research/qq-native-lifetime-contract.md#729-threadpoolimpl-callback-manager-owner-stop-path-2026-10-14-fixed-sample-static).
 - Only the fixed disk image was read. No QQ/SnowLuma access, native invocation, target write, message send, or Cargo test occurred. R1–R3 remain open, R4 is not admitted, feat-005/006 remain blocked, and product status is NOT READY.
 
+### 2026-10-14 N4-R2 FileBridgeHostServiceImpl outer pair for the four-slot stop/update path (fixed-sample static)
+
+- Exact RTTI maps caller `0xA18CB4` to `FileBridgeHostServiceImpl@wifiphoto@nt` vtable slot 4; slot 13 (`0xA19830`) is another direct caller of `0x1852D42`. Slot 4 checks `this+0xD8`, passes its pair's first qword to `0x1852D42` when present, then resets/releases the pair via `0x504AEC`. This supplies a typed outer-field edge for the four-slot stop/update method without naming the pointee class.
+- The edge does not prove the method is a destructor path, that it runs, that `+0xD8` is the last strong owner, or that wait/task stop/callback drain succeeds. Exact addresses and fixed-hash script/report hashes are recorded in [lifetime contract §7.32](../research/qq-native-lifetime-contract.md#732-filebridgehostserviceimpl-field-to-four-slot-stopupdate-path-2026-10-14-fixed-sample-static).
+- Only fixed disk evidence was used. No QQ/SnowLuma access, native invocation, target write, send, or Cargo test occurred. R2 manager last-owner/quiescence and consumer ABI/thread, R3 identity, and the historical AV remain open; R4 stays not admitted, feat-005/006 remain blocked, and product status is NOT READY.
+
 ### 2026-10-14 N4-R2 four manager fields with matching setup and stop/update methods (fixed-sample static)
 
 - Fixed-hash Capstone follow-up mapped four setup methods to `this+0x1D0` (`0x18584E8`), `+0x188` (`0x18585E2`), `+0x1B8` (`0x18586DC`), and `+0x1A0` (`0x1858E2C`); each uses the field's first qword for `D31686`. Method `0x1852D42` conditionally sends the same four fields to `D313D6`. It is recorded as a stop/update path, not named as a destructor because its dynamic type and registration/trigger are unknown.

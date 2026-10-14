@@ -272,3 +272,7 @@ The `FileDragManagerWin@nt` RTTI vtable slot 2 `0x9C4852` installs a child point
 ## 22. 2026-10-14 four manager fields with matching setup and stop/update paths (fixed-sample static)
 
 Four setup methods populate `this+0x1D0`, `+0x188`, `+0x1B8`, and `+0x1A0` and each calls `D31686` on the corresponding field's first qword. A separate method conditionally calls `D313D6` on those same four offsets. Its owner type and runtime trigger are not identified; this is not proof of a destructor, final manager owner, successful wait, complete stop, or global callback quiescence. The full bounded record and artifact hashes are in lifetime contract §7.31; R2/R3 remain open and R4 stays not admitted.
+
+## 23. 2026-10-14 FileBridgeHostServiceImpl outer pair and four-slot stop/update call (fixed-sample static)
+
+The fixed RTTI vtable identifies `0xA18CB4` as slot 4 of `FileBridgeHostServiceImpl@wifiphoto@nt`; the same vtable's slot 13 is `0xA19830`, another direct caller of `0x1852D42`. In slot 4, a non-null pair at `this+0xD8` supplies its first qword to `0x1852D42`, then the pair is reset/released through `0x504AEC`. This identifies an outer typed caller/member edge for the four-slot stop/update path, but not the pointee's dynamic type, the final manager owner, or a destructor/finalizer trigger. Wait success, all-task stop, callback drain/quiescence, consumer ABI/thread, stable identity, and the historical AV remain open. See lifetime contract §7.32 and its fixed-hash artifacts; R2/R3 remain incomplete and R4 is not admitted.
