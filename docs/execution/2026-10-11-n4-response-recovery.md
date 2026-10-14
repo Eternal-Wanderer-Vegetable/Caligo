@@ -388,3 +388,9 @@ feat-005 / feat-006 保持 blocked，整个项目保持 NOT READY。
 - NTEngine ctor 路径 `0x9C0C68→0xD31686` 保存 child pair 于 `+0xE0`，并经 manager slot 1/index=1 把另一 TaskRunner pair 保存于 `+0xE8`。析构清理 `0x9C1700` 在字段非空时先对该 runner 调 `0xD32138`/slot 0，再释放复制 pair，随后清理原 `+0xE8` 与 `+0xE0`。RTTI vtable thunk `0x9C2C6C→0x9C15D6` 已识别；本次有限直接 E8 扫描只找到 ctor 的 `0x9C1928→0x9C0C68`，没有识别 dtor 实际注册/触发链。
 - 复核脚本/报告 hash 见[寿命合同 §7.23](../research/qq-native-lifetime-contract.md#723-taskrunner-的-manager-弱引用与-nte-engine-parent-release2026-10-14固定样本静态)。所有反汇编先核对同一 `wrapper.node` hash，扫描仅覆盖已解码函数与直接调用边界。
 - 当前证据不是 runtime stop/drain：NTEngine dtor 是否到达、child/manager last strong owner、manager 所有 TaskRunner/TaskQueue 的停止、wait 成功、callback queue drain/quiescence、R3 identity 与旧 AV 原因均未闭合。R1–R3 gates 仍开放、R4 不准入，feat-005/006 继续 blocked，产品 NOT READY。仅固定磁盘静态分析；无 QQ/SnowLuma 操作、native invocation、消息发送或 Cargo 测试。
+
+### 2026-10-14 N4-R2 NTEngine guarded static accessor 与 dtor finalizer 边界（固定样本静态）
+
+- `0x9C1928` 按 module-init epoch/TLS guard 检查后，在初始化分支将 RVA `0x6750088` 的静态存储交给 `0x9C0C68` 构造，执行 `0x3E67E74` guard footer 并返回该静态对象；guard RVA `0x67501E8`。按有效 `.pdata` 函数边界解码 rel32 callsite，找到 796 个直接 E8 调用 `0x9C1928`。该结果把 NTEngine 收敛为广泛使用的 guarded static accessor，不表示任何调用均发生或映射到 T1–T5 dispatcher。
+- dtor thunk `0x9C2C6C` 的直接 E8 caller 数为 0；dtor body `0x9C15D6` 只有 thunk `0x9C2C6C` 这一直接 caller。访问器反汇编中 ctor 后只见 guard footer 调用，没有显式 dtor 指针注册；未覆盖 function pointer/on-exit/runtime-finalizer 或间接调用。因此它仍是 manager child holder 的 outer-owner 候选，finalizer 最终是否注册和执行未知。
+- 脚本/输出与固定样本 hash 见[寿命合同 §7.24](../research/qq-native-lifetime-contract.md#724-nteengine-静态访问器调用面与-finalizer-未知2026-10-14固定样本静态)。R2 manager last-owner/stop/drain/quiescence 与 R3 identity 仍未闭合，R4 不准入；feat-005/006 blocked，产品 NOT READY。只做固定磁盘静态分析，无 QQ/SnowLuma、native invocation、消息发送或 Cargo tests。

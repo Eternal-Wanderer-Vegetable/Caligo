@@ -381,3 +381,13 @@ R2 的三条 getter 使用审计（`1760`/`15C0`/`4C40` 只取首 qword、不释
 - 上述 parent release 与 runner slot-0 调用是候选 teardown 序列，不证明 NTEngine dtor 实际到达、该 runner/manager 与现场 dispatcher 对应、所有 manager entry 已停止、句柄等待成功或 callback queue 已 drain/quiescent。`TaskRunner` 弱边消除了这条候选 cycle，但 child/manager last-owner、外层 holder 释放时机、R2 consumer/ABI 与 R3 identity 仍未闭合；R4 不准入。
 
 本机固定-hash复核位于 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\nte-engine-owner-followup-20261014\`：`r2-nte-cycle-lifetime-20261014.py/.txt` SHA-256 `01F3881AB2F28E2B6F80CBA60F85AAC9A9C79CE1D93BCD18474A6A81F585E6AC` / `D037AFACF1D797ABE0F3D031D838C68B6A44A1744B63763A54652D08E840BD88`；ctor/dtor xrefs `r2-nte-engine-ctor-dtor-xrefs-20261014.py/.txt` `F95799643D1C66817539FE139A9AB5FC73F321EA7BD1990ABA53BE9D8E535C54` / `E8BCDF065491C96A565B1D7FD191A9DBEC4F77A09A32964AE420468D8A7905A7`；parent pair helpers `r2-nte-parent-field-helpers-20261014.py/.txt` `94A4F3F8FA7547982C343D99DA7D7CD554331EF99F7BF66B6B5D63D2A71087D6` / `C9D22F2D908069A3824FC8BD53A6BF1D4F4E122E8D5861A2D8F5D56A5A670A88`。脚本先校验固定 `wrapper.node` hash；函数/调用者筛查有界，缺失 xref 不能证明无间接路径。
+
+### 7.24 NTEngine 静态访问器调用面与 finalizer 未知（2026-10-14，固定样本静态）
+
+继续在同一冻结 `wrapper.node` 上做有效 `.pdata` 与已解码直接 E8/RIP-relative 扫描；SHA-256 仍为 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`，不访问运行中的 QQ 或 SnowLuma。
+
+- `0x9C1928` 读取 module 的线程初始化 epoch、TEB TLS 与 guard，并在构造路径将静态存储 RVA `0x6750088` 交给 `0x9C0C68`，完成后执行 `0x3E67E74` guard footer 并返回该存储地址。guard 位于 RVA `0x67501E8`。该函数表现为 NTEngine 的 guarded module-static accessor；有效 `.pdata` 中识别到 796 个直接 rel32 `E8` 调用点，说明它是广泛使用的外层对象入口，不证明每个调用发生或其 manager 与 T1–T5 dispatcher 对应。
+- NTEngine vtable slot 0 的 dtor thunk 为 `0x9C2C6C`，bounded 直接 E8 scan 找到 0 个调用者；析构主体 `0x9C15D6` 的唯一直接 caller 是该 thunk。访问器反汇编显示 ctor 后调用 guard footer，但没有显式传入 dtor 指针或呈现 registration 调用；这不能排除函数指针/on-exit/runtime-finalizer 或模块退出路径。故 guarded static object 可列为 child manager holder 的外层 owner 候选，但对象最终化是否注册/执行、何时释放 manager last strong owner仍未知。
+- 本结果补充 §7.23 的 parent `+0xE0/+0xE8` 释放路径，不证明它在现场到达、析构序列成功、manager 所有 TaskRunner/TaskQueue 停止或 callback queue drain/quiescent。R2 ABI/consumer/teardown 与 R3 identity 仍开放，R4 不准入。
+
+本机固定-hash脚本/输出均先校验输入 hash：`E:\stella\_reference\n4-r2-callback-manager-static-20261013\nte-engine-owner-followup-20261014\r2-nte-static-owner-xrefs-20261014.py/.txt` SHA-256 `4157196D980BDEDC4161A4701FD9C51A306326CEC68F7205D3B8B4CAC2BEDF84` / `4830002B2C977B6ECDD832EAA3398DC2D8DB8228443B0F7AAD5CB265B1BC8F58`；guard helper `r2-nte-init-guard-followup-20261014.py/.txt` `825419BA062ED5C93145B98DE66D6A8FC968317E99F94E5B9A4B86F2147FCB8B` / `6E4D3838B605F7ACFA56300B1400A4359B373C98CB70BA69D1E79139C245C6A6`。调用者覆盖只含映像中解码的直接 E8 与 RIP-relative 代码引用，不能据此排除间接生命周期路径。
