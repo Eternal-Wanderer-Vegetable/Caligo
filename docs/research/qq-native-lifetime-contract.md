@@ -291,6 +291,15 @@ R2 的三条 getter 使用审计（`1760`/`15C0`/`4C40` 只取首 qword、不释
 
 固定-hash 复核文件在本机 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\manager-method-scope-20261014\`：`r2-manager-config-producer-20261014.py/.txt` SHA-256 `FF9E4C0D8EEACCB05A6E5079E00592495DE53426BC8E5A5A782D519FEFD04FBF` / `0056F41CCFC68695173E6C051E1B08CB7EB80EF7AC7B993DC0FBE2649B66DBB1`；`r2-manager-init-dispatch-rtti-20261014.py/.txt` `AD02A313D5336241E0012DCAE643E0CF6C738A0CDAA7D422C16405167B8F908A` / `DC964B06DDF2237C9CD6207ABC3DA95D021B56923DCD78A2A3301FCEA78F1930`。脚本对样本 hash 作校验；报告不提升 R2/R3 gate，R4 仍不准入，产品 NOT READY。
 
+### 7.36 `MSFService@nt` vtable slots 3–4 route through the send dispatcher (2026-10-14, fixed-sample static)
+
+继续只读固定 `wrapper.node`，SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`。Capstone 校验 rel32 `E8` 指令边界并以 `.pdata` 确定函数范围；RTTI 检查要求 MSVC x64 COL signature/self-RVA 一致。
+
+- 固定样本 `.rdata` 中的 vtable RVA `0x3F6E1C8` 紧邻 COL `0x3F6E600`；COL offset 为 `+0x10`，TypeDescriptor 为 `.?AVMSFService@nt@@`。该 vtable slot 3=`0x7329F6`、slot 4=`0x7333AC`。两函数都含经 `.pdata` 边界解码验证的直接调用 `0x732A80`：分别位于 `0x732A3E` 与 `0x7333E6`。slot 3/4 方法从其 `+0x10` secondary subobject `this` 调整回完整对象后进入 dispatcher；slot 4 调整指令为 `this-0x10`。这是固定映像中的 MSF service submission surface，不证明某现场运行实例执行过该路径。
+- 该 caller edge 将已知 `0x732A80` body/callback-manager transfer 路径收敛到 `MSFService@nt` 的两个具体虚槽。它没有识别 `0x73BD6C` 的实际 `param_1+0x30` callback target、callback owner/consumer TID、所有间接 manager caller 或 response identity；也不证明 stop/cancel/drain/quiescence、历史 AV 根因或 R3 stable identity。
+- 可复核本机产物位于 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\response-consumer-followup-20261014\`：`r2-response-consumer-direct-calls-20261014.py/.txt` SHA-256 `864BACD0E75B5DF8ACC0DD447B1AC5E434D782EFABDA392AC4DA67461AE6DA41` / `9DB4C279B77C045E476B02D7A7CF2B1C8AD24F064CF52AD2DE12A8565298CD1C`；`r2-response-consumer-msfservice-vtable-verified-20261014.py/.txt` SHA-256 `F5B985411E1F359712BAF0363CC87E2343C1082F941ED07DE5CA85627B066E23` / `0155E446D470A7456602C6C67D8D56BFB4992B4CE6D180A8DED82481DB1E449B`。脚本均拒绝非预期模块 hash；直接调用筛查只覆盖固定映像可识别 `.text` rel32 `E8`，RTTI 脚本只验证这两处方法地址与指定 MSFService vtable slot。所有间接调用及映像外路径仍在范围外。
+- 本增量仅定位静态提交入口；R2 consumer ABI/thread、last-owner/teardown/quiescence 与旧 AV、R3 identity 仍 open。R1–R3 门未满足，不准入 R4；产品 NOT READY。未访问 QQ/SnowLuma、未调用 native、未发送消息或运行 Cargo tests。
+
 ## 8. 对实现的硬约束
 
 1. Rust FFI 声明只能引用本文 `[verified]` 的几何与函数地址；`[inferred]` 项进入实现前必须先闭合。
