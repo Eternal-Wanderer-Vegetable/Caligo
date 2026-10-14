@@ -486,10 +486,26 @@ Reproducible local scripts and outputs under `E:\stella\_reference\n4-r2-callbac
 
 继续复核同一冻结 `wrapper.node`（SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`），只做磁盘 PE/RTTI/Capstone 静态读取。
 
-- 直接调用者扫描把 `0xA18CB4` 精确映射到 `.rdata` RVA `0x3FB7738`；该 vtable 从 RVA `0x3FB7718` 开始，前置 COL 的 TypeDescriptor 名为 `.?AVFileBridgeHostServiceImpl@wifiphoto@nt@@`，调用者是其 slot 4。该同一 vtable 的 slot 13 为 `0xA19830`，也是 `0x1852D42` 的直接调用者（四处）；因此 RTTI 现在识别了 stop/update 的一个外层 typed caller，但不据此给 `0x1852D42` 自身或其中四槽 manager pointee 命名。
-- slot-4 函数 `0xA18CB4` 对 `this+0xD8` 做非空检查；若非空，它从该 16-byte pair 取首 qword 作为 `RCX`，将入口 `EDX` 保持为调用参数、设置 `R8B=1`，直接调用 `0x1852D42`。返回后它将 `this+0xD8` 交给 `0x504AEC` pair-reset/release helper。故固定样本中可证一条“RTTI 识别的 `FileBridgeHostServiceImpl` 对象 `+0xD8` pair → four-slot stop/update → pair reset/release”条件性代码路径。
-- 此关系只识别调用方类型与成员槽，不证明 pair pointee 的动态类、这个方法是析构流程、方法在运行时到达、该 pair 是 manager 最后 strong owner、等待成功、所有 task 停止、callback drain/quiescence、consumer ABI/thread、R3 identity 或历史 AV 根因。slot-0 不被本结果用作析构/最终化证明；间接调用和映像外路径仍未覆盖。
+- RTTI 将 `0xA18CB4` 映射为 `FileBridgeHostServiceImpl@wifiphoto@nt` secondary-vtable slot 4；COL offset 为 `+0x20`，所以函数收到的 subobject `this+0xD8` 对应 complete-object `+0xF8`（布局复核见 §7.33）。同一 secondary vtable slot 13 的 `0xA19830` 也是 `0x1852D42` 的直接 caller。
+- slot-4 函数检查 subobject `this+0xD8` 是否非空；若非空，取该 16-byte pair 首 qword 为 `RCX`，保留入口 `EDX`、设置 `R8B=1` 后调用 `0x1852D42`，返回后经 `0x504AEC` reset/release 同一 pair。故固定样本支持条件性路径 `FileBridgeHostServiceImpl complete+0xF8 pair → four-slot stop/update → pair reset/release`，不命名 pair pointee。
+- 固定 hash 的可复核产物位于 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\manager-method-scope-20261014\`：`r2-multislot-stop-caller-rtti-20261014.py/.txt` SHA-256 `78C60E446FD9DF53B2A83F506294FAB66BD93C80EDF18FDE2C7C796CDC5F7197` / `675C4F69D3B18447D3D8832A6E3D65F5ED99FD316CBCD042910F05BEFEA0EC20`；`r2-filebridge-host-slot-context-20261014.py/.txt` `1877FE18FBDAC4EBD67A6B3F838BC7015647B4BBD0B27FD5B7B28620637C5973` / `800B496261F5441832EB727570086415A24FB3A29FBDF2493C1AF4FCB1DE917E`。前一脚本复核四槽 stop/update 的 16 个直接调用者对应的精确数据指针；后一脚本输出该 FileBridge RTTI vtable 相关 `.pdata` 函数完整 disassembly。
+- 该静态路径不证明 slot-0 是析构/finalizer、任一清理路径实际到达、pair 是 manager 最后 strong owner、wait 成功、所有 task 停止、callback drain/quiescence、consumer ABI/thread、R3 identity 或历史 AV 根因。间接调用与映像外路径未覆盖；R2/R3 未闭合，R4 不准入，feat-005/006 blocked，产品 NOT READY。未访问 QQ/SnowLuma、未调用 native、未发送消息、未运行 Cargo tests。
 
-固定 hash 的可复核产物位于 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\manager-method-scope-20261014\`：`r2-multislot-stop-caller-rtti-20261014.py/.txt` SHA-256 `78C60E446FD9DF53B2A83F506294FAB66BD93C80EDF18FDE2C7C796CDC5F7197` / `675C4F69D3B18447D3D8832A6E3D65F5ED99FD316CBCD042910F05BEFEA0EC20`；`r2-filebridge-host-slot-context-20261014.py/.txt` `1877FE18FBDAC4EBD67A6B3F838BC7015647B4BBD0B27FD5B7B28620637C5973` / `800B496261F5441832EB727570086415A24FB3A29FBDF2493C1AF4FCB1DE917E`。前一脚本复核四槽 stop/update 的 16 个直接调用者对应的精确数据指针；后一脚本输出该 FileBridge RTTI vtable 相关 `.pdata` 函数完整 disassembly。
+### 7.33 `FileBridgeHostServiceImpl` secondary-vtable offset 与 `+0xF8` pair field (2026-10-14, fixed-sample static)
 
-R2 manager last-owner/完整 teardown 与 global callback quiescence、consumer ABI/thread，R3 stable identity 和旧 AV 仍未闭合；R4 不准入、feat-005/006 blocked、产品 NOT READY。未访问 QQ/SnowLuma、未调用 native、未发送消息、未运行 Cargo tests。
+继续使用同一冻结 `wrapper.node` SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`，校验同类两个相邻 vtable 及对该表的代码引用。
+
+- primary vtable RVA `0x3FB7708` 与 secondary vtable RVA `0x3FB7718` 的前置 COL 都命名 `.?AVFileBridgeHostServiceImpl@wifiphoto@nt@@`；COL offsets 分别为 `0` 与 `0x20`。因此 slot 4 的 `0xA18CB4` 收到的是 secondary subobject `this = complete + 0x20`，其 `this+0xD8` pair 地址等于完整对象 `+0xF8`。同一 secondary 表 slot 13 为 `0xA19830`。
+- `0xA174D4` 的静态 setup 写 primary vptr 到 `[this]`、secondary vptr 到 `[this+0x20]`，并把 `[this+0xB0]` 与长度 `0x88` 交给 helper `0x3EB2680`；该范围覆盖 complete-object `+0xF8`，但此处不单独命名 helper 的类型初始化语义。`0xA17854` 也写这两个 vptr，并在其函数路径对 `[this+0xF8]` 调 `0x1DB2` pair-release。该静态字段初始化范围与清理调用为 §7.32 的 slot-4 `complete+0xF8 → 0x1852D42 → 0x504AEC` 路径提供地址交叉核对；`0xA17854` 不据此命名为 destructor，也不能证明两条清理路径何时执行。
+- 因此已识别固定样本中的 typed outer field 以及它的两个静态 cleanup callsite，但 pointee 动态类、最后 strong owner、实际析构/stop trigger、wait 成功、所有 task stop、callback drain/quiescence、consumer ABI/thread、R3 identity 与历史 AV 仍未知。R2/R3 不完整，R4 不准入，feat-005/006 blocked，产品 NOT READY。
+
+固定样本复核脚本与报告在 `E:\stella\_reference\n4-r2-callback-manager-static-20261013\manager-method-scope-20261014\`：`r2-filebridge-col-offset-20261014.py/.txt` SHA-256 `8B8712D101E63426D5488407C1E008694CAC1C90AEAE760762622DB4353D7A8C` / `F5E2EB8825D6BA1660CBEA431C277471E5272D20B2FDD257B058C80393A14F15`；`r2-filebridge-vtable-writers-20261014.py/.txt` SHA-256 `82F914F4C570740262EF42F951E4C2F454D6401D2B537BBC36A519E33AF43C26` / `77C8A527BBD3A399A181163EBAE94DB5B8BAD7689036C62960A6091A97FAC581`。脚本均断言精确 wrapper hash；writer scan 对候选 RIP-relative LEA 做 Capstone 与 `.pdata` 边界复核，范围不覆盖运行时/映像外或间接写入。
+
+### 7.34 four-slot stop/update callsites do not consume a return status (2026-10-14, fixed-sample static)
+
+复核 §7.31 的同一固定样本 `wrapper.node` 与完整 `0x1852D42` 反汇编，重点查看每个 manager-stop call 之后的返回值数据流。
+
+- `0x1852E41` 对 `+0x188` 调 `D313D6` 后，下一条控制判断是比较 `[rsi+0x1A0]`；`0x1852EDB` 对 `+0x1A0` 调用后转而读取 `[rsi+0x1B8]`；`0x1852EEC` 对 `+0x1B8` 调用后读取 `[rsi+0x1D0]`；`0x1852EFD` 对 `+0x1D0` 调用后检查保存的输入标志 `BL`。四处均没有消费/测试该调用的 `RAX` 返回值，且 flags 分支来源是后续 `cmp/test`。
+- 这证明该父级四槽调用点没有显式检查或传播 manager-stop 的返回状态；不证明 `D313D6` 没有阻塞等待，也不构成线程退出确认。已知深层 `D313D6 → D3355C` 路径执行 `WaitForSingleObject(INFINITE)` 后忽略 wait result，见 §7.15–§7.16；所选 index-0 虚调用的任务类型与全局 callback drain/quiescence 仍未知。
+- 复核使用 §7.31 的 `r2-parent-multislot-manager-setup-context-20261014.py/.txt`（SHA-256 `692C692D337D5EB8CF407F482D625AAF135DAD84851E82E818E39DFD18700D7D` / `9F2B33C7F2EB420441DC5B23B43BF4A5D314E3B5A72E5ABD205A70448BB15993`），并用 `r2-d313d6-stop-caller-windows-20261014.py/.txt`（SHA-256 `498137BBA7DA679CE7FABC337D0C933629AB80C72D945D592A397585F9752181` / `A6F37D3AF42D69006F8DEA7AC45FD835F97137638F162B6B0F5C31E4C5B12A9C`）核对 caller windows；两脚本均断言同一固定 hash。结论只覆盖固定映像中该函数的直接静态指令流。
+- R2 last-owner/完整 teardown 与 global callback quiescence、consumer ABI/thread、R3 stable identity 和旧 AV 仍未闭合；R4 不准入、feat-005/006 blocked、产品 NOT READY。未访问 QQ/SnowLuma、未调用 native、未发送消息、未运行 Cargo tests。

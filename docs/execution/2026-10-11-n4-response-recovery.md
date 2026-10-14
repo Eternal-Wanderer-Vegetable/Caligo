@@ -438,9 +438,15 @@ feat-005 / feat-006 保持 blocked，整个项目保持 NOT READY。
 
 ### 2026-10-14 N4-R2 FileBridgeHostServiceImpl outer pair for the four-slot stop/update path (fixed-sample static)
 
-- Exact RTTI maps caller `0xA18CB4` to `FileBridgeHostServiceImpl@wifiphoto@nt` vtable slot 4; slot 13 (`0xA19830`) is another direct caller of `0x1852D42`. Slot 4 checks `this+0xD8`, passes its pair's first qword to `0x1852D42` when present, then resets/releases the pair via `0x504AEC`. This supplies a typed outer-field edge for the four-slot stop/update method without naming the pointee class.
-- The edge does not prove the method is a destructor path, that it runs, that `+0xD8` is the last strong owner, or that wait/task stop/callback drain succeeds. Exact addresses and fixed-hash script/report hashes are recorded in [lifetime contract §7.32](../research/qq-native-lifetime-contract.md#732-filebridgehostserviceimpl-field-to-four-slot-stopupdate-path-2026-10-14-fixed-sample-static).
-- Only fixed disk evidence was used. No QQ/SnowLuma access, native invocation, target write, send, or Cargo test occurred. R2 manager last-owner/quiescence and consumer ABI/thread, R3 identity, and the historical AV remain open; R4 stays not admitted, feat-005/006 remain blocked, and product status is NOT READY.
+- Exact RTTI maps caller `0xA18CB4` to `FileBridgeHostServiceImpl@wifiphoto@nt` secondary-vtable slot 4. Its COL offset is `+0x20`, so slot-4 subobject `this+0xD8` is complete-object `+0xF8`; slot 13 (`0xA19830`) is another direct caller of `0x1852D42`. Slot 4 checks the pair, passes its first qword to `0x1852D42` when present, then resets/releases it via `0x504AEC`. The secondary-vtable adjustment and field writer/cleanup cross-check are recorded in [lifetime contract §§7.32–7.33](../research/qq-native-lifetime-contract.md#732-filebridgehostserviceimpl-field-to-four-slot-stopupdate-path-2026-10-14-fixed-sample-static).
+- This edge does not prove the method is a destructor path, that it runs, that the pair is the last strong owner, or that wait/task stop/callback drain succeeds. R2 manager last-owner/quiescence and consumer ABI/thread, R3 identity, and the historical AV remain open; R4 stays not admitted, feat-005/006 remain blocked, and product status is NOT READY.
+- Only fixed disk evidence was used. No QQ/SnowLuma access, native invocation, target write, message send, or Cargo test occurred.
+
+### 2026-10-14 N4-R2 four-slot stop/update return-status boundary (fixed-sample static)
+
+- Re-read the fixed-hash `0x1852D42` disassembly: the calls at `0x1852E41` (`+0x188`), `0x1852EDB` (`+0x1A0`), `0x1852EEC` (`+0x1B8`), and `0x1852EFD` (`+0x1D0`) do not consume `RAX`; subsequent control flow checks another slot or the preserved `BL` input flag. Thus this parent method exposes no explicit stop-success status at those callsites.
+- This does not negate the deep `D313D6 → D3355C` infinite wait; §7.15–§7.16 records that `WaitForSingleObject`'s return is ignored and the task selected for the virtual stop remains unidentified. Evidence hashes and limits are in [lifetime contract §7.34](../research/qq-native-lifetime-contract.md#734-four-slot-stopupdate-callsites-do-not-consume-a-return-status-2026-10-14-fixed-sample-static).
+- R2 last-owner/quiescence and consumer ABI/thread, R3 identity, and the historical AV remain open; R4 stays not admitted, feat-005/006 remain blocked, and product status is NOT READY. Only fixed disk evidence was used; no QQ/SnowLuma access, native invocation, target write, message send, or Cargo test occurred.
 
 ### 2026-10-14 N4-R2 four manager fields with matching setup and stop/update methods (fixed-sample static)
 

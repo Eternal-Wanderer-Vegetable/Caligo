@@ -311,6 +311,13 @@
 
 ## 2026-10-14 N4-R2 FileBridgeHostServiceImpl four-slot stop/update caller
 
-- 固定 `wrapper.node` RTTI 将 `0xA18CB4` 识别为 `FileBridgeHostServiceImpl@wifiphoto@nt` vtable slot 4；该方法在 pair `this+0xD8` 非空时取首 qword 调 `0x1852D42`，随后 `0x504AEC` reset/release。相同 vtable slot 13 的 `0xA19830` 是该 stop/update 方法的另一个直接 caller。证据仅把 typed outer field 连到四槽 stop/update，不命名 pair pointee，也不把它定性为 destructor/finalizer。
-- 固定样本及脚本/输出 hash 见寿命合同 §7.32。本项不证明运行时触发、last strong owner、成功 wait、全 task stop、callback drain/quiescence、consumer ABI/thread、R3 identity 或 AV 根因。R2/R3 未完成、R4 未准入、feat-005/006 blocked、产品 NOT READY。
+- 固定 `wrapper.node` RTTI 将 `0xA18CB4` 识别为 `FileBridgeHostServiceImpl@wifiphoto@nt` secondary-vtable slot 4；COL offset `+0x20` 意味着该方法的 subobject `this+0xD8` 是 complete-object `+0xF8`。该 pair 非空时取首 qword 调 `0x1852D42`，随后 `0x504AEC` reset/release。相同 secondary vtable slot 13 的 `0xA19830` 是该 stop/update 方法的另一个直接 caller。证据仅把 typed outer field 连到四槽 stop/update，不命名 pair pointee，也不把它定性为 destructor/finalizer。
+- 固定样本及脚本/输出 hash 见寿命合同 §§7.32–7.33。本项不证明运行时触发、last strong owner、成功 wait、全 task stop、callback drain/quiescence、consumer ABI/thread、R3 identity 或 AV 根因。R2/R3 未完成、R4 未准入、feat-005/006 blocked、产品 NOT READY。
 - 验证：`.\init.ps1 -Mode docs` PASS（9 live docs / 207 local links / 33 historical entries / 10 features），`feature_list.json` JSON PASS，`git diff --check` PASS（Git 提示 LF→CRLF 规范化）。Docker GitNexus 1.6.12 / Node 22.23.2 schema-4 runner/content current（272 files，无 incomplete reasons）；强制 clean index 为 18,477 nodes / 49,334 edges / 148 clusters / 459 flows；最终 staged detect 映射 5 files / 15 Section symbols / 0 affected processes / low risk，含新增 §7.32 与 §23。一次增量重索引的暂时结果将文档根 Section 映射到 459 条全仓流程并误报 critical；结构化结果确认变更节点均为 Markdown Section，强制重建后影响门恢复为 0/low。保留 callable-flow、REACHING_DEF、CDG、跨语言与 process-truncation 警告；未运行 Cargo tests。仅静态磁盘分析，未访问 QQ/SnowLuma、调用 native 或发消息。
+
+### 2026-10-14 N4-R2 FileBridge pair offset and stop-status correction
+
+- 寿命合同 §7.32–§7.33 将 `FileBridgeHostServiceImpl` 次级 vtable COL offset `+0x20` 纳入布局：slot-4 subobject `this+0xD8` 对应完整对象 `+0xF8`；writer setup 与 `[this+0xF8]` pair cleanup 提供静态交叉核对。旧偏移按 complete-object 写法已纠正，未扩大 pair pointee 类型结论。
+- 固定样本 §7.31 的 `0x1852D42` 反汇编显示四处 manager `D313D6` call 的 `RAX` 均未被消费，下一步控制判断只检查另一个 manager 字段或保存的 `BL`。父级路径没有显式 stop-success 状态；深层 `WaitForSingleObject(INFINITE)` 返回仍按 §7.15–§7.16 忽略，不证明线程未退出，也不证明 global callback drain/quiescence。
+- 静态证据与 artifact SHA-256 见寿命合同 §7.33–§7.34。R2 last-owner/完整 teardown、consumer ABI/thread、R3 identity、历史 AV 均 open；R4 不准入，feat-005/006 blocked，产品 NOT READY。仅固定磁盘静态分析，无 QQ/SnowLuma、native invocation、目标写入、发信或 Cargo tests。
+- 验证：`./init.ps1 -Mode docs` PASS（9 live docs / 207 local links / 33 historical entries / 10 features）；`feature_list.json` JSON parse PASS；`git diff --check` exit 0（Git 仅提示 LF→CRLF 规范化）。本轮没有运行 Cargo tests。
