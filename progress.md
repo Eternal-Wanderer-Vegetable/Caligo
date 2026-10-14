@@ -273,3 +273,9 @@
 - TLS writer hunt 扩展至 1499 个 `.pdata` index-reference 候选、37 条首层参数边、46 条 helper 转发边和 50 个函数/参数状态，仍未在此覆盖内发现 producer。NTEngine destructor registration/执行仍未知；R2/R3 blockers 与 R4 hard gate 保持。
 - 新证据与扫描边界见[寿命合同 §7.26](docs/research/qq-native-lifetime-contract.md#726-tls-detach-callback-dispatch-与-producer-有界追踪-2026-10-14固定样本静态)和[N4 execution log](docs/execution/2026-10-11-n4-response-recovery.md)。本轮没有 QQ/SnowLuma/native/message/Cargo 行为；user-owned `.agents/` harness 保留。
 - N4 schema-2 计划按 `gitnexus-work` re-anchor：descriptor-safe receipt digest `7ffaf98b...1dee3f`，pinned HEAD `0f5b483`，当前 `db5c8a1`；39 个 cited entries 中 35 个摘要随已提交工作变化，当前未引用 `.agents/` user harness 保留。R1–R3/R4 gate 与 NOT READY 未变；详见执行记录计划重锚段。
+
+## 2026-10-14 N4-R2 NTEngine parent-to-child destructor edge
+
+- 固定 hash 静态路径现闭合为：NTEngine `+0xE0` raw child owner 清理时，非空旧指针会经 `0x4E91BE` 调 `0xD31356`，再由 `0xB75029` 释放；child dtor 先进入既有 `0xD313D6` stop/wait，再对 child `+0x110` 释放 manager shared holder。NTEngine `+0xE8` 在另一处单独释放 pair。详细地址、偏移边界与脚本/output hash 见[寿命合同 §7.27](docs/research/qq-native-lifetime-contract.md#727-nteengine-0xe0-raw-owner-到-child-destructor-与-manager-holder-release2026-10-14固定样本静态)和[执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。
+- 这是以 NTEngine dtor 执行且 `+0xE0` 非空为条件的静态 teardown edge，不证明 finalizer 注册/触发、manager last strong owner、wait 成功、完整 task stop、callback drain/quiescence、R2 consumer ABI/thread、R3 identity 或旧 AV 根因。构造 helper 对 `0x180D3111E2` 的绝对调用仍在冻结映像外，归属/语义未知。
+- 验证：`.\init.ps1 -Mode docs` PASS（9 live docs / 207 local links / 33 historical entries / 10 features）；`feature_list.json` JSON PASS；`git diff --check` PASS（仅 Git 的 LF→CRLF 规范化提示）。Docker GitNexus staged gate 在本行最后修改前报 5 files / 16 symbols / 0 affected processes / low risk；CLI 展示 15 个 Section nodes 并省略 1 项，结合其既有 File-node 映射，已单独人工审阅 `feature_list.json` 状态/evidence/path diff。该行修改后重新运行 gate。工作仅固定磁盘静态证据，无 QQ/SnowLuma/native/message/Cargo 行为；feat-005/006 继续 blocked，产品 NOT READY，R4 不准入。
