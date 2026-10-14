@@ -268,3 +268,7 @@ The fixed-hash RTTI vtable maps `ThreadPoolImpl@internal@xpng` slot 2 to `0x290C
 ## 21. 2026-10-14 FileDragManagerWin child stop and holder release (fixed-sample static)
 
 The `FileDragManagerWin@nt` RTTI vtable slot 2 `0x9C4852` installs a child pointer at `this+0xA8` and calls `D31686` on it. The slot-0 teardown chain reaches `0x9C47DE → 0x4E6872 → 0x4E91A6`; for a non-null old child, `0x4E91BE` invokes `D31356` before freeing the child, which reaches the established `D313D6` stop path and releases child `+0x110`. Actual object lifetime, manager last-owner status, successful wait, full dispatcher quiescence, and callback consumer ABI/thread remain unknown; see lifetime contract §7.30 and its hash-pinned artifact.
+
+## 22. 2026-10-14 four manager fields with matching setup and stop/update paths (fixed-sample static)
+
+Four setup methods populate `this+0x1D0`, `+0x188`, `+0x1B8`, and `+0x1A0` and each calls `D31686` on the corresponding field's first qword. A separate method conditionally calls `D313D6` on those same four offsets. Its owner type and runtime trigger are not identified; this is not proof of a destructor, final manager owner, successful wait, complete stop, or global callback quiescence. The full bounded record and artifact hashes are in lifetime contract §7.31; R2/R3 remain open and R4 stays not admitted.

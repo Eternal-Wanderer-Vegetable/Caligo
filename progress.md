@@ -301,3 +301,10 @@
 - `.\init.ps1 -Mode docs` PASS：9 live docs / 207 local links / 33 historical entries / 10 features；`feature_list.json` JSON PASS（feat-005 仍 blocked）；`git diff --check` PASS（Git 仅提示 LF→CRLF 规范化）。ThreadPoolImpl 与 FileDragManagerWin 两份固定-hash 脚本均复跑成功，报告与脚本 SHA-256 分别见寿命合同 §7.29、§7.30。
 - Docker GitNexus 1.6.12 / Node 22.23.2 强制索引成功：18,469 nodes / 49,326 edges / 148 clusters / 459 flows；status up-to-date、runner/content current（272 files），staged detect 为 6 files / 24 Section symbols / 0 affected processes / low risk。索引保留 callable-flow/REACHING_DEF/CDG/跨语言/process truncation 警告；0 processes 只代表本次文档 Section 命中，不证明源码全局零影响。
 - 本轮只做固定-hash 磁盘静态分析和文档；未跑 Cargo、未操作 QQ/SnowLuma、未调用 native、未发消息。feat-005/006 继续 blocked，产品 NOT READY，R4 不准入。
+
+## 2026-10-14 N4-R2 four manager fields with matching setup/stop paths
+
+- 固定 wrapper hash 下，`0x18584E8 / 0x18585E2 / 0x18586DC / 0x1858E2C` 分别设置 owner `+0x1D0 / +0x188 / +0x1B8 / +0x1A0` 的 manager pair，并以首 qword 调 `D31686`；`0x1852D42` 在字段非空时对同四个位置调 `D313D6`。按证据称为 stop/update method，不外推为 destructor 或特定动态类。
+- `0x1852D42` 有 22 个直接 E8 调用点/16 个 caller functions；全映像 `D313D6` 直接 census 为 18 点/12 个 caller functions。两条另行定位的 `0x33D89AC`、`0x33D9304` 路径同时含 manager `D31686` setup 与同一局部 pair 的条件性 `D313D6` 清理。所有结论限固定 wrapper，间接/out-of-image caller 未覆盖。
+- 可复核脚本、报告及 SHA-256 见寿命合同 §7.31，位于本机 `_reference/n4-r2-callback-manager-static-20261013/manager-method-scope-20261014/`。这仍不证明现场实例、触发时机、last strong owner、wait 成功、全 task stop、callback drain/quiescence、consumer ABI/thread、R3 identity 或 AV 根因；R1–R3 open、R4 不准入、feat-005/006 blocked、产品 NOT READY。
+- 验证：`.\init.ps1 -Mode docs` PASS（9 live docs / 207 local links / 33 historical entries / 10 features），feature JSON 与三个复跑脚本 SHA-256 PASS，`git diff --check` PASS（仅 LF→CRLF 提示）。Docker GitNexus 1.6.12 / Node 22.23.2 schema-4 runner 当前、272 files、无 incomplete reasons；强制索引 18,473 nodes / 49,330 edges / 148 clusters / 459 flows，staged detect 5 files / 18 Section symbols / 0 processes / low risk，完整符号均为文档 Section。索引的 callable-flow/REACHING_DEF/CDG/跨语言/process truncation 限制保留；未运行 Cargo 或操作 QQ/SnowLuma。

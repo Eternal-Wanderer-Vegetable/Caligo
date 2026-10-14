@@ -467,3 +467,17 @@ The same frozen `wrapper.node` hash was checked by a separate bounded Capstone/R
 - This is an additional static owner-to-child teardown path. It does not prove runtime construction or destructor execution, manager last-owner status, successful wait, all-task stop, callback drain/quiescence, response-consumer ABI/thread, stable native identity, or the historical AV cause. R1–R3 remain open and R4 remains not admitted.
 
 Local artifacts in `E:\stella\_reference\n4-r2-callback-manager-static-20261013\manager-method-scope-20261014\` (the script asserts the frozen image hash): `r2-filedrag-manager-owner-stop-chain-20261014.py/.txt`, SHA-256 `EAE21E4CE8660D1C3852DF941D8C6517AE222F86DF27924A76450183E7B8A66A` / `FBF5CD676007342D1E0A3D2D97170A0D1BD56BFD262CA8D050E37DD85C7B837C`.
+
+### 7.31 Four manager fields with matching setup and stop/update methods (2026-10-14, fixed-sample static)
+
+The fixed `wrapper.node` SHA-256 remains `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`.
+
+- Four bounded setup methods use matching `this`-relative manager fields: `0x18584E8` checks and populates `+0x1D0`, `0x18585E2` `+0x188`, `0x18586DC` `+0x1B8`, and `0x1858E2C` `+0x1A0`. Each loads the field's first qword and calls `D31686` with a local pair-shaped configuration. These exact fields are also checked and passed to `D313D6` by method `0x1852D42`; its cleanup order is `+0x188`, `+0x1A0`, `+0x1B8`, `+0x1D0`. The evidence supports a four-slot owner layout and a stop/update path, not a destructor claim.
+- The stop/update method has 22 direct E8 callers across 16 function entries. The fixed-image direct `D313D6` census contains 18 callsites across 12 caller functions. Two other methods, `0x33D89AC` and `0x33D9304`, contain both a `D31686` setup call and conditional/error-path `D313D6` calls on the same local manager pair. A bounded exact function-pointer/RTTI scan did not identify a dynamic class name for the four-slot methods; indirect callers and code outside the frozen image are out of scope.
+- This does not prove a runtime instance, actual teardown trigger, manager final strong owner, successful wait, full task stop, callback drain/quiescence, response-consumer ABI/thread, stable identity, or the historical AV cause. R1–R3 remain open and R4 is not admitted.
+
+Reproducible local scripts and outputs under `E:\stella\_reference\n4-r2-callback-manager-static-20261013\manager-method-scope-20261014\` (each asserts the fixed image hash):
+
+- Four-field setup/stop disassembly: `r2-parent-multislot-manager-setup-context-20261014.py/.txt`, SHA-256 `692C692D337D5EB8CF407F482D625AAF135DAD84851E82E818E39DFD18700D7D` / `9F2B33C7F2EB420441DC5B23B43BF4A5D314E3B5A72E5ABD205A70448BB15993`.
+- Direct callers and data-pointer/RTTI screen: `r2-multislot-owner-method-xrefs-20261014.py/.txt`, SHA-256 `52020025E8D85AFCD107831715FED9C4C5C5B05B419CD5482DB78EFE7DDFE30C` / `9CD54F29B68EF878756BA5C6B0FEB9DEB7165156FD45C1FE9E94F38E4031B07D`.
+- Direct stop-call windows: `r2-d313d6-stop-caller-windows-20261014.py/.txt`, SHA-256 `498137BBA7DA679CE7FABC337D0C933629AB80C72D945D592A397585F9752181` / `A6F37D3AF42D69006F8DEA7AC45FD835F97137638F162B6B0F5C31E4C5B12A9C`.
