@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，本次继续单一工作块 N4-R2。地址范围更正 `3291e95` 与其 graph closeout `2d2330f` 已提交；§7.71 / thread §43 记录 `D30FF0` payload fields；§7.72 / thread §44 分类 `D3355C` 的第二直接调用点。当前待提交阶段追加寿命合同 §7.73 / thread §45，闭合 `ThreadPoolImpl` 类内 `+0xA0` 子项的 setup→stop→release 顺序，但未连到 manager global。
+- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，本次继续单一工作块 N4-R2。地址范围更正 `3291e95` 与其 graph closeout `2d2330f` 已提交；§7.71 / thread §43 记录 `D30FF0` payload fields；§7.72 / thread §44 分类 `D3355C` 的第二直接调用点。§7.73 / thread §45 已作为证据阶段提交 `af021f3`，闭合 `ThreadPoolImpl` 类内 `+0xA0` 子项 setup→stop→release 顺序，但未连到 manager global；当前只剩该证据阶段的 graph-closeout 文档待单独提交。
 - 最新结论见[寿命合同 §7.69](docs/research/qq-native-lifetime-contract.md#769-manager-stopwait-caller-boundary-and-repeated-passive-observation-2026-10-15-fixed-sample-static-read-only-field)：`D313D6` 的 12 个静态 caller 中仅一个严格命中 `ThreadPoolImpl` slot 3；wait helper 不检查 `INFINITE` wait 返回值。两次外部只读观察都将 TaskQueue owner TID 匹配到当前进程线程，但 executor singleton anchor 未命中；不能据此认定 callback consumer 或 quiescence。
 - 本轮进一步更正 §7.28 的地址范围：`0x180D30FF0` 是精确 wrapper hash 内的 `.text`/`.pdata` 函数；全局 setup 和 RTTI-bound `MSFThread_xpng` payload 路径均调用它并将结果送入 `D31686`。全局 payload RTTI、参数语义和 release/finalizer 仍未知；详情见寿命合同 §7.70 / thread contract §42。
 - §7.71 解码出 `D30FF0` 把输入 `R8D` 存入 payload `+0`、拷贝 string-shaped 输入到 `+0x48`，以及其余有限字段初始化；四个直接 caller 中两个传常量 1，两个从输入加载。mode 语义、global payload RTTI 与释放合同仍未知，详见寿命合同 §7.71 / thread contract §43。
@@ -15,13 +15,13 @@
 
 ## Changed Areas
 
-- §7.67、§7.68 分别在 `22b6dbd`、`014651c` 提交；`abcc97c` 记录 slot-4 GitNexus closeout；§7.69 已提交，§7.70 / thread §42 地址更正和其 closeout 提交为 `3291e95`、`2d2330f`；§7.71 / thread §43 提交为 `eb0bdcf`；§7.72 / thread §44 的证据与 graph closeout 提交为 `3db2c80`、`7055329`。当前工作树追加 §7.73 / §45、执行台账、progress 与本 handoff；先作单独证据阶段提交，之后再作 GitNexus closeout 提交。verifier/report 与 observer 数据保存在 ignored `local-evidence/`；`.agents/` harness 保持未跟踪、不纳入提交。
+- §7.67、§7.68 分别在 `22b6dbd`、`014651c` 提交；`abcc97c` 记录 slot-4 GitNexus closeout；§7.69 已提交，§7.70 / thread §42 地址更正和其 closeout 提交为 `3291e95`、`2d2330f`；§7.71 / thread §43 提交为 `eb0bdcf`；§7.72 / thread §44 的证据与 graph closeout 提交为 `3db2c80`、`7055329`；§7.73 / thread §45 证据阶段提交为 `af021f3`。当前工作树追加 `af021f3` 的 GitNexus graph-closeout 记录，验证后单独提交。verifier/report 与 observer 数据保存在 ignored `local-evidence/`；`.agents/` harness 保持未跟踪、不纳入提交。
 - 保留用户未跟踪 `.agents/` harness 和本机 `local-evidence/`；不要纳入提交。
 
 ## Next Restartable Steps
 
-1. 先完成当前 §7.73 文档阶段的 docs 检查、staged GitNexus detect 与提交；提交后强制刷新 Docker PDG index，再单独提交 graph closeout。
-2. 追 `ThreadPoolImpl` slot 1 `0x290C6FC` 的 callers、对象构造/vtable 初始化点与 slot 0 deleting-destructor 的所有调用路径，检验该具体实例是否能与 guarded global `0x67510A0` 建立对象级联系；共享 `D31686` 或局部 `+0xA0` 字段不算连接证据。
+1. 完成当前 `af021f3` post-index closeout 的文档检查、staged GitNexus detect 与独立提交；然后刷新一次 closeout commit 的 PDG index 并核对 status。
+2. 追 `ThreadPoolImpl` slot 1 `0x290C6FC` 的 callers、对象构造/vtable 初始化点与 slot 0 deleting-destructor 的所有调用路径，检验该具体实例是否能与 guarded global `0x67510A0` 建立对象级联系；共享 `D31686` 或局部 `+0xA0` 字段不算连接证据。当前已知 slot 2 的唯一直接 caller 是同类 slot 1 `0x290C6FC`，待补 slot1 callers 与 exact primary-vtable RIP-relative xrefs census。
 3. 检查 `D313D6` 与 `C71F9A` 上游是否存在检查 `D3355C` wait 结果的调用合同，并继续查 manager 全局 final strong release 与 teardown/registration hook。当前可见调用者均不能证明 successful join。
 4. 沿 R2 路径闭合所有 manager entries 的 stop 与 callback drain/quiescence；动态 owner-TID match 不等于 callback consumer 或执行。
 5. 继续跟 consumer 实际 OS thread/callback ABI 与 R3 stable identity/UID→UIN/历史 AV；偏移或函数级 caller overlap不能充当同对象/同线程证明。
@@ -29,6 +29,8 @@
 7. 每个文档阶段运行 `init.ps1 -Mode docs`、`git diff --check` 和 GitNexus staged detect；提交后强制刷新 Docker GitNexus，并串行生成 schema-2 plan snapshot。
 
 ## Validation
+
+Turn 28 post-`af021f3` closeout evidence: `init.ps1 -Mode docs` passed (9 / 194 / 33 / 10); pre-commit staged detect reported 5 Markdown files / 15 Section symbols / 0 affected processes / low risk. Forced Docker GitNexus PDG analyze yielded 18,703 nodes / 49,641 edges / 150 clusters / 459 flows; status is up-to-date at `af021f32b7effbf2ab233ff5dbf34588301b9177`, schema-4 runner current, 272 files, `incompleteReasons=[]`. All-scope detect reported no changes, and a Cypher Section query returned execution, lifetime §7.73 and thread §45 headings. Descriptor-anchored schema-2 plan snapshot has 39 cited paths clean / absent=0 at the same HEAD. Raw outputs, hashes, and analyzer limits are in the execution ledger and ignored `local-evidence/n4-r2-readonly-20261015/`.
 
 Turn 27 post-commit §7.72 verification at `3db2c80b6f63459b0c8d6d2d68b4461ea40a326d`: docs check passed (9 / 194 / 33 / 10), staged detect was 5 files / 14 indexed Section symbols / 0 affected processes / low risk, and the post-commit plan snapshot has 39 cited paths clean / absent=0 with unchanged digest. Docker GitNexus 1.6.12 forced PDG analyze yielded 18,711 nodes / 49,648 edges / 150 clusters / 459 flows; the index-only PDG check reports already up-to-date, schema-4 runner current, 272 covered files and no incomplete reasons. All-scope detect returned `No changes detected`; Section query returned the execution, lifetime §7.72, and thread §44 headings. Warnings remain candidate cap 33>32, REACHING_DEF 311/4311 dropped, one CDG skip, 30 cross-language declines, and process truncation 340/540 entry candidates / 903 callees / 14 budget walks. Raw outputs and snapshot are ignored under `local-evidence/n4-r2-readonly-20261015/`. No Cargo tests, QQ/SnowLuma process access, native/callback, target writes, locked-list reads, or message actions occurred.
 
