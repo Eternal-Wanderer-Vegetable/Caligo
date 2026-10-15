@@ -13,7 +13,7 @@
 
 ## Changed Areas
 
-- §7.67、§7.68 分别在 `22b6dbd`、`014651c` 提交；`abcc97c` 记录 slot-4 GitNexus closeout；§7.69 已提交，§7.70 / thread §42 地址更正和其 closeout 提交为 `3291e95`、`2d2330f`；§7.71 / thread §43 提交为 `eb0bdcf`。本阶段 §7.72 / thread §44、progress/execution/handoff 待分阶段验证提交。verifier/report 与 observer 数据保存在 ignored `local-evidence/`；`.agents/` harness 保持未跟踪、不纳入提交。
+- §7.67、§7.68 分别在 `22b6dbd`、`014651c` 提交；`abcc97c` 记录 slot-4 GitNexus closeout；§7.69 已提交，§7.70 / thread §42 地址更正和其 closeout 提交为 `3291e95`、`2d2330f`；§7.71 / thread §43 提交为 `eb0bdcf`；§7.72 / thread §44 的证据阶段已提交为 `3db2c80`。本工作区当前只追加该提交的 post-index closeout 记录，等待单独提交。verifier/report 与 observer 数据保存在 ignored `local-evidence/`；`.agents/` harness 保持未跟踪、不纳入提交。
 - 保留用户未跟踪 `.agents/` harness 和本机 `local-evidence/`；不要纳入提交。
 
 ## Next Restartable Steps
@@ -26,6 +26,8 @@
 6. 每个文档阶段运行 `init.ps1 -Mode docs`、`git diff --check` 和 GitNexus staged detect；提交后强制刷新 Docker GitNexus，并串行生成 schema-2 plan snapshot。
 
 ## Validation
+
+Turn 27 post-commit §7.72 verification at `3db2c80b6f63459b0c8d6d2d68b4461ea40a326d`: docs check passed (9 / 194 / 33 / 10), staged detect was 5 files / 14 indexed Section symbols / 0 affected processes / low risk, and the post-commit plan snapshot has 39 cited paths clean / absent=0 with unchanged digest. Docker GitNexus 1.6.12 forced PDG analyze yielded 18,711 nodes / 49,648 edges / 150 clusters / 459 flows; the index-only PDG check reports already up-to-date, schema-4 runner current, 272 covered files and no incomplete reasons. All-scope detect returned `No changes detected`; Section query returned the execution, lifetime §7.72, and thread §44 headings. Warnings remain candidate cap 33>32, REACHING_DEF 311/4311 dropped, one CDG skip, 30 cross-language declines, and process truncation 340/540 entry candidates / 903 callees / 14 budget walks. Raw outputs and snapshot are ignored under `local-evidence/n4-r2-readonly-20261015/`. No Cargo tests, QQ/SnowLuma process access, native/callback, target writes, locked-list reads, or message actions occurred.
 
 Turn 26 post-commit §7.67 verification at `22b6dbd7a2801d8f8cbe16e5bb5462e36de7d277`: Docker GitNexus 1.6.12 forced analyze yielded 18,682 nodes / 49,620 edges / 150 clusters / 459 flows; status is up-to-date with schema-4 runner current, 272 covered files and `incompleteReasons=[]`. All-scope detect returned no changes and a Section query found §7.67. Analyzer limits remain callable-value cap 33>32, REACHING_DEF dropped 311/4311, one CDG skip, 30 cross-language declines and process truncation 340/540 candidates, 903 callees, 14 budget walks. Raw status/detect/query are in ignored `local-evidence/n4-r2-readonly-20261015/`. This commit covered docs/static evidence only; no QQ/SnowLuma process access, native/callback, target writes, locked-list reads, messages or Cargo tests.
 
