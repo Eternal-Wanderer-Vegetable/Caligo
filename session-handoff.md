@@ -2,23 +2,24 @@
 
 ## Current Objective
 
-- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)。本阶段依据 HEAD `baf228e`，正在提交寿命合同 §7.61 的配套执行记录、状态和交接更新。
-- 最新静态证据见[寿命合同 §§7.60–7.61](docs/research/qq-native-lifetime-contract.md#761-tls-thread-exit-callback-list-writer-and-caller-screen-2026-10-15-fixed-sample-static)：固定 termination array 和 TLS thread-exit list/writer 已有边界；process `_register_onexit_function` 表、indirect/no-.pdata cleanup、global owner finalizer 与动态 callback 内容仍未知。不得把 unknown 表述为“无 finalizer”。
+- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)。上一阶段提交为 HEAD `921aeb9` (`docs(n4): map TLS exit-list registration`)；本阶段将寿命合同 §7.62 的现场只读代码差异与 allocator alias 补充记录到执行台账和状态文件。
+- 最新证据见[寿命合同 §§7.60–7.62](docs/research/qq-native-lifetime-contract.md#762-loaded-text-delta-and-process-onexit-allocator-alias-screen-2026-10-15-read-only-runtime-plus-fixed-sample-static)：最新根 QQ PID `27604` 的 mapped `.text` 与冻结磁盘文件仅在 `0x3E91B50–0x3E91B51` 两字节不同；来源与执行未知。`HeapReAlloc` body-entry census 已补 no-`.pdata` alias，但 generic process `_register_onexit_function` 表与 callback 内容仍未定位；unknown 不能表述为“无 finalizer”。
 - 产品仍 **NOT READY**，feat-005/006 为 `blocked`；R1–R3、manager last strong owner、wait success、完整 stop/drain/quiescence、consumer ABI/thread、R3 stable identity 和历史 AV 原因仍开放，R4 不准入。MonitorTask `+0x98` 保护的内层现场 list 不无锁读取；unknown 请求不自动重发，SnowLuma 保持未触碰。
-- 本阶段是固定 wrapper hash 的只读静态分析和文档维护；未访问 QQ/SnowLuma 进程、未调用 native/callback、未写目标、未打开聊天或发送消息，也未运行 Cargo tests。此前 T8 是独立的历史只读观察，不能作为本阶段或当前进程状态的证据。
-- 日期：2026-10-15（Asia/Shanghai）。本阶段只在确需测试账号实际收发消息且其他离线/static work 已穷尽时，暂停并告知用户具体消息动作；否则继续独立推进。
+- 本阶段有 3 次对 PID `27604` 的 PE 头和 `.text` 受限只读 RPM 采样；未读数据对象、锁内列表、聊天或消息；无 QQ 函数/callback 调用、target write、SnowLuma 访问、聊天/UI 操作或 Cargo tests。后续进程状态必须重新选择与验证，不能仅凭此 PID 推断。
+- 产品仍 **NOT READY**，feat-005/006 为 `blocked`；R1–R3、manager last strong owner、wait success、完整 stop/drain/quiescence、consumer ABI/thread、R3 stable identity 和历史 AV 原因仍开放，R4 不准入。MonitorTask `+0x98` 保护的内层现场 list 不无锁读取；unknown 请求不自动重发，SnowLuma 保持未触碰。
+- 日期：2026-10-15（Asia/Shanghai）。当离线/static 门穷尽、下一步确实需要测试账号主动发送或接收指定 QQ 消息时，暂停并说明具体消息动作；当前仍有静态 call/data alias 工作可继续。
 
 ## Changed Areas
 
-- 本阶段增量改动为寿命合同 §7.61、执行账本、progress 和 session handoff；静态识别 TLS exit-list writer 与四个直接注册点，global-state owner/finalizer 未闭合。产品 feature 状态未变。
+- 本阶段增量改动为寿命合同 §7.62、执行账本、progress 和 session handoff；映射 `.text` 有稳定两字节差异，allocator body-entry alias 已补充，process onexit writer 与 global-state owner/finalizer 未闭合。产品 feature 状态未变。
 - 保留已有未跟踪 `.agents/` harness 与 `local-evidence/` 原始现场材料。
 
 ## Next Restartable Steps
 
-1. 不重复固定 termination-array、TLS `0x3E68018` direct caller 或 getter/setup caller census。下一静态块区分并追踪 generic process `_register_onexit_function`/table writer，与 TLS `+0xB0` list 分开；检查剩余 no-`.pdata` indirect cleanup path 是否能触及 guarded global owner。已知 TLS pair cleanup 是 `0x219551A`，其 `+0x38` release control-block 类型/final release 仍 unresolved。
+1. 不重复固定 termination-array、TLS `0x3E68018` direct caller、`HeapReAlloc` body-entry-only census 或 getter/setup caller census。继续追踪 `0x3EA49E0` 的调用父路径和非 `.pdata`/间接引用，区分 generic vector/buffer helpers 与 process `_register_onexit_function` table writer；已知 TLS pair cleanup `0x219551A` 的 `+0x38` dynamic control-block type/final release 仍 unresolved。
 2. 已知三个 MonitorTask lock helper 的 direct E8 census 不再重复；继续调查 inline/alternate synchronization、TLS/owner 外层排他，以及 manager 最后 strong owner、stop/wait 成功和完整 callback drain/quiescence。R3 stable identity、sender UID→UIN 与历史 AV 仍在计划门内。
-3. 不再重复外层 watcher 快照；当前 T8 manager strong count 为 0 且 lifetime 未 pin。继续不读 `+0x98` 锁内集合。R1–R3/lifetime gates 未闭合前，不调用 QQ native/callback、不发送 R4 样本；unknown 请求不自动重发，SnowLuma 保持未触碰。
-4. 若后续唯一进展需要测试账号实际收发消息，先停在该门并告知用户具体消息动作；静态、离线或只读工作继续自行推进。
+3. 当前 `.text` 样本只证明静态文件与 mapped code 有两字节差异；不要重复旧 outer-watcher 快照，也不要读 `MonitorTask+0x98` 锁内集合。继续调查 R2 manager last owner、成功 wait、全项 stop/drain/quiescence、consumer ABI/thread，以及 R3 identity/UID→UIN/历史 AV。
+4. R1–R3/lifetime gates 未闭合前不调用 QQ native/callback、不发送 R4 样本；unknown 不自动重发，SnowLuma 不访问。当且仅当后续完成独立门、下一步确需测试账号主动收发指定 QQ 消息时，停下并告诉用户精确动作；其余静态/离线/只读 work 自行推进。
 
 ## Validation
 

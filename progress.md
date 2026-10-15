@@ -3,8 +3,8 @@
 ## Current State
 
 **Last Updated:** 2026-10-15（Asia/Shanghai）
-**Latest N4-R2 checkpoint:** §§7.58–7.60 保持 global child-owner、CRT detach、固定 termination-array 的静态边界。新增 §7.61 定位线程局部 TLS exit-list：`0x3E67F70` 遍历 TLS index `0x6755690` 的 `+0xB0` callbacks，writer `0x3E68018` 按 30 项批次追加；找到 4 个经指令边界和 `.pdata` 验证的直接注册点。唯一通用 context/cleanup pair 也只找到一个静态设置者，目标 `0x219551A` 没有直接引用 guarded manager state，但其动态 control-block final release 未识别。此链不能命名为 process `_register_onexit_function`，也不证明注册表运行时内容或执行。R2 manager final owner、stop/wait/drain/quiescence、R3 identity/历史 AV、Report 后续 writer/gate/sink、thread-child `+0x100` nonzero writer 与现场 callback 仍未闭合。详见寿命合同 §§7.52–7.61、thread contract §§33–40。R4 不准入，feat-005/006 blocked，产品 NOT READY。
-**Baseline commit:** `0f5b483`；本轮阶段起点 `baf228e`，已有第一阶段文档提交；保留用户未跟踪 `.agents/` harness。
+**Latest N4-R2 checkpoint:** §§7.58–7.61 的 global child-owner、CRT/TLS cleanup、termination-array 和 TLS thread-exit list 结论保持有界。§7.62 对最新根 QQ PID `27604` 的映射 `.text` 做只读比对：磁盘模块 hash 匹配冻结文件，但三次样本都在 `0x3E91B50–0x3E91B51` 有稳定两字节运行时修改，来源/执行原因未知；同节补正 process onexit allocator body-entry alias 召回，writer/table 仍未定位。该差异不闭合 manager final owner、wait、stop/drain/quiescence、consumer ABI/thread、R3 identity/历史 AV，也不证明 callback。详见寿命合同 §§7.52–7.62、thread contract §§33–40。R4 不准入，feat-005/006 blocked，产品 NOT READY。
+**Baseline commit:** `0f5b483`；本线索的阶段提交依次为 `baf228e`、`921aeb9`；保留用户未跟踪 `.agents/` harness。
 **Active Feature:** N4-R2。feat-005/006 仍 blocked，产品 NOT READY，R4 不准入。TaskQueue producer/consumer、manager watcher handoff、MonitorTask 条件 inner-tree writer 与 File/Log/Report RTTI/slot paths 已在固定-hash 静态层有记录，但不等于现场 callback 执行。File `+0x20` 配置/handle 构造后 writer、Report 后续字段 writer/gate/sink、thread-child 非零 flag writer、现场 watcher event-to-node/inner-tree membership、consumer OS thread、manager final owner、successful wait、全局 stop/drain/quiescence、R3 identity/历史 AV 仍未知。
 2026-10-14 §7.28 又定位 `MSFThread_xpng` slot 2 经 `D31686` 将 manager holder 安装到 inner payload `+0x110` 的静态路径；三个构造调用点均接到 slot 2，wrapper deleting destructor 进入 `D31356`。外部构造目标 `0x180D30FF0` 模块与语义未知，manager last owner、consumer/thread ABI 和 quiescence 仍未闭合，R4 不准入。
 
@@ -12,9 +12,15 @@
 
 2026-10-14 §7.37 继续闭合 callback 静态传递：slot 4 的 descriptor 进入 `0x732A80`，manager wrapper 由 inline `0x73BC5C/0x73BD08` 或 heap `0x73C2AA/0x73C34C` 承载，最终到 `0x73BD6C` 并调用 callback object `+0x30`。提交通过 `MSFService+0x60` 所指对象的 vtable slot 7；其运行期 writer、动态类和方法地址未定位。R2 consumer TID、owner teardown/quiescence 及旧 AV 原因仍 unknown；R3 stable identity unsupported，R4 不准入，产品保持 NOT READY。详情与 hash-gated 产物见 execution §2026-10-14 R2 callback transfer。
 
+### 2026-10-15 N4-R2 当前进程 `.text` 与 onexit allocator alias 复核
+
+- 当前用户指定的最新 QQ 根进程 PID `27604`，wrapper 磁盘 hash `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`；3 次 QUERY_INFORMATION|VM_READ 采样只读映射头与 `.text`。每次只见同一函数入口 `0x3E91B50` 两字节从磁盘 `48 83` 变为内存 `CC C3`，该函数磁盘体走条件 fast-fail/exception/exit 路径。补充静态绑定有 114 个 direct E8 sites / 101 caller functions。补丁来源、执行和历史 AV 关联未知；不把它解释成故障根因。
+- generic `HeapReAlloc` body `0x3EA49F0` 之前发现 no-`.pdata` alias `0x3EA49E0`；8 个有效 caller sites 此前被 body-entry-only 搜索漏掉。8 个样本呈现通用缓冲区扩展，未绑定 process onexit table；当前 writer/table 仍 unknown。详细 hash/report 见寿命合同 §7.62。
+- 无 QQ 消息、native/callback、受锁集合或目标写入；无 SnowLuma 访问或 Cargo tests。R2/R3 仍开放、R4 不准入，feat-005/006 blocked、产品 NOT READY。
+
 2026-10-15 §7.38 将 `MSFService+0x60` 收敛为 `MSFMessengerImpl@msf`，slot7 延伸到 `B7CE8A→D32138`；其 state path 的 slot-0 类与后续路径已由 §7.39–§7.40 更正为 `TaskRunner` 并接到 `TaskQueue+0x18` 条件记录写入。该静态类型/局部 writer 不证明现场 consumer 或执行；stop/drain/quiescence、owner 和历史 AV 仍未闭合。详情见[寿命合同 §7.38–§7.40](docs/research/qq-native-lifetime-contract.md)。
 
-**Scope:** 在 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md) 范围内，本阶段只对冻结 `wrapper.node` 做固定映像反汇编和文档维护，未访问 QQ 或 SnowLuma 进程。无注入、目标写入、QQ 函数/callback 调用、聊天或消息行为；MonitorTask 内层列表未读取。R1–R3 完成门未满足，不执行 R4 native send。
+**Scope:** 在 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md) 范围内，本阶段包含固定映像静态解码、最新 QQ 根进程映射 PE 头与 `.text` 的受限只读比对，以及文档维护。没有读取数据对象、聊天内容或 MonitorTask `+0x98` 锁内列表；没有注入、目标写入、native/callback 调用、聊天/消息动作，也没有访问 SnowLuma 或运行 Cargo tests。R1–R3 完成门未满足，不执行 R4 native send。
 
 ### 2026-10-15 N4-R2 guarded global child-owner candidate
 
