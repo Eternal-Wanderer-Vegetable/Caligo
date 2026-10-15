@@ -10,7 +10,7 @@
 
 ## Changed Areas
 
-- §7.67 已在 `22b6dbd` 提交，提交后强制 GitNexus status 为 up-to-date、runner current、272 covered files、`incompleteReasons=[]`；all-scope detect 为 no changes，Section query 命中 §7.67。当前阶段增加 §7.68 与状态记录，不改 Rust 或 feature status。raw verifier/report 保存在 ignored `local-evidence/n4-r2-readonly-20261015/`。
+- §7.67 已在 `22b6dbd` 提交；§7.68 已在 `014651c` 提交。两个阶段各自的 post-commit GitNexus 状态、all-scope detect 与 Section query 均通过；§7.68 index 为 up-to-date、runner current、272 covered files、`incompleteReasons=[]`。当前阶段只补记该验证，不改 Rust 或 feature status。raw verifier/report 保存在 ignored `local-evidence/n4-r2-readonly-20261015/`。
 - 保留用户未跟踪 `.agents/` harness 和本机 `local-evidence/`；不要纳入提交。
 
 ## Next Restartable Steps
@@ -24,6 +24,8 @@
 ## Validation
 
 Turn 26 post-commit §7.67 verification at `22b6dbd7a2801d8f8cbe16e5bb5462e36de7d277`: Docker GitNexus 1.6.12 forced analyze yielded 18,682 nodes / 49,620 edges / 150 clusters / 459 flows; status is up-to-date with schema-4 runner current, 272 covered files and `incompleteReasons=[]`. All-scope detect returned no changes and a Section query found §7.67. Analyzer limits remain callable-value cap 33>32, REACHING_DEF dropped 311/4311, one CDG skip, 30 cross-language declines and process truncation 340/540 candidates, 903 callees, 14 budget walks. Raw status/detect/query are in ignored `local-evidence/n4-r2-readonly-20261015/`. This commit covered docs/static evidence only; no QQ/SnowLuma process access, native/callback, target writes, locked-list reads, messages or Cargo tests.
+
+Turn 26 post-commit §7.68 verification at `014651c0a9630f999245975539929613dc422d2b`: Docker GitNexus 1.6.12 forced analyze yielded 18,685 nodes / 49,623 edges / 150 clusters / 459 flows; status is up-to-date, schema-4 runner current, 272 covered files and `incompleteReasons=[]`. All-scope detect returned no changes; Section query found `7.68 ThreadTaskManager primary slot 4 bounded alias target (2026-10-15, fixed-sample static)`. Raw analyze/status/detect/query outputs are in ignored `local-evidence/n4-r2-readonly-20261015/`. Analyzer truncation/callable/PDG limitations remain as listed above; this does not close runtime stop/wait/quiescence.
 
 Turn 26 pre-commit resource-path classification: `init.ps1 -Mode docs` PASS (9 live docs / 192 local links / 33 historical entries / 10 features), `git diff --cached --check` exit 0 (LF→CRLF notices only). Docker GitNexus 1.6.12 runner identity was current at base index `24014f5`; status reported content drift from the four changed docs. Staged detect mapped 4 docs / 15 indexed Section symbols / 0 affected processes / low risk. The descriptor-anchored read-plan receipt was 75,673 bytes / `sha256:7ffaf98b4b4a25f5083fa91feab3655a5dab84272dfc15a3529c467ade1dee3f`; schema-2 snapshot at HEAD `24014f5af4312044dad5c1bbb564b04509b3624f` covered 39 cited paths (3 staged, 36 clean, absent=0). Raw provenance/status/detect outputs are ignored under `local-evidence/n4-r2-readonly-20261015/`.
 
