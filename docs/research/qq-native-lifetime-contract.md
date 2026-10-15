@@ -895,3 +895,14 @@ This field sample narrows R2 to a runtime MonitorTask watcher and a registration
 - 忽略文件中的 hash-gated script/report `r2-manager-vtable-slot4-review-20261015.py/.txt` SHA-256 为 `BDFE4FEF86E8015F981AADA8E7F1A24848529CCED61270E3C256AF158B9BD45C` / `46206604A85BAF7A568B1052F69CB14C6C4AF0559E4A33855FCD762BC1358B28`；路径均在 `local-evidence/n4-r2-readonly-20261015/`。脚本校验输入文件 hash、PE image base、vtable RVA/file offset 和 `.pdata` 边界，只对两个 no-`.pdata` entry 做短解码。
 
 slot 4 分类没有识别 `0x67510A0` final owner、manager final strong release、stop/wait 成功或全局 drain/quiescence，也不改变既有 child `D313D6` stop/join-shaped 路径及 wait-result unknown。R2/R3 仍未闭合，R4 不准入，feat-005/006 blocked，产品 NOT READY。仅离线读取冻结文件，无 QQ/SnowLuma 进程访问、native/callback、目标写入、锁内列表读取、消息动作或 Cargo tests。
+
+### 7.69 Manager stop/wait caller boundary and repeated passive observation (2026-10-15, fixed-sample static + read-only field)
+
+继续在同一冻结 `wrapper.node` SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0` 下检查 child stop/wait 的直接调用边界。严格 `.rdata` RTTI/COL screen 校验了 15,410 个 vtable starts，并要求 caller 落在对齐的可执行 vtable prefix 中。
+
+- `D313D6` 有 18 个 direct `E8` sites / 12 个 caller functions；只有 caller `0x290C612` 严格命中 `ThreadPoolImpl` primary vtable RVA `0x4300918` slot 3。其余 caller 没有该直接表成员证据；这既不排除 thunk、非虚、间接或外部 owner，也不把 `ThreadPoolImpl` 等同于 `ThreadTaskManagerImpl`，更没有把 caller 连到 guarded global `0x67510A0`。
+- `D3355C` 的 2 个直接 callers（`0xC71F9A` 和 `D313D6`）均没有严格虚表成员命中。已解码短体以 `INFINITE` 调用 `WaitForSingleObject`，随后 tail-call `CloseHandle`，不检查 wait 返回值；这仍不是 successful join、所有任务已停止或 callback 已排空的证明。
+- Hash-gated verifier/report `r2-manager-stop-wait-caller-vtable-screen-20261015.py/.txt` SHA-256 `A3E5AE4F648D771C092B06C15ADD5863BF4AE7469463DC33E5709878CB6C9AF5` / `07FB610D5F37702E50D8E829F1AAA74C3F21C624C0760D7CD05BDCBA58DFF6B3`；其输入 direct-call report SHA-256 `C1DFBD07A5E294B6DE618254CDF3CF20BA69AF2D0F7FE47DC1C90C124AF1354F`。原始材料仅留在 ignored `local-evidence/n4-r2-readonly-20261015/`。
+- 对用户指定的最新 QQ 根进程再做两次外部只读 `observe-msf`：PID `27604` / 创建时间 `2026-10-15T00:59:34.989Z`，两次间隔约 8 分 13 秒；磁盘与预期 `wrapper.node` hash 均为上述冻结值。两次都报告 dispatcher 位于 `wrapper.node`、TaskQueue owner TID 可在该进程线程清单中匹配、TLS index 有效、146 个线程记录、2 次 manager-chain visits、4 个 manager candidates；executor singleton anchor 均未命中。脱敏汇总 SHA-256 `26C327AACFDF08D82CC81BB31BCEC11636D24A97FCBF93CCD9399A71469A1766`，原始报告与 stdout/log hashes 在该本机 JSON 中。该 owner-TID 匹配不是 callback consumer 身份或执行证明；executor anchor 未命中也不支持把该线程归属到响应 callback。
+
+两次 observer 没有调用 QQ/native/callback、没有写目标，也没有读取 `MonitorTask+0x98` 锁内集合或聊天数据。此项没有找到 global owner 的 final release、successful wait 或完整 stop/drain/quiescence；R2/R3 仍 open，R4 不准入，feat-005/006 blocked，产品 NOT READY。

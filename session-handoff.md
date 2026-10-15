@@ -2,30 +2,33 @@
 
 ## Current Objective
 
-- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，本次继续单一工作块 N4-R2。最近阶段提交为 `22b6dbd` (`docs(n4): classify dynamic detach resource cleanup`)；当前 manager slot-4 复核另成一阶段。
-- 最新结论见 [寿命合同 §7.68](docs/research/qq-native-lifetime-contract.md#768-threadtaskmanager-primary-slot-4-bounded-alias-target-2026-10-15-fixed-sample-static)：manager slot 4 是 bounded no-`.pdata` 字段写入 thunk，把输入值写到 `this+0x20` 对象的 `+0x38`；没有识别 stop/wait/drain 行为。上阶段 §7.67 将 detach 槽路径归类为 buffered I/O/resource cleanup，不是已证 callback registry 或 manager finalizer。
+- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，本次继续单一工作块 N4-R2。最近闭合的阶段提交为 `abcc97c` (`docs(n4): record manager slot4 graph validation`)；当前 §7.69 caller-screen 与只读 observer 记录另成一阶段。
+- 最新结论见[寿命合同 §7.69](docs/research/qq-native-lifetime-contract.md#769-manager-stopwait-caller-boundary-and-repeated-passive-observation-2026-10-15-fixed-sample-static-read-only-field)：`D313D6` 的 12 个静态 caller 中仅一个严格命中 `ThreadPoolImpl` slot 3；wait helper 不检查 `INFINITE` wait 返回值。两次外部只读观察都将 TaskQueue owner TID 匹配到当前进程线程，但 executor singleton anchor 未命中；不能据此认定 callback consumer 或 quiescence。
 - R1 offline 已完成；R2/R3 与生命周期门仍开放，feat-005/006 blocked，产品 **NOT READY**。manager final strong owner、wait success、全项 stop/drain/quiescence、consumer ABI/thread、stable identity 和历史 AV 原因未知；R4 不准入。不得无锁读 `MonitorTask+0x98` 内层列表，unknown 不自动重发，SnowLuma 未访问。
-- 上一轮 PID `27604` 只读 `.text` 样本是历史证据，不代表当前实例。本阶段只解码本机冻结 `wrapper.node`，未访问任何 QQ/SnowLuma process、数据对象或锁内列表；没有 native/callback、目标写入或消息操作。
+- 本次两次只读 observer 重新选中同一用户指定最新 QQ root PID `27604`（创建时间 `2026-10-15T00:59:34.989Z`），并校验磁盘/期望 `wrapper.node` hash 一致。该进程观察仅限外部只读线程/manager 摘要；没有读取聊天数据或 `MonitorTask+0x98` 锁内列表，也没有 native/callback、目标写入或消息操作。
 - 当独立准入门闭合且下一步确需测试账号主动发/收指定 QQ 消息时，停止并说明准确动作；目前继续离线与静态工作。
 
 ## Changed Areas
 
-- §7.67 已在 `22b6dbd` 提交；§7.68 已在 `014651c` 提交。两个阶段各自的 post-commit GitNexus 状态、all-scope detect 与 Section query 均通过；§7.68 index 为 up-to-date、runner current、272 covered files、`incompleteReasons=[]`。当前阶段只补记该验证，不改 Rust 或 feature status。raw verifier/report 保存在 ignored `local-evidence/n4-r2-readonly-20261015/`。
+- §7.67、§7.68 分别在 `22b6dbd`、`014651c` 提交；`abcc97c` 记录 slot-4 GitNexus closeout。当前新增 §7.69、thread contract §41、progress/execution/handoff。raw RTTI verifier/report 与 observer 数据保存在 ignored `local-evidence/`；`.agents/` harness 保持未跟踪、不纳入提交。
 - 保留用户未跟踪 `.agents/` harness 和本机 `local-evidence/`；不要纳入提交。
 
 ## Next Restartable Steps
 
-1. 继续核对 manager global `0x67510A0` 的 final strong release、registration/termination hook 与 teardown owner。已复核主 vtable slot 4 是字段 setter，不能作为 stop/wait 证据；既知 `D3355C` 不检查 `WaitForSingleObject` 返回值，沿其 direct callers/child teardown 路径核对是否有其他成功门及全 task stop。
-2. 沿 R2 路径闭合停止全部 manager entries 与全局 callback drain/quiescence；避免重复 TLS pair、termination-array、getter/setup 和已完成 caller census。
-3. 继续跟 consumer 实际 OS thread/callback ABI 与 R3 stable identity/UID→UIN/历史 AV；偏移或函数级 caller overlap不能充当同对象/同线程证明。
-4. R1–R3、固定 hash 与寿命/ABI/线程门未闭合前，不调用 QQ native/callback，也不执行 R4 消息样本。需要用户主动发/收时，先停下并给出精确消息及方向。
-5. 每个文档阶段运行 `init.ps1 -Mode docs`、`git diff --check` 和 GitNexus staged detect；提交后强制刷新 Docker GitNexus，并串行生成 schema-2 plan snapshot。
+1. 继续追 `ThreadPoolImpl` primary slot 3 caller `0x290C612` 与其它 `D313D6` callers，确认是否存在连接到 guarded global `0x67510A0` 的 owner teardown 路径；现有 strict-vtable no-match 仅是有界静态结果。
+2. 核实 `D3355C` 上游是否有 wait-success 结果门，并继续查清 manager 全局 final strong release 与 teardown/registration hook。现有 helper 本身无结果检查，不能作 successful join 证据。
+3. 沿 R2 路径闭合所有 manager entries 的 stop 与 callback drain/quiescence；动态 owner-TID match 不等于 callback consumer 或执行。
+4. 继续跟 consumer 实际 OS thread/callback ABI 与 R3 stable identity/UID→UIN/历史 AV；偏移或函数级 caller overlap不能充当同对象/同线程证明。
+5. R1–R3、固定 hash 与寿命/ABI/线程门未闭合前，不调用 QQ native/callback，也不执行 R4 消息样本。需要用户主动发/收时，先停下并给出精确消息及方向。
+6. 每个文档阶段运行 `init.ps1 -Mode docs`、`git diff --check` 和 GitNexus staged detect；提交后强制刷新 Docker GitNexus，并串行生成 schema-2 plan snapshot。
 
 ## Validation
 
 Turn 26 post-commit §7.67 verification at `22b6dbd7a2801d8f8cbe16e5bb5462e36de7d277`: Docker GitNexus 1.6.12 forced analyze yielded 18,682 nodes / 49,620 edges / 150 clusters / 459 flows; status is up-to-date with schema-4 runner current, 272 covered files and `incompleteReasons=[]`. All-scope detect returned no changes and a Section query found §7.67. Analyzer limits remain callable-value cap 33>32, REACHING_DEF dropped 311/4311, one CDG skip, 30 cross-language declines and process truncation 340/540 candidates, 903 callees, 14 budget walks. Raw status/detect/query are in ignored `local-evidence/n4-r2-readonly-20261015/`. This commit covered docs/static evidence only; no QQ/SnowLuma process access, native/callback, target writes, locked-list reads, messages or Cargo tests.
 
 Turn 26 post-commit §7.68 verification at `014651c0a9630f999245975539929613dc422d2b`: Docker GitNexus 1.6.12 forced analyze yielded 18,685 nodes / 49,623 edges / 150 clusters / 459 flows; status is up-to-date, schema-4 runner current, 272 covered files and `incompleteReasons=[]`. All-scope detect returned no changes; Section query found `7.68 ThreadTaskManager primary slot 4 bounded alias target (2026-10-15, fixed-sample static)`. Raw analyze/status/detect/query outputs are in ignored `local-evidence/n4-r2-readonly-20261015/`. Analyzer truncation/callable/PDG limitations remain as listed above; this does not close runtime stop/wait/quiescence.
+
+Current phase pre-commit plan re-anchor: descriptor receipt 75,673 bytes / unchanged digest `sha256:7ffaf98b4b4a25f5083fa91feab3655a5dab84272dfc15a3529c467ade1dee3f`; snapshot at `abcc97c` has 39 cited paths all clean, absent=0. Two observer samples (13:08:04Z, 13:16:17Z) retain only redacted counters and exact hashes in ignored `local-evidence/n4-r2-field-20261015-1742-observe-msf-redacted-summary.json`; no native message action or callback invocation.
 
 Turn 26 pre-commit resource-path classification: `init.ps1 -Mode docs` PASS (9 live docs / 192 local links / 33 historical entries / 10 features), `git diff --cached --check` exit 0 (LF→CRLF notices only). Docker GitNexus 1.6.12 runner identity was current at base index `24014f5`; status reported content drift from the four changed docs. Staged detect mapped 4 docs / 15 indexed Section symbols / 0 affected processes / low risk. The descriptor-anchored read-plan receipt was 75,673 bytes / `sha256:7ffaf98b4b4a25f5083fa91feab3655a5dab84272dfc15a3529c467ade1dee3f`; schema-2 snapshot at HEAD `24014f5af4312044dad5c1bbb564b04509b3624f` covered 39 cited paths (3 staged, 36 clean, absent=0). Raw provenance/status/detect outputs are ignored under `local-evidence/n4-r2-readonly-20261015/`.
 
@@ -62,6 +65,8 @@ Turn 8 validation: `init.ps1 -Mode docs` PASS (9 live docs / 191 local links / 3
 - 本轮 §7.54/§35 收尾检查：hash-gated fixed-image verifier PASS，script/report SHA-256 `418A5C485AE6783B148EEC1EA85EE1D1617A9AA5780E346570D049704445BB4E` / `179E8B154D10827E327650D1CC76237B6D387D164E10A70D025CAB58D849FA09`；lock-helper census `CD9E1D850FBA73FF343D6ED7AC15123C9130B55CAC40F666AFF294EA4DD79D3A` / `1377B38CFF9C464E61D0398C51AF1509AD607298CB2F18B94571B1C016224AC6`。`init.ps1 -Mode docs` PASS（9 / 191 / 33 / 10）；`git diff --check` exit 0（LF→CRLF warnings）。Docker GitNexus exact installed CLI 1.6.12 / Node 22.23.2 analyze 18,639 nodes / 49,579 edges / 150 clusters / 459 flows; CLI status up-to-date、schema-4 runner current、272 covered files、no incomplete reasons；detect 摘要 5 docs / 66 symbols / 0 affected processes / low risk。CLI formatter 只列前 15 symbols 并报告另外 51 个；无 GitNexus MCP context resource 可核对 typed context，所以未声称 MCP 交叉验证。turn7 原始输出来自 ignored `local-evidence/n4-r2-readonly-20261015/`；最终 snapshot 路径在 Evidence Pointers。无 Cargo tests/QQ/SnowLuma 进程访问/native/callback/目标写入/消息行为，未提交。
 
 ## Evidence Pointers
+
+- Current N4-R2 caller/observer checkpoint: lifetime contract §§7.69 and thread contract §41; ignored static caller vtable screen `r2-manager-stop-wait-caller-vtable-screen-20261015.py/.txt` SHA-256 `A3E5AE4F648D771C092B06C15ADD5863BF4AE7469463DC33E5709878CB6C9AF5` / `07FB610D5F37702E50D8E829F1AAA74C3F21C624C0760D7CD05BDCBA58DFF6B3`; redacted repeat-observer summary SHA-256 `26C327AACFDF08D82CC81BB31BCEC11636D24A97FCBF93CCD9399A71469A1766`. Raw process reports remain local-only.
 
 - Turn 23 pre-commit staged detect and current plan re-anchor: `local-evidence/n4-r2-readonly-20261015/gitnexus-staged-detect-20261015-turn23-final.txt`, `plan-read-receipt-turn23-final-20261015.json`, and `plan-reanchor-snapshot-turn23-final-20261015.json` (39 paths, 3 staged / 36 clean / absent=0). The detect uses the base index, so §7.65 is not indexed until forced post-commit analysis.
 - Turn 22 GitNexus outputs at `95f828d`: `local-evidence/n4-r2-readonly-20261015/gitnexus-analyze-20261015-turn22-95f.txt`, `gitnexus-status-20261015-turn22-95f.json`, and `gitnexus-detect-20261015-turn22-95f.txt`.

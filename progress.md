@@ -3,8 +3,8 @@
 ## Current State
 
 **Last Updated:** 2026-10-15（Asia/Shanghai）
-**Latest N4-R2 checkpoint:** §§7.58–7.65 对 global child-owner、CRT/TLS cleanup、termination-array、TLS thread-exit list、mapped `.text` 差异、TLS context release 与 guarded getter callers 的静态筛查未找到 manager finalizer/last-release 证据。§7.66 的动态 slot/detach 路径经 §7.67 校准为有缓冲 I/O/resource flush/close 特征的候选；它不是已证 callback registry 或 manager finalizer。`0x6D8E5F0` 的六个 `.pdata` 更新点包含分配失败分支，不能作 live count/quiescence 证明。§7.68 将 manager 主 vtable slot 4 收敛为一个 no-`.pdata` 嵌套字段写入 thunk，不含 stop/wait/drain 逻辑。仍未找到 manager global `0x67510A0` 的 final owner、successful wait、stop/drain/quiescence、consumer ABI/thread；R3 identity/历史 AV 也未闭合。详见寿命合同 §§7.52–7.68、thread contract §§33–40。R4 不准入，feat-005/006 blocked，产品 NOT READY。
-**Baseline commit:** `0f5b483`；本线索阶段提交包括 `baf228e`、`921aeb9`、`ddb59de`、`e6c6191`、`a26f855`、`95f828d`、`a6e30c3`、`24014f5`、`22b6dbd`、`014651c`；保留用户未跟踪 `.agents/` harness。
+**Latest N4-R2 checkpoint:** §§7.58–7.65 对 global child-owner、CRT/TLS cleanup、termination-array、TLS thread-exit list、mapped `.text` 差异、TLS context release 与 guarded getter callers 的静态筛查未找到 manager finalizer/last-release 证据。§7.66 的动态 slot/detach 路径经 §7.67 校准为 buffered I/O/resource cleanup 候选；它不是已证 callback registry 或 manager finalizer。`0x6D8E5F0` 的六个 `.pdata` 更新点包含 allocation-failure 分支，不能作 live count/quiescence 证明。§7.68 将 manager 主 vtable slot 4 收敛为 no-`.pdata` 字段 setter。§7.69 只把 `D313D6` 的一个 caller 绑定到 `ThreadPoolImpl` slot 3；两次被动 observer 的 TaskQueue owner TID 均能匹配进程线程，但 executor anchor 未命中。manager global `0x67510A0` final owner、successful wait、全量 stop/drain/quiescence、callback consumer ABI/thread 仍未找到；R3 identity/历史 AV 也未闭合。详见寿命合同 §§7.52–7.69、thread contract §§33–41。R4 不准入，feat-005/006 blocked，产品 NOT READY。
+**Baseline commit:** `0f5b483`；本线索阶段提交包括 `baf228e`、`921aeb9`、`ddb59de`、`e6c6191`、`a26f855`、`95f828d`、`a6e30c3`、`24014f5`、`22b6dbd`、`014651c`、`abcc97c`；保留用户未跟踪 `.agents/` harness。
 **Active Feature:** N4-R2。feat-005/006 仍 blocked，产品 NOT READY，R4 不准入。TaskQueue producer/consumer、manager watcher handoff、MonitorTask 条件 inner-tree writer 与 File/Log/Report RTTI/slot paths 已在固定-hash 静态层有记录，但不等于现场 callback 执行。File `+0x20` 配置/handle 构造后 writer、Report 后续字段 writer/gate/sink、thread-child 非零 flag writer、现场 watcher event-to-node/inner-tree membership、consumer OS thread、manager final owner、successful wait、全局 stop/drain/quiescence、R3 identity/历史 AV 仍未知。
 2026-10-14 §7.28 又定位 `MSFThread_xpng` slot 2 经 `D31686` 将 manager holder 安装到 inner payload `+0x110` 的静态路径；三个构造调用点均接到 slot 2，wrapper deleting destructor 进入 `D31356`。外部构造目标 `0x180D30FF0` 模块与语义未知，manager last owner、consumer/thread ABI 和 quiescence 仍未闭合，R4 不准入。
 
@@ -27,6 +27,12 @@
 - §7.68 将 `ThreadTaskManagerImpl` primary slot 4 (`0x217DAEA`) 追到 no-`.pdata` tail target `0x31F7F8A`：加载 `this+0x20` 指向的对象，将有符号扩展的 32-bit 参数写入对象 `+0x38`。现有 ctor/dtor 路径为该字段建立了 pair-shaped 初始化/清理边界，但 slot 短体未出现 stop/wait、queue drain 或 callback 调用；不将字段动态类型/ownership ABI 命名。
 - §7.67 commit `22b6dbd` 的强制 GitNexus rebuild 后 status up-to-date、schema-4 runner current、272 files、无 incomplete reasons；all-scope detect no changes，Section query 命中 §7.67。最新 analyzer warnings 与验证边界记录在[执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。R2 final owner / wait result / complete stop-drain-quiescence 与 R3 identity/历史 AV 仍 open，R4 不准入，feat-005/006 blocked，产品 NOT READY。
 - §7.68 已提交为 `014651c`；post-commit GitNexus rebuild status up-to-date、runner current、272 covered files、无 incomplete reasons；all-scope detect no changes，Section query 命中 §7.68。此静态分类不改变 R2/R3/R4 gates。
+
+### 2026-10-15 N4-R2 stop/wait caller boundary and passive observer repeat
+
+- §7.69 的严格 RTTI/COL caller screen 仅将 `D313D6` 的 12 个 caller functions 中一个绑定到 `ThreadPoolImpl` primary slot 3；`D3355C` 的两个调用者均无严格 vtable 成员命中。`INFINITE` wait 结果仍未检查，因此不证明 join 成功、全部任务停止或 callback quiescence。
+- 被动动态 `observe-msf` 两次选中同一用户指定最新 QQ root PID `27604` 与 process creation time，且加载的 `wrapper.node` 磁盘 hash 等于冻结样本。两个报告都见 TaskQueue owner TID 可匹配进程线程、TLS index valid、146 thread records、manager chain 2 visits/4 candidates；executor singleton anchor 均未命中。此结果不是 callback consumer/执行或 quiescence 证明。原始报告留在 ignored `local-evidence/n4-r2-field-20261015-1742-*/`，脱敏摘要 hash `26C327AACFDF08D82CC81BB31BCEC11636D24A97FCBF93CCD9399A71469A1766`。
+- 静态脚本/报告及 direct-call 输入 hash、observer 命令/边界见[执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。没有 QQ 消息/native/callback、目标写入或 `MonitorTask+0x98` 锁内读取。R2/R3 gates 仍 open，R4 不准入，feat-005/006 blocked，产品 NOT READY。
 
 ### 2026-10-15 N4-R2 当前进程 `.text` 与 onexit allocator alias 复核
 
