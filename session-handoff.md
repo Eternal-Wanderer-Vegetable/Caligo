@@ -2,13 +2,13 @@
 
 ## Current Objective
 
-- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，本次继续单一工作块 N4-R2。地址范围更正 `3291e95` 与其 graph closeout `2d2330f` 已提交；§7.71 / thread §43 记录 `D30FF0` payload fields；§7.72 / thread §44 分类 `D3355C` 的第二直接调用点。§7.73 / thread §45 证据阶段 `af021f3` 与 graph closeout `8a38253` 已分别提交。当前待提交 §7.74 / thread §46，固定样本中已追出 `ThreadPoolFactoryImpl` slot1 到 `ThreadPoolImpl` 构造函数的直接路径，但仍未连接 guarded manager global。
+- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，本次继续单一工作块 N4-R2。地址范围更正 `3291e95` 与其 graph closeout `2d2330f` 已提交；§7.71 / thread §43 记录 `D30FF0` payload fields；§7.72 / thread §44 分类 `D3355C` 的第二直接调用点。§7.73 / thread §45 证据阶段 `af021f3` 与 graph closeout `8a38253` 已分别提交；§7.74 / thread §46 固定样本工厂到 pool 构造路径已提交于 `4d29e58`。当前补记 RTTI/继承边界以限定这条路径的解释，并更新状态与 handoff；该补记仍不能连接 factory instance 与 guarded manager global `0x67510A0`。
 - 最新结论见[寿命合同 §7.69](docs/research/qq-native-lifetime-contract.md#769-manager-stopwait-caller-boundary-and-repeated-passive-observation-2026-10-15-fixed-sample-static-read-only-field)：`D313D6` 的 12 个静态 caller 中仅一个严格命中 `ThreadPoolImpl` slot 3；wait helper 不检查 `INFINITE` wait 返回值。两次外部只读观察都将 TaskQueue owner TID 匹配到当前进程线程，但 executor singleton anchor 未命中；不能据此认定 callback consumer 或 quiescence。
 - 本轮进一步更正 §7.28 的地址范围：`0x180D30FF0` 是精确 wrapper hash 内的 `.text`/`.pdata` 函数；全局 setup 和 RTTI-bound `MSFThread_xpng` payload 路径均调用它并将结果送入 `D31686`。全局 payload RTTI、参数语义和 release/finalizer 仍未知；详情见寿命合同 §7.70 / thread contract §42。
 - §7.71 解码出 `D30FF0` 把输入 `R8D` 存入 payload `+0`、拷贝 string-shaped 输入到 `+0x48`，以及其余有限字段初始化；四个直接 caller 中两个传常量 1，两个从输入加载。mode 语义、global payload RTTI 与释放合同仍未知，详见寿命合同 §7.71 / thread contract §43。
 - §7.72 复核 `D3355C` 的第二直接调用点 `C71F9A`：它传入对象基址（首 qword 被当作 handle），调用前触及 `+0x18/+0x60`；与 `D313D6` 的 `&child+0x10` 路径区分。wait 结果均不检查；严格 RTTI/vtable 筛查没有连接该路径与 `0x67510A0`。证据 hashes 与范围见寿命合同 §7.72。
 - §7.73 由同一固定 `wrapper.node` hash 的 RTTI/COL 与直接调用边确认 `ThreadPoolImpl` slot 2 在 `+0xA0` 安装子项，slot 3 对该字段调用 `D313D6` 后释放，slot-0 删除析构先调用 slot 3 再清理其他字段。限定函数无直接 RIP-relative 引用 `0x67510A0`；此局部类寿命合同不证明实例属于全局 manager，也不证明 successful wait 或 quiescence。hash 与边界见寿命合同 §7.73。
-- §7.74 将 pool constructor `0x290C4B8` 的唯一有效 `.pdata` 直接 caller 追到 `ThreadPoolFactoryImpl` primary vtable slot1 `0x173C2BA`，完整链经过五个直接调用边。链路没有直接 RIP-relative 引用 manager global `0x67510A0`；工厂 vptr initializer没有直接 `.pdata` 调用者或已扫描形式的 REX.W RIP-relative LEA caller，因此实际工厂实例/manager 所有权仍未知。静态结论与 verifier hashes 见寿命合同 §7.74。
+- §7.74 将 pool constructor `0x290C4B8` 的唯一有效 `.pdata` 直接 caller 追到 `ThreadPoolFactoryImpl` primary vtable slot1 `0x173C2BA`，完整链经过五个直接调用边。新增严格 COL/CHD 复核把 factory、pool、`ThreadTaskManagerImpl` 分在不同项目接口继承分支；组合关系仍可能存在。链路没有直接 RIP-relative 引用 manager global `0x67510A0`；工厂 vptr initializer没有直接 `.pdata` 调用者或已扫描形式的 REX.W RIP-relative LEA caller，因此实际工厂实例/manager 所有权仍未知。静态结论与 verifier hashes 见寿命合同 §7.74。
 - R1 offline 已完成；R2/R3 与生命周期门仍开放，feat-005/006 blocked，产品 **NOT READY**。manager final strong owner、wait success、全项 stop/drain/quiescence、consumer ABI/thread、stable identity 和历史 AV 原因未知；R4 不准入。不得无锁读 `MonitorTask+0x98` 内层列表，unknown 不自动重发，SnowLuma 未访问。
 - 本次 turn 只复核本机固定样本与先前生成的 hash-gated verifier/report，未访问 QQ/SnowLuma 进程、未调用 native/callback、未读锁内列表、未写目标进程、未执行消息操作或 Cargo 测试。上次两次被动 observer 的 QQ PID `27604` 记录仍只是历史证据，不代表当前实例状态。
 - 之前两次只读 observer 选择了当时用户指定的 QQ root PID `27604`（创建时间 `2026-10-15T00:59:34.989Z`），并核对磁盘/期望 `wrapper.node` hash 一致。该次进程观察仅限线程/manager 摘要；没有读取聊天数据或 `MonitorTask+0x98` 锁内列表，也没有 native/callback、目标写入或消息操作。
@@ -16,13 +16,13 @@
 
 ## Changed Areas
 
-- §7.67、§7.68 分别在 `22b6dbd`、`014651c` 提交；`abcc97c` 记录 slot-4 GitNexus closeout；§7.69 已提交，§7.70 / thread §42 地址更正和其 closeout 提交为 `3291e95`、`2d2330f`；§7.71 / thread §43 提交为 `eb0bdcf`；§7.72 / thread §44 的证据与 graph closeout 提交为 `3db2c80`、`7055329`；§7.73 / thread §45 证据与 closeout 分别为 `af021f3`、`8a38253`。当前工作树仅追加 §7.74 / thread §46、执行台账、progress 与本 handoff，待先作证据阶段提交，再作独立 GitNexus closeout。verifier/report 与 observer 数据保存在 ignored `local-evidence/`；`.agents/` harness 保持未跟踪、不纳入提交。
+- §7.67、§7.68 分别在 `22b6dbd`、`014651c` 提交；`abcc97c` 记录 slot-4 GitNexus closeout；§7.69 已提交，§7.70 / thread §42 地址更正和其 closeout 提交为 `3291e95`、`2d2330f`；§7.71 / thread §43 提交为 `eb0bdcf`；§7.72 / thread §44 的证据与 graph closeout 提交为 `3db2c80`、`7055329`；§7.73 / thread §45 证据与 closeout 分别为 `af021f3`、`8a38253`；§7.74 / thread §46 工厂构造路径在 `4d29e58` 提交。当前工作树仅补充该路径的 RTTI/继承边界、执行台账、progress 与本 handoff，随后需作独立 GitNexus closeout；verifier/report 与 observer 数据保存在 ignored `local-evidence/`，`.agents/` harness 保持未跟踪、不纳入提交。
 - 保留用户未跟踪 `.agents/` harness 和本机 `local-evidence/`；不要纳入提交。
 
 ## Next Restartable Steps
 
-1. 完成当前 §7.74 / thread §46 文档阶段的 docs 检查、staged GitNexus detect 与证据提交；提交后刷新 Docker PDG index 并单独提交 graph closeout，再核对 closeout HEAD。
-2. 静态追 `ThreadPoolFactoryImpl` 实例构造与注册/owner 路径，检查 `0x173C8F8` 的直接/间接上游、RTTI class hierarchy、factory vtable/member cross-reference 与 manager global setup；当前 bounded E8 / REX.W LEA census 未找到 factory initializer caller，不能把工厂方法调用链等同于 global manager 实例。
+1. 对 §7.74 RTTI/继承边界补记运行 docs 检查、staged GitNexus detect 并提交；提交后刷新 Docker PDG index 并单独提交 graph closeout，再核对 closeout HEAD。
+2. 静态追 `ThreadPoolFactoryImpl` 实例构造与注册/owner 路径，检查 `0x173C8F8` 的直接/间接上游、factory vtable/member cross-reference 与 manager global setup；当前 bounded E8 / REX.W LEA census 未找到 factory initializer caller，不能把工厂方法调用链等同于 global manager 实例。
 3. 检查 `D313D6` 与 `C71F9A` 上游是否存在检查 `D3355C` wait 结果的调用合同，并继续查 manager 全局 final strong release 与 teardown/registration hook。当前可见调用者均不能证明 successful join。
 4. 沿 R2 路径闭合所有 manager entries 的 stop 与 callback drain/quiescence；动态 owner-TID match 不等于 callback consumer 或执行。
 5. 继续跟 consumer 实际 OS thread/callback ABI 与 R3 stable identity/UID→UIN/历史 AV；偏移或函数级 caller overlap不能充当同对象/同线程证明。
