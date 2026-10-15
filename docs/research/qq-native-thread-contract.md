@@ -393,3 +393,9 @@ The `MSFThread_xpng` RTTI evidence applies to the outer wrapper. No inner payloa
 The exact-hash `.pdata` caller at `0xC71F9A` calls `D3355C` with its saved entry object pointer; `D3355C` loads the first qword as a handle, waits with `INFINITE`, closes that handle, and ignores the wait result. The other direct caller in this census remains `D313D6`, which passes the address of child `+0x10`. The second path also calls `D33222` on object `+0x60` before the wait and is entered from `C71F10`, but no meaning is assigned to those helpers or fields.
 
 Strict COL/TypeDescriptor scanning did not bind `C71F9A`, `C71F10`, or their direct containing callers to a validated `.rdata` vtable slot. This is a bounded direct-table result only. Neither path is tied to guarded global `0x67510A0`; manager final owner, successful wait, full stop/drain/quiescence and callback consumer ABI/thread remain unknown, so R4 remains not admitted.
+
+## 45. 2026-10-15 ThreadPoolImpl local child teardown path
+
+The exact-hash RTTI/COL-bound `ThreadPoolImpl` primary vtable at `0x4300918` has slot 0 `0x290DA46`, slot 2 `0x290C746`, and slot 3 `0x290C612`. Slot 2 passes the child at `this+0xA0` to `D31686`; slot 3 passes the same field's current pointer to `D313D6` and then releases the field. The slot-0 deleting destructor enters `0x290C59C`, which calls slot 3 before cleaning remaining fields and tail-calling its base cleanup.
+
+This closes a local child lifecycle inside that statically typed class only. The decoded functions contain no direct RIP-relative reference to guarded global `0x67510A0`; no evidence ties this `ThreadPoolImpl` instance to the global manager state or shows it is the last manager owner. Other helper/callee and indirect edges remain outside this function-local screen. Global final release, successful wait, complete stop/drain/quiescence and callback consumer ABI/thread remain open; R4 remains not admitted.
