@@ -2,24 +2,23 @@
 
 ## Current Objective
 
-- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)。上一阶段提交为 HEAD `921aeb9` (`docs(n4): map TLS exit-list registration`)；本阶段将寿命合同 §7.62 的现场只读代码差异与 allocator alias 补充记录到执行台账和状态文件。
-- 最新证据见[寿命合同 §§7.60–7.62](docs/research/qq-native-lifetime-contract.md#762-loaded-text-delta-and-process-onexit-allocator-alias-screen-2026-10-15-read-only-runtime-plus-fixed-sample-static)：最新根 QQ PID `27604` 的 mapped `.text` 与冻结磁盘文件仅在 `0x3E91B50–0x3E91B51` 两字节不同；来源与执行未知。`HeapReAlloc` body-entry census 已补 no-`.pdata` alias，但 generic process `_register_onexit_function` 表与 callback 内容仍未定位；unknown 不能表述为“无 finalizer”。
-- 产品仍 **NOT READY**，feat-005/006 为 `blocked`；R1–R3、manager last strong owner、wait success、完整 stop/drain/quiescence、consumer ABI/thread、R3 stable identity 和历史 AV 原因仍开放，R4 不准入。MonitorTask `+0x98` 保护的内层现场 list 不无锁读取；unknown 请求不自动重发，SnowLuma 保持未触碰。
-- 本阶段有 3 次对 PID `27604` 的 PE 头和 `.text` 受限只读 RPM 采样；未读数据对象、锁内列表、聊天或消息；无 QQ 函数/callback 调用、target write、SnowLuma 访问、聊天/UI 操作或 Cargo tests。后续进程状态必须重新选择与验证，不能仅凭此 PID 推断。
-- 产品仍 **NOT READY**，feat-005/006 为 `blocked`；R1–R3、manager last strong owner、wait success、完整 stop/drain/quiescence、consumer ABI/thread、R3 stable identity 和历史 AV 原因仍开放，R4 不准入。MonitorTask `+0x98` 保护的内层现场 list 不无锁读取；unknown 请求不自动重发，SnowLuma 保持未触碰。
-- 日期：2026-10-15（Asia/Shanghai）。当离线/static 门穷尽、下一步确实需要测试账号主动发送或接收指定 QQ 消息时，暂停并说明具体消息动作；当前仍有静态 call/data alias 工作可继续。
+- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，本次继续单一工作块 N4-R2。上一提交为 `ddb59de` (`docs(n4): record loaded wrapper code delta`)；本阶段新增 TLS context-pair/control-block 固定映像 follow-up。
+- 最新结论见 [寿命合同 §7.63](docs/research/qq-native-lifetime-contract.md#763-tls-context-pair-cleanup-and-control-block-count-path-2026-10-15-fixed-sample-static)：TLS cleanup `0x219551A` 的 `+0x38` release 经配对校验并在 lock 下递减 `+0x120`；当前对象身份与其它 owner/removal 路径未知。随后 context 被放回 `0x6781768` 静态 free-list。该 pool 不等于 manager owner。
+- R1 offline 已完成；R2/R3 与生命周期门仍开放，feat-005/006 blocked，产品 **NOT READY**。manager final strong owner、wait success、全项 stop/drain/quiescence、consumer ABI/thread、stable identity 和历史 AV 原因未知；R4 不准入。不得无锁读 `MonitorTask+0x98` 内层列表，unknown 不自动重发，SnowLuma 未访问。
+- 上一轮 PID `27604` 只读 `.text` 样本是历史证据，不代表当前实例。本次只解码本机冻结 `wrapper.node`，未访问任何 QQ/SnowLuma process、数据对象或锁内列表；没有 native/callback、目标写入或消息操作。
+- 当独立准入门闭合且下一步确需测试账号主动发/收指定 QQ 消息时，停止并说明准确动作；目前继续离线与静态工作。
 
 ## Changed Areas
 
-- 本阶段增量改动为寿命合同 §7.62、执行账本、progress 和 session handoff；映射 `.text` 有稳定两字节差异，allocator body-entry alias 已补充，process onexit writer 与 global-state owner/finalizer 未闭合。产品 feature 状态未变。
-- 保留已有未跟踪 `.agents/` harness 与 `local-evidence/` 原始现场材料。
+- 本阶段待提交变更：寿命合同 §7.63、执行台账、`progress.md` 与本 handoff；不改 Rust 或 feature status。raw verifier/report 保存在 ignored `local-evidence/n4-r2-readonly-20261015/`。
+- 保留用户未跟踪 `.agents/` harness 和本机 `local-evidence/`；不要纳入提交。
 
 ## Next Restartable Steps
 
-1. 不重复固定 termination-array、TLS `0x3E68018` direct caller、`HeapReAlloc` body-entry-only census 或 getter/setup caller census。继续追踪 `0x3EA49E0` 的调用父路径和非 `.pdata`/间接引用，区分 generic vector/buffer helpers 与 process `_register_onexit_function` table writer；已知 TLS pair cleanup `0x219551A` 的 `+0x38` dynamic control-block type/final release 仍 unresolved。
-2. 已知三个 MonitorTask lock helper 的 direct E8 census 不再重复；继续调查 inline/alternate synchronization、TLS/owner 外层排他，以及 manager 最后 strong owner、stop/wait 成功和完整 callback drain/quiescence。R3 stable identity、sender UID→UIN 与历史 AV 仍在计划门内。
-3. 当前 `.text` 样本只证明静态文件与 mapped code 有两字节差异；不要重复旧 outer-watcher 快照，也不要读 `MonitorTask+0x98` 锁内集合。继续调查 R2 manager last owner、成功 wait、全项 stop/drain/quiescence、consumer ABI/thread，以及 R3 identity/UID→UIN/历史 AV。
-4. R1–R3/lifetime gates 未闭合前不调用 QQ native/callback、不发送 R4 样本；unknown 不自动重发，SnowLuma 不访问。当且仅当后续完成独立门、下一步确需测试账号主动收发指定 QQ 消息时，停下并告诉用户精确动作；其余静态/离线/只读 work 自行推进。
+1. 沿 R2 manager 路径继续找最终 owner/析构入口、停止所有 manager entries、wait 成功判据与全局 callback drain/quiescence；避免重复 TLS pair、termination-array、getter/setup 和已完成 caller census。
+2. 继续跟 consumer 实际 OS thread/callback ABI 与 R3 stable identity/UID→UIN/历史 AV；偏移或函数级 caller overlap 不能充当同对象/同线程证明。
+3. R1–R3、固定 hash 与寿命/ABI/线程门未闭合前，不调用 QQ native/callback，也不执行 R4 消息样本。需要用户主动发/收时，先停下并给出精确消息及方向。
+4. 每个文档阶段运行 `init.ps1 -Mode docs`、`git diff --check` 和 GitNexus staged detect；提交后强制刷新 Docker GitNexus，并串行生成 schema-2 plan snapshot。
 
 ## Validation
 

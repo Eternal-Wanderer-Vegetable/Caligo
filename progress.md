@@ -3,8 +3,8 @@
 ## Current State
 
 **Last Updated:** 2026-10-15（Asia/Shanghai）
-**Latest N4-R2 checkpoint:** §§7.58–7.61 的 global child-owner、CRT/TLS cleanup、termination-array 和 TLS thread-exit list 结论保持有界。§7.62 对最新根 QQ PID `27604` 的映射 `.text` 做只读比对：磁盘模块 hash 匹配冻结文件，但三次样本都在 `0x3E91B50–0x3E91B51` 有稳定两字节运行时修改，来源/执行原因未知；同节补正 process onexit allocator body-entry alias 召回，writer/table 仍未定位。该差异不闭合 manager final owner、wait、stop/drain/quiescence、consumer ABI/thread、R3 identity/历史 AV，也不证明 callback。详见寿命合同 §§7.52–7.62、thread contract §§33–40。R4 不准入，feat-005/006 blocked，产品 NOT READY。
-**Baseline commit:** `0f5b483`；本线索的阶段提交依次为 `baf228e`、`921aeb9`；保留用户未跟踪 `.agents/` harness。
+**Latest N4-R2 checkpoint:** §§7.58–7.62 的 global child-owner、CRT/TLS cleanup、termination-array、TLS thread-exit list 与 mapped `.text` 差异保持有界。§7.63 将 TLS cleanup `0x219551A` 的 `+0x38` release 绑定到固定映像内受锁控制块校验与 `+0x120` 计数递减，并确认线程上下文随后回收到全局静态池；业务对象身份、运行期字段值及零计数后的其它 owner/removal 仍未知。TLS acquire/register wrapper `0x2195465` 无已识别静态 inbound edge，不证明其注册/执行。上述静态材料仍不闭合 manager final owner、wait、stop/drain/quiescence、consumer ABI/thread、R3 identity/历史 AV。详见寿命合同 §§7.52–7.63、thread contract §§33–40。R4 不准入，feat-005/006 blocked，产品 NOT READY。
+**Baseline commit:** `0f5b483`；本线索阶段提交包括 `baf228e`、`921aeb9`、`ddb59de`；保留用户未跟踪 `.agents/` harness。
 **Active Feature:** N4-R2。feat-005/006 仍 blocked，产品 NOT READY，R4 不准入。TaskQueue producer/consumer、manager watcher handoff、MonitorTask 条件 inner-tree writer 与 File/Log/Report RTTI/slot paths 已在固定-hash 静态层有记录，但不等于现场 callback 执行。File `+0x20` 配置/handle 构造后 writer、Report 后续字段 writer/gate/sink、thread-child 非零 flag writer、现场 watcher event-to-node/inner-tree membership、consumer OS thread、manager final owner、successful wait、全局 stop/drain/quiescence、R3 identity/历史 AV 仍未知。
 2026-10-14 §7.28 又定位 `MSFThread_xpng` slot 2 经 `D31686` 将 manager holder 安装到 inner payload `+0x110` 的静态路径；三个构造调用点均接到 slot 2，wrapper deleting destructor 进入 `D31356`。外部构造目标 `0x180D30FF0` 模块与语义未知，manager last owner、consumer/thread ABI 和 quiescence 仍未闭合，R4 不准入。
 
@@ -20,7 +20,14 @@
 
 2026-10-15 §7.38 将 `MSFService+0x60` 收敛为 `MSFMessengerImpl@msf`，slot7 延伸到 `B7CE8A→D32138`；其 state path 的 slot-0 类与后续路径已由 §7.39–§7.40 更正为 `TaskRunner` 并接到 `TaskQueue+0x18` 条件记录写入。该静态类型/局部 writer 不证明现场 consumer 或执行；stop/drain/quiescence、owner 和历史 AV 仍未闭合。详情见[寿命合同 §7.38–§7.40](docs/research/qq-native-lifetime-contract.md)。
 
-**Scope:** 在 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md) 范围内，本阶段包含固定映像静态解码、最新 QQ 根进程映射 PE 头与 `.text` 的受限只读比对，以及文档维护。没有读取数据对象、聊天内容或 MonitorTask `+0x98` 锁内列表；没有注入、目标写入、native/callback 调用、聊天/消息动作，也没有访问 SnowLuma 或运行 Cargo tests。R1–R3 完成门未满足，不执行 R4 native send。
+**Scope:** 在 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md) 范围内，最近阶段包含固定映像静态解码、上一轮对 PID `27604` 映射 PE 头与 `.text` 的受限只读比对，以及文档维护。本次 TLS control-block follow-up 仅读取本机冻结映像，不访问任何进程。没有读取 QQ 数据对象、聊天内容或 MonitorTask `+0x98` 锁内列表；没有注入、目标写入、native/callback 调用、聊天/消息动作、SnowLuma 访问或 Cargo tests。R1–R3 完成门未满足，不执行 R4 native send。
+
+### 2026-10-15 N4-R2 TLS context-pair control-block follow-up
+
+- 固定 `wrapper.node` hash 下，RVA 更正后确认 TLS cleanup `0x219551A` 对 context `+0x38` 执行 `0x739805A` release；控制结构由 `p-0x10` 定位，在锁下经 `0x2194B46` 配对校验并递减 `+0x120` 计数，插入 helper `0x2194C69` 对同字段递增。旧计数 1 可减到 0，但本 helper 无显式 zero-case delete；不能由此推断无其它 owner/remove path。
+- cleanup 随后清 TLS slot 并在 lock `0x6781770` 下把 context `+0xD8` 推到 free-list head `0x6781768`；acquire 路径在同锁下取回或申请/初始化约 `0x1DF` bytes 并对齐。只识别为 TLS context pool，不能归属 manager。
+- `.pdata` 单遍 census 覆盖 525,295 functions / 18,889,451 instructions。TLS index `0x6755690` 为 1,574 refs / 1,501 functions；pool head 为 4 refs / 2 functions，pool lock 为 2 refs / 2 functions。acquire/register wrapper `0x2195465` 无扫描到的静态 direct branch/instruction-immediate inbound edge 或全映像绝对 VA qword reference；不排除 indirect/external/dynamic entry。artifact hashes 见寿命合同 §7.63。
+- 这是本机冻结映像静态 follow-up；本次无 QQ/SnowLuma 进程访问、native/callback、target write、锁内现场读取、消息操作或 Cargo tests。manager final owner、成功 wait、stop/drain/quiescence、consumer ABI/thread、R3 identity/历史 AV 仍 open；R4 不准入，feat-005/006 blocked，产品 NOT READY。
 
 ### 2026-10-15 N4-R2 guarded global child-owner candidate
 
