@@ -850,3 +850,13 @@ This field sample narrows R2 to a runtime MonitorTask watcher and a registration
 - 两个 hash-gated verifier/report `r2-global-getter-caller-rtti-followup-20261015.py/.txt` 与 `r2-global-getter-caller-full-alias-census-20261015.py/.txt` SHA-256 分别为 `9B92157C20064D61F8750B771CD514AA8752E546EF956B620B6AB87C031D3C22` / `A393A29F4333F3A4CDC95B4E50BC710D4973B26CFBF093FFF2649610C0E45103`，以及 `D5E01C06B643BB9F488C5CBA7BF36DC10B4BBDA2CEFFCCD6D08D5AF54D2CB5B7` / `DBEE692DA1A65FFA5919684C364FB8D74F55996D53EDF7C2499A813ABB3924B0`；raw artifacts 只保存在 ignored `local-evidence/n4-r2-readonly-20261015/`。
 
 该筛查没有识别 global child-owner 的 finalizer、clear path 或 manager last strong release。alias pass 非 CFG/path-sensitive，仅跟踪限定的寄存器/栈槽传递与前四个 Windows x64 参数寄存器，不覆盖 interprocedural effects、indirect/no-`.pdata`、alternate branch、完整 stack argument 或 external owner；vtable no-match 也不是 absence 证明。成功 wait、全 manager stop、callback drain/quiescence、consumer ABI/thread、R3 identity/历史 AV 均开放；R4 不准入，feat-005/006 blocked，产品 NOT READY。没有 QQ/SnowLuma process access、native/callback、目标写入、锁内现场读取、聊天/消息动作或 Cargo tests。
+
+### 7.65 CRT detach pointer-range table cross-reference screen (2026-10-15, fixed-sample static)
+
+为继续界定 §7.59–§7.60 中可能参与 CRT detach 的固定表，复核 RVA `0x4916C00..0x4916D00`。输入仍为同一冻结 `wrapper.node` SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0`；此项只读取本机映像字节并扫有效 `.pdata`，不访问进程或运行回调。
+
+- 全 `.pdata` census 扫过 525,295 函数 / 18,889,451 指令，窗口内只有 4 条 RIP-relative 引用：`0x3E6BAA0` 将同一 RVA `0x4916CB0` 同时作为循环 begin/end，`0x3E6BADC` 将同一 RVA `0x4916CC0` 同时作为 begin/end。两个函数体都按 8-byte 项读取非零地址并间接调用，但当前固定映像中的范围长度为零，没有静态项可执行。两 consumer 各有一个 `.pdata` direct caller，位于 `0x3E6AE98` 与 `0x3E6AFA2`。
+- 固定映像所有 PE sections 中均没有指向 `0x4916CB0` 的绝对 VA/RVA qword literal。窗口 census 没有找到其它 `.pdata` 指令引用这两处表地址；这只限制有效 `.pdata` 的直接 RIP-relative 表访问，不排除 no-`.pdata` code、运行时/间接写入、其它表或 external owner。
+- Hash-gated full-census verifier/report `r2-global-crt-terminator-table-xrefs-20261015.py/.txt` SHA-256 `E1E0CF5D2B6AA1E0E644C3D198C3FDDFC5F30407E51AD1FFAE56E8FB963CDC62` / `9A9427846B6548D7D202C8F8AD901E0E6AAA24D6EA9F13189D9B8ECCB7E530D1`；原始文件只保存在 ignored `local-evidence/n4-r2-readonly-20261015/`。
+
+这两处零长度固定范围没有提供 global child-owner 清理证据，也不等于动态 `_onexit` writer/table 已被排除。manager finalizer/last strong release、成功 wait、全项 stop、callback drain/quiescence、consumer ABI/thread、R3 identity/历史 AV 仍 open；R4 不准入，feat-005/006 blocked，产品 NOT READY。无 QQ/SnowLuma process access、native/callback、目标写入、锁内读取、消息动作或 Cargo tests。

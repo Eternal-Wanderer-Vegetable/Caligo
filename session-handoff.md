@@ -2,26 +2,28 @@
 
 ## Current Objective
 
-- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，本次继续单一工作块 N4-R2。最近收尾提交为 `a26f855` (`docs(n4): record TLS control-path closeout`)；当前静态 caller/alias follow-up 将独立分阶段提交。
-- 最新结论见 [寿命合同 §7.64](docs/research/qq-native-lifetime-contract.md#764-guarded-global-getter-caller-rtti-and-bounded-alias-census-2026-10-15-fixed-sample-static)：strict RTTI caller screen 与 bounded alias pass 未发现匹配的 slot-0 caller 或经跟踪 global-base direct field write；22 次 state `+8` pair 参数交给 `D32138`。这收窄了 accessor caller surface，不能证明无间接 finalizer，也不等于 manager teardown。
+- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，本次继续单一工作块 N4-R2。最近阶段提交为 `95f828d` (`docs(n4): map guarded global state callers`)；当前 CRT detach fixed-range follow-up 将独立分阶段提交。
+- 最新结论见 [寿命合同 §7.65](docs/research/qq-native-lifetime-contract.md#765-crt-detach-pointer-range-table-cross-reference-screen-2026-10-15-fixed-sample-static)：全有效 `.pdata` 中两个 CRT-adjacent pointer-range consumers 各引用同一 begin/end 地址，固定映像表长为零；这不排除 no-`.pdata` 或动态 `_onexit` 路径，也没有提供 manager teardown 证据。
 - R1 offline 已完成；R2/R3 与生命周期门仍开放，feat-005/006 blocked，产品 **NOT READY**。manager final strong owner、wait success、全项 stop/drain/quiescence、consumer ABI/thread、stable identity 和历史 AV 原因未知；R4 不准入。不得无锁读 `MonitorTask+0x98` 内层列表，unknown 不自动重发，SnowLuma 未访问。
 - 上一轮 PID `27604` 只读 `.text` 样本是历史证据，不代表当前实例。本次只解码本机冻结 `wrapper.node`，未访问任何 QQ/SnowLuma process、数据对象或锁内列表；没有 native/callback、目标写入或消息操作。
 - 当独立准入门闭合且下一步确需测试账号主动发/收指定 QQ 消息时，停止并说明准确动作；目前继续离线与静态工作。
 
 ## Changed Areas
 
-- §7.63 与 TLS closeout 已分别随 `e6c6191`、`a26f855` 提交；本阶段 §7.64 caller/alias follow-up、执行台账、progress 与 handoff 待单独提交，不改 Rust 或 feature status。raw verifier/report 保存在 ignored `local-evidence/n4-r2-readonly-20261015/`。
+- §7.63 TLS follow-up 与 §7.64 caller/alias follow-up 已随 `e6c6191`、`a26f855`、`95f828d` 分阶段提交；本阶段 §7.65、执行台账、progress 与 handoff 待单独提交，不改 Rust 或 feature status。raw verifier/report 保存在 ignored `local-evidence/n4-r2-readonly-20261015/`。
 - 保留用户未跟踪 `.agents/` harness 和本机 `local-evidence/`；不要纳入提交。
 
 ## Next Restartable Steps
 
-1. 继续静态 screen guarded accessor/global 的 no-`.pdata` 与间接引用、动态 CRT exit registry writer/table；不重复已完成的 strict caller/vtable、termination-array 与 bounded alias pass。
+1. 继续静态追 no-`.pdata`/indirect 引用与动态 CRT exit registry writer/table；不重复已完成的 `.pdata` table census、termination-array、strict caller/vtable 与 bounded alias pass。
 2. 沿 R2 路径闭合停止全部 manager entries 与全局 callback drain/quiescence；避免重复 TLS pair、termination-array、getter/setup 和已完成 caller census。
 3. 继续跟 consumer 实际 OS thread/callback ABI 与 R3 stable identity/UID→UIN/历史 AV；偏移或函数级 caller overlap不能充当同对象/同线程证明。
 4. R1–R3、固定 hash 与寿命/ABI/线程门未闭合前，不调用 QQ native/callback，也不执行 R4 消息样本。需要用户主动发/收时，先停下并给出精确消息及方向。
 5. 每个文档阶段运行 `init.ps1 -Mode docs`、`git diff --check` 和 GitNexus staged detect；提交后强制刷新 Docker GitNexus，并串行生成 schema-2 plan snapshot。
 
 ## Validation
+
+Turn 23 current static-doc gate: at base HEAD `95f828dcf947357b1a105ba3a548d1b2481dca29`, Docker GitNexus 1.6.12 / Node 22.23.2 forced analyze yielded 18,674 nodes / 49,612 edges / 150 clusters / 459 flows; status was up-to-date, schema-4 runner current, 272 covered files, `incompleteReasons=[]`, and all-scope detect reported no changes. Preserve callable-value-flow cap 33>32, REACHING_DEF dropped 311/4311, one CDG skip, 30 cross-language declines, and process tracing omissions (340/540 entry candidates, 903 skipped callees, 14 budget-cut walks). Fresh Linux-container descriptor-anchored receipt: 75,673 bytes / digest `sha256:7ffaf98b4b4a25f5083fa91feab3655a5dab84272dfc15a3529c467ade1dee3f`; schema-2 snapshot at this HEAD has 39 cited paths (3 staged documentation paths, 36 clean), absent=0. `init.ps1 -Mode docs` PASS (9 / 190 / 33 / 10), `git diff --cached --check` exit 0 (LF→CRLF notices only). Pre-commit staged detect on the base index reports 4 files / 14 existing Markdown Section symbols / 0 affected processes / low risk; the newly added §7.65 heading is not yet present in that index, so forced post-commit analyze/detect must verify its mapping. No QQ/SnowLuma process access, native/callback, target writes, locked-list reads, message actions or Cargo tests.
 
 Turn 22 pre-change anchor and current documentation gate: at HEAD `a26f855655baabd9ec14c1fa345ffed35fec1599`, Docker GitNexus 1.6.12 / Node 22.23.2 was forced to rebuild (18,672 nodes / 49,610 edges / 150 clusters / 459 flows); status was up-to-date, schema-4 runner current, 272 covered files, `incompleteReasons=[]`, and all-scope detect reported no changes. Preserve the known callable-value-flow cap 33>32, REACHING_DEF dropped 311/4311, one CDG skip, 30 cross-language declines and process trace omissions (340/540 entry candidates, 903 skipped callees, 14 budget-cut walks). The pre-edit schema-2 snapshot at this HEAD has 39 cited paths clean / absent=0; after this documentation edit, the fresh schema-2 snapshot records 3 intentionally staged cited docs (`qq-native-lifetime-contract.md`, `progress.md`, and this handoff), 36 clean, absent=0; plan digest is unchanged. `init.ps1 -Mode docs` PASS (9 / 190 / 33 / 10), `git diff --check` exit 0 (LF→CRLF notices only), GitNexus staged detect 4 files / 14 Markdown Section symbols / 0 affected processes / low risk (documentation mapping only). The incremental detect is based on index `a26f855` and did not yet surface the new §7.64 heading; forced post-commit reindex will verify it. No Rust or Cargo tests, QQ/SnowLuma process access, native/callback, target write, live locked-list read, or message action.
 
@@ -53,6 +55,9 @@ Turn 8 validation: `init.ps1 -Mode docs` PASS (9 live docs / 191 local links / 3
 
 ## Evidence Pointers
 
+- Turn 23 pre-commit staged detect and current plan re-anchor: `local-evidence/n4-r2-readonly-20261015/gitnexus-staged-detect-20261015-turn23-final.txt`, `plan-read-receipt-turn23-final-20261015.json`, and `plan-reanchor-snapshot-turn23-final-20261015.json` (39 paths, 3 staged / 36 clean / absent=0). The detect uses the base index, so §7.65 is not indexed until forced post-commit analysis.
+- Turn 22 GitNexus outputs at `95f828d`: `local-evidence/n4-r2-readonly-20261015/gitnexus-analyze-20261015-turn22-95f.txt`, `gitnexus-status-20261015-turn22-95f.json`, and `gitnexus-detect-20261015-turn22-95f.txt`.
+- Turn 22 descriptor-anchored plan receipt and schema-2 snapshot at `95f828d`: `local-evidence/n4-r2-readonly-20261015/plan-read-receipt-turn22-95f-20261015.json` and `plan-reanchor-snapshot-turn22-95f-20261015.json` (39 cited paths clean, absent=0; unchanged digest).
 - Turn 21 closeout commit `a26f855` GitNexus outputs: `local-evidence/n4-r2-readonly-20261015/gitnexus-analyze-20261015-turn21-a26.txt`, `gitnexus-status-20261015-turn21-a26.json`, and `gitnexus-detect-20261015-turn21-a26.txt`.
 - Turn 21 plan re-anchor at `a26f855`: `local-evidence/n4-r2-readonly-20261015/plan-reanchor-snapshot-turn21-a26-20261015.json` (schema 2, 39 cited paths clean, absent=0); receipt is `plan-read-receipt-turn20-e6-20261015.json` (same canonical plan digest).
 - Turn 22 staged §7.64 detect: `local-evidence/n4-r2-readonly-20261015/gitnexus-staged-detect-20261015-turn22.txt` (4 documentation files / 12 Markdown Section symbols / 0 affected processes).

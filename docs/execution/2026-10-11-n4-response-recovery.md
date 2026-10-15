@@ -741,3 +741,9 @@ feat-005 / feat-006 保持 blocked，整个项目保持 NOT READY。
 - 固定映像 strict RTTI caller screen：`0xB816E8` 的 29 direct sites / 25 `.pdata` callers 中，10 个 caller 匹配 strict vtable entries（MSFService slots 10/16、MSFCoreService slot 16、MSFSessionImpl slots 1/2/4/5/20/22、TaskManager slot 3）；无已匹配 caller 落在 slot 0，另外 15 个 caller 没有 strict table entry。这只分类静态表成员，不推断析构语义或运行时调用。
 - 全 25 个 caller body 的 bounded linear alias screen 记录 48 次 state `+8/+0x10` read（各 24 次），0 次已跟踪 global-base direct write，22 个 site 将 `+8` 读出的值作为 `RCX` 交给 `D32138`。该模式加强 runner-pair dispatch 解释，不提供 owner cleanup 证据。限制为非 CFG-sensitive 的有限寄存器/简单栈槽跟踪；间接/跨函数、分支、no-`.pdata`、完整 stack 参数与映像外路径未排除。
 - hash-gated verifier/report hashes 见寿命合同 §7.64；原始 script/report 只保存在 ignored `local-evidence/n4-r2-readonly-20261015/`。本阶段仍未找到 global child-owner finalizer、manager last strong release、成功 wait 或 callback quiescence。无 QQ/SnowLuma process access、native/callback invocation、target writes、锁内现场读取、chat/message actions 或 Cargo tests；R4 不准入，feat-005/006 blocked，产品 NOT READY。
+
+### 2026-10-15 N4-R2 CRT detach fixed-range xref follow-up (fixed-sample static)
+
+- 全 `.pdata` operand census 在 CRT pointer table 邻近 RVA `0x4916C00..0x4916D00` 找到 4 refs、均为两个 consumer 的 begin/end LEA：`0x3E6BAA0` 的范围两端均为 `0x4916CB0`，`0x3E6BADC` 的范围两端均为 `0x4916CC0`；两者在该映像均无静态项。所有 PE sections 无对应绝对 VA/RVA qword literal。
+- 这只说明固定映像有效 `.pdata` 中没有其它对这两处范围的直接 RIP-relative 表访问；不把它命名成通用 `_onexit` ABI，不排除 no-`.pdata`/间接/运行期注册或其它 owner。hash-gated verifier/report 与边界见寿命合同 §7.65。
+- manager teardown/quiescence 仍未闭合。本轮无 QQ/SnowLuma process access、native/callback invocation、target write、锁内现场读取、聊天/消息动作或 Cargo tests；R4 不准入，feat-005/006 blocked，产品 NOT READY。

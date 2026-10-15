@@ -3,8 +3,8 @@
 ## Current State
 
 **Last Updated:** 2026-10-15（Asia/Shanghai）
-**Latest N4-R2 checkpoint:** §§7.58–7.63 的 global child-owner、CRT/TLS cleanup、termination-array、TLS thread-exit list、mapped `.text` 差异及 TLS context release 维持有界。§7.64 对 guarded global getter 的 25 个 callers 补做 strict RTTI/vtable 归类和 bounded alias 跟踪：未发现匹配的 slot-0 caller 或经跟踪 global-base direct field write；`+8/+0x10` 读取更符合 `TaskRunner` pair dispatch，不能证明 teardown 不存在。R2 manager final owner、successful wait、stop/drain/quiescence、consumer ABI/thread 和 R3 identity/历史 AV 仍未闭合。详见寿命合同 §§7.52–7.64、thread contract §§33–40。R4 不准入，feat-005/006 blocked，产品 NOT READY。
-**Baseline commit:** `0f5b483`；本线索阶段提交包括 `baf228e`、`921aeb9`、`ddb59de`、`e6c6191`、`a26f855`；保留用户未跟踪 `.agents/` harness。
+**Latest N4-R2 checkpoint:** §§7.58–7.64 对 global child-owner、CRT/TLS cleanup、termination-array、TLS thread-exit list、mapped `.text` 差异、TLS context release 与 guarded getter callers 的静态筛查仍未找到 finalizer/last-release 证据。§7.65 全 `.pdata` 窗口 scan 发现两处 CRT-adjacent pointer-range consumer 在固定映像的 begin/end 相同、没有静态项；不排除 no-`.pdata`、动态/间接 exit registration 或 external owner。R2 manager final owner、successful wait、stop/drain/quiescence、consumer ABI/thread 和 R3 identity/历史 AV 仍未闭合。详见寿命合同 §§7.52–7.65、thread contract §§33–40。R4 不准入，feat-005/006 blocked，产品 NOT READY。
+**Baseline commit:** `0f5b483`；本线索阶段提交包括 `baf228e`、`921aeb9`、`ddb59de`、`e6c6191`、`a26f855`、`95f828d`；保留用户未跟踪 `.agents/` harness。
 **Active Feature:** N4-R2。feat-005/006 仍 blocked，产品 NOT READY，R4 不准入。TaskQueue producer/consumer、manager watcher handoff、MonitorTask 条件 inner-tree writer 与 File/Log/Report RTTI/slot paths 已在固定-hash 静态层有记录，但不等于现场 callback 执行。File `+0x20` 配置/handle 构造后 writer、Report 后续字段 writer/gate/sink、thread-child 非零 flag writer、现场 watcher event-to-node/inner-tree membership、consumer OS thread、manager final owner、successful wait、全局 stop/drain/quiescence、R3 identity/历史 AV 仍未知。
 2026-10-14 §7.28 又定位 `MSFThread_xpng` slot 2 经 `D31686` 将 manager holder 安装到 inner payload `+0x110` 的静态路径；三个构造调用点均接到 slot 2，wrapper deleting destructor 进入 `D31356`。外部构造目标 `0x180D30FF0` 模块与语义未知，manager last owner、consumer/thread ABI 和 quiescence 仍未闭合，R4 不准入。
 
