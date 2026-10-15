@@ -3,8 +3,8 @@
 ## Current State
 
 **Last Updated:** 2026-10-15（Asia/Shanghai）
-**Latest N4-R2 checkpoint:** §§7.58–7.65 对 global child-owner、CRT/TLS cleanup、termination-array、TLS thread-exit list、mapped `.text` 差异、TLS context release 与 guarded getter callers 的静态筛查未找到 manager finalizer/last-release 证据。§7.66 补出固定映像动态 detach registry 候选、初始化/dispatch/尾槽清理路径；注册项类型、ABI、执行线程及与 guarded manager state 的关系仍未知。全 `.pdata` 与 no-`.pdata` bounded screens 不排除 indirect/runtime writes 或外部 owner。R2 manager final owner、successful wait、stop/drain/quiescence、consumer ABI/thread 和 R3 identity/历史 AV 仍未闭合。详见寿命合同 §§7.52–7.66、thread contract §§33–40。R4 不准入，feat-005/006 blocked，产品 NOT READY。
-**Baseline commit:** `0f5b483`；本线索阶段提交包括 `baf228e`、`921aeb9`、`ddb59de`、`e6c6191`、`a26f855`、`95f828d`、`a6e30c3`；保留用户未跟踪 `.agents/` harness。
+**Latest N4-R2 checkpoint:** §§7.58–7.65 对 global child-owner、CRT/TLS cleanup、termination-array、TLS thread-exit list、mapped `.text` 差异、TLS context release 与 guarded getter callers 的静态筛查未找到 manager finalizer/last-release 证据。§7.66 的动态 slot/detach 路径经 §7.67 校准为有缓冲 I/O/resource flush/close 特征的候选；它不是已证 callback registry 或 manager finalizer。`0x6D8E5F0` 的六个 `.pdata` 更新点包含分配失败分支，不能作 live count/quiescence 证明。仍未找到 manager global `0x67510A0` 的 final owner、successful wait、stop/drain/quiescence、consumer ABI/thread；R3 identity/历史 AV 也未闭合。详见寿命合同 §§7.52–7.67、thread contract §§33–40。R4 不准入，feat-005/006 blocked，产品 NOT READY。
+**Baseline commit:** `0f5b483`；本线索阶段提交包括 `baf228e`、`921aeb9`、`ddb59de`、`e6c6191`、`a26f855`、`95f828d`、`a6e30c3`、`24014f5`；保留用户未跟踪 `.agents/` harness。
 **Active Feature:** N4-R2。feat-005/006 仍 blocked，产品 NOT READY，R4 不准入。TaskQueue producer/consumer、manager watcher handoff、MonitorTask 条件 inner-tree writer 与 File/Log/Report RTTI/slot paths 已在固定-hash 静态层有记录，但不等于现场 callback 执行。File `+0x20` 配置/handle 构造后 writer、Report 后续字段 writer/gate/sink、thread-child 非零 flag writer、现场 watcher event-to-node/inner-tree membership、consumer OS thread、manager final owner、successful wait、全局 stop/drain/quiescence、R3 identity/历史 AV 仍未知。
 2026-10-14 §7.28 又定位 `MSFThread_xpng` slot 2 经 `D31686` 将 manager holder 安装到 inner payload `+0x110` 的静态路径；三个构造调用点均接到 slot 2，wrapper deleting destructor 进入 `D31356`。外部构造目标 `0x180D30FF0` 模块与语义未知，manager last owner、consumer/thread ABI 和 quiescence 仍未闭合，R4 不准入。
 
@@ -12,9 +12,15 @@
 
 2026-10-14 §7.37 继续闭合 callback 静态传递：slot 4 的 descriptor 进入 `0x732A80`，manager wrapper 由 inline `0x73BC5C/0x73BD08` 或 heap `0x73C2AA/0x73C34C` 承载，最终到 `0x73BD6C` 并调用 callback object `+0x30`。提交通过 `MSFService+0x60` 所指对象的 vtable slot 7；其运行期 writer、动态类和方法地址未定位。R2 consumer TID、owner teardown/quiescence 及旧 AV 原因仍 unknown；R3 stable identity unsupported，R4 不准入，产品保持 NOT READY。详情与 hash-gated 产物见 execution §2026-10-14 R2 callback transfer。
 
-### 2026-10-15 N4-R2 CRT detach dynamic registry follow-up
+### 2026-10-15 N4-R2 candidate dynamic detach registry follow-up
 
 - §7.66 在冻结 wrapper hash `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0` 下映射出动态 registry 候选的 static initializer、detach dispatcher、惰性槽分配与尾槽/前三槽清理路径；no-`.pdata` gap screen 未增加对其 global state 的直接引用。动态 callback 身份与 ABI、runtime registration、consumer thread 及其与 manager global owner `0x67510A0` 的联系仍未确认。验证与 ignored evidence hashes 见[执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。R4 不准入，feat-005/006 blocked，产品 NOT READY。
+
+### 2026-10-15 N4-R2 detach slot resource-path classification
+
+- §7.67 将 §7.66 当时的“CRT callback registry”分类收窄为 buffered I/O/resource flush/close 候选：dispatch leaf `0x3E93AA8` 是 direct-call 数据处理函数，其下游调用 `GetConsoleMode` / `WriteFile`；相关构造路径触及 `CreateFileW` / `GetFileType`。邻近计数字段还在 allocation failure 分支递增，不能用于 live-entry 或 quiescence 结论。
+- 该校准未找到 `0x67510A0` manager owner、stop/wait 或 complete drain 证据，也不排除其他 indirect/external callback paths。R2/R3 gates 仍 open，R4 不准入，feat-005/006 blocked，产品 NOT READY。固定 hash 与 artifact hashes 见[执行记录](docs/execution/2026-10-11-n4-response-recovery.md)。
+- 阶段文档门：`init.ps1 -Mode docs` PASS（9 / 192 / 33 / 10），`git diff --cached --check` exit 0；Docker GitNexus staged detect 为 4 docs / 15 Section symbols / 0 affected processes / low risk。plan read receipt 与 schema-2 snapshot 校验 75,673 bytes、digest unchanged、39 cited paths（3 staged / 36 clean / absent=0）；详细 raw outputs 留在 ignored `local-evidence/`。
 
 ### 2026-10-15 N4-R2 当前进程 `.text` 与 onexit allocator alias 复核
 
