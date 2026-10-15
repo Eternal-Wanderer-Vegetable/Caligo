@@ -2,20 +2,20 @@
 
 ## Current Objective
 
-- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，本次继续单一工作块 N4-R2。最近阶段提交为 `24014f5` (`docs(n4): map dynamic detach registry path`)；当前资源路径分类校准另成一阶段提交。
-- 最新结论见 [寿命合同 §7.67](docs/research/qq-native-lifetime-contract.md#767-candidate-dynamic-slot-path-narrowed-to-buffered-io-resource-cleanup-2026-10-15-fixed-sample-static)：§7.66 的动态 slot/detach 候选具体经过 buffered I/O flush/close 代码并调用 `GetConsoleMode`、`WriteFile`；它不是已证 callback registry 或 manager finalizer。`0x6D8E5F0` 不是已证明的 live count。该路径仍无证据连接到 guarded manager global `0x67510A0`。
+- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，本次继续单一工作块 N4-R2。最近阶段提交为 `22b6dbd` (`docs(n4): classify dynamic detach resource cleanup`)；当前 manager slot-4 复核另成一阶段。
+- 最新结论见 [寿命合同 §7.68](docs/research/qq-native-lifetime-contract.md#768-threadtaskmanager-primary-slot-4-bounded-alias-target-2026-10-15-fixed-sample-static)：manager slot 4 是 bounded no-`.pdata` 字段写入 thunk，把输入值写到 `this+0x20` 对象的 `+0x38`；没有识别 stop/wait/drain 行为。上阶段 §7.67 将 detach 槽路径归类为 buffered I/O/resource cleanup，不是已证 callback registry 或 manager finalizer。
 - R1 offline 已完成；R2/R3 与生命周期门仍开放，feat-005/006 blocked，产品 **NOT READY**。manager final strong owner、wait success、全项 stop/drain/quiescence、consumer ABI/thread、stable identity 和历史 AV 原因未知；R4 不准入。不得无锁读 `MonitorTask+0x98` 内层列表，unknown 不自动重发，SnowLuma 未访问。
-- 上一轮 PID `27604` 只读 `.text` 样本是历史证据，不代表当前实例。本次只解码本机冻结 `wrapper.node`，未访问任何 QQ/SnowLuma process、数据对象或锁内列表；没有 native/callback、目标写入或消息操作。
+- 上一轮 PID `27604` 只读 `.text` 样本是历史证据，不代表当前实例。本阶段只解码本机冻结 `wrapper.node`，未访问任何 QQ/SnowLuma process、数据对象或锁内列表；没有 native/callback、目标写入或消息操作。
 - 当独立准入门闭合且下一步确需测试账号主动发/收指定 QQ 消息时，停止并说明准确动作；目前继续离线与静态工作。
 
 ## Changed Areas
 
-- §7.66 已在 `24014f5` 提交；当前阶段增加 §7.67、执行台账、progress 与 handoff，不改 Rust 或 feature status。raw verifier/report 保存在 ignored `local-evidence/n4-r2-readonly-20261015/`。
+- §7.67 已在 `22b6dbd` 提交，提交后强制 GitNexus status 为 up-to-date、runner current、272 covered files、`incompleteReasons=[]`；all-scope detect 为 no changes，Section query 命中 §7.67。当前阶段增加 §7.68 与状态记录，不改 Rust 或 feature status。raw verifier/report 保存在 ignored `local-evidence/n4-r2-readonly-20261015/`。
 - 保留用户未跟踪 `.agents/` harness 和本机 `local-evidence/`；不要纳入提交。
 
 ## Next Restartable Steps
 
-1. 回到 R2 manager owner `0x67510A0` 的静态 teardown/initialization paths，查 final strong release、registration/termination hook、successful wait 与全量 stop/drain；已识别的 buffered I/O/resource table 作为独立子系统处理。
+1. 继续核对 manager global `0x67510A0` 的 final strong release、registration/termination hook 与 teardown owner。已复核主 vtable slot 4 是字段 setter，不能作为 stop/wait 证据；既知 `D3355C` 不检查 `WaitForSingleObject` 返回值，沿其 direct callers/child teardown 路径核对是否有其他成功门及全 task stop。
 2. 沿 R2 路径闭合停止全部 manager entries 与全局 callback drain/quiescence；避免重复 TLS pair、termination-array、getter/setup 和已完成 caller census。
 3. 继续跟 consumer 实际 OS thread/callback ABI 与 R3 stable identity/UID→UIN/历史 AV；偏移或函数级 caller overlap不能充当同对象/同线程证明。
 4. R1–R3、固定 hash 与寿命/ABI/线程门未闭合前，不调用 QQ native/callback，也不执行 R4 消息样本。需要用户主动发/收时，先停下并给出精确消息及方向。
@@ -23,7 +23,9 @@
 
 ## Validation
 
-Turn 26 pre-commit resource-path classification: `init.ps1 -Mode docs` PASS (9 live docs / 192 local links / 33 historical entries / 10 features), `git diff --cached --check` exit 0 (LF→CRLF notices only). Docker GitNexus 1.6.12 runner identity is current at base index `24014f5`; status reports content drift from the four changed docs. Staged detect maps 4 docs / 15 indexed Section symbols / 0 affected processes / low risk. New §7.67 is not in the base index, so forced post-commit analyze/status/detect plus a Section query must verify its mapping. Descriptor-anchored read-plan receipt: 75,673 bytes / `sha256:7ffaf98b4b4a25f5083fa91feab3655a5dab84272dfc15a3529c467ade1dee3f`; schema-2 snapshot `plan-reanchor-snapshot-turn26-precommit-final.json` at HEAD `24014f5af4312044dad5c1bbb564b04509b3624f` covers 39 cited paths (3 staged, 36 clean, absent=0). Raw provenance/status/detect outputs stay under ignored `local-evidence/n4-r2-readonly-20261015/`. No QQ/SnowLuma process access, native/callback, target writes, locked-list reads, message actions or Cargo tests.
+Turn 26 post-commit §7.67 verification at `22b6dbd7a2801d8f8cbe16e5bb5462e36de7d277`: Docker GitNexus 1.6.12 forced analyze yielded 18,682 nodes / 49,620 edges / 150 clusters / 459 flows; status is up-to-date with schema-4 runner current, 272 covered files and `incompleteReasons=[]`. All-scope detect returned no changes and a Section query found §7.67. Analyzer limits remain callable-value cap 33>32, REACHING_DEF dropped 311/4311, one CDG skip, 30 cross-language declines and process truncation 340/540 candidates, 903 callees, 14 budget walks. Raw status/detect/query are in ignored `local-evidence/n4-r2-readonly-20261015/`. This commit covered docs/static evidence only; no QQ/SnowLuma process access, native/callback, target writes, locked-list reads, messages or Cargo tests.
+
+Turn 26 pre-commit resource-path classification: `init.ps1 -Mode docs` PASS (9 live docs / 192 local links / 33 historical entries / 10 features), `git diff --cached --check` exit 0 (LF→CRLF notices only). Docker GitNexus 1.6.12 runner identity was current at base index `24014f5`; status reported content drift from the four changed docs. Staged detect mapped 4 docs / 15 indexed Section symbols / 0 affected processes / low risk. The descriptor-anchored read-plan receipt was 75,673 bytes / `sha256:7ffaf98b4b4a25f5083fa91feab3655a5dab84272dfc15a3529c467ade1dee3f`; schema-2 snapshot at HEAD `24014f5af4312044dad5c1bbb564b04509b3624f` covered 39 cited paths (3 staged, 36 clean, absent=0). Raw provenance/status/detect outputs are ignored under `local-evidence/n4-r2-readonly-20261015/`.
 
 Turn 23 current static-doc gate: at base HEAD `95f828dcf947357b1a105ba3a548d1b2481dca29`, Docker GitNexus 1.6.12 / Node 22.23.2 forced analyze yielded 18,674 nodes / 49,612 edges / 150 clusters / 459 flows; status was up-to-date, schema-4 runner current, 272 covered files, `incompleteReasons=[]`, and all-scope detect reported no changes. Preserve callable-value-flow cap 33>32, REACHING_DEF dropped 311/4311, one CDG skip, 30 cross-language declines, and process tracing omissions (340/540 entry candidates, 903 skipped callees, 14 budget-cut walks). Fresh Linux-container descriptor-anchored receipt: 75,673 bytes / digest `sha256:7ffaf98b4b4a25f5083fa91feab3655a5dab84272dfc15a3529c467ade1dee3f`; schema-2 snapshot at this HEAD has 39 cited paths (3 staged documentation paths, 36 clean), absent=0. `init.ps1 -Mode docs` PASS (9 / 190 / 33 / 10), `git diff --cached --check` exit 0 (LF→CRLF notices only). Pre-commit staged detect on the base index reports 4 files / 14 existing Markdown Section symbols / 0 affected processes / low risk; the newly added §7.65 heading is not yet present in that index, so forced post-commit analyze/detect must verify its mapping. No QQ/SnowLuma process access, native/callback, target writes, locked-list reads, message actions or Cargo tests.
 
