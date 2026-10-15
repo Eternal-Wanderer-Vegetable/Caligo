@@ -399,3 +399,9 @@ Strict COL/TypeDescriptor scanning did not bind `C71F9A`, `C71F10`, or their dir
 The exact-hash RTTI/COL-bound `ThreadPoolImpl` primary vtable at `0x4300918` has slot 0 `0x290DA46`, slot 2 `0x290C746`, and slot 3 `0x290C612`. Slot 2 passes the child at `this+0xA0` to `D31686`; slot 3 passes the same field's current pointer to `D313D6` and then releases the field. The slot-0 deleting destructor enters `0x290C59C`, which calls slot 3 before cleaning remaining fields and tail-calling its base cleanup.
 
 This closes a local child lifecycle inside that statically typed class only. The decoded functions contain no direct RIP-relative reference to guarded global `0x67510A0`; no evidence ties this `ThreadPoolImpl` instance to the global manager state or shows it is the last manager owner. Other helper/callee and indirect edges remain outside this function-local screen. Global final release, successful wait, complete stop/drain/quiescence and callback consumer ABI/thread remain open; R4 remains not admitted.
+
+## 46. 2026-10-15 ThreadPoolFactoryImpl-to-ThreadPoolImpl construction route
+
+On the frozen wrapper hash, strict RTTI/COL binds primary vtable `0x40F6348` / slot 1 `0x173C2BA` to `ThreadPoolFactoryImpl`; that method's bounded direct call chain reaches `ThreadPoolImpl` constructor `0x290C4B8` through `0x173C51D`, `0x173C96A`, `0x173C9F2`, and `0x173CA7D`. The pool constructor installs its validated primary vtable and the factory method is its only raw `.rdata` qword reference in the strict slot-1 position.
+
+The functions in this direct chain have no direct RIP-relative reference to guarded manager global `0x67510A0`. This is a static factory-to-pool call route, not proof that a factory instance was constructed or that this pool is owned by the manager global. The factory initializer's caller and runtime factory ownership remain unknown; see lifetime §7.74 and the hash-gated report there.
