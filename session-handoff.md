@@ -2,25 +2,23 @@
 
 ## Current Objective
 
-- 最新增量（寿命合同 §§7.52–7.59 / thread contract §§33–40）：固定-hash 已闭合 MonitorTask 内树条件插入、File/Log/Report RTTI 与 slot targets；File slot4 接到 `KERNEL32!WriteFile`。global state `0x67510A0+0` 是静态 child-owner 候选；唯一两个 `0xB81758` direct `.pdata` callers 为 `MSFService@nt` 与 `MSFCoreService@nt` primary slot16。新增 finalizer screen 检查 29 个 getter sites / 25 个 callers、TLS callback 与 DLL detach 直接路径，未识别 global-state finalizer；CRT/TLS runtime callback lists 为间接调用，仍未知。manager last strong owner、wait success、global callback drain/quiescence 仍未知。T8 不 pin manager，且未读 `+0x98` 保护的内树；R4 不准入。
-
-- 上一条增量（寿命合同 §7.50 / thread contract §32）：固定-hash census 将通用 insertion helper `0x606E52` 的直接调用面收窄至 43 个 `E8` sites / 39 个 `.pdata` caller functions。已类型绑定的 `0x217DAF6` 是 `ThreadTaskManagerImpl` slot-5 writer，修改 manager 自己的 `+0xC8/+0xD0` watcher sentinel；没有任何 caller 被证明接收 MonitorTask 内层 `+0xF8/+0x100` sentinel。此结果只限制 `0x606E52` direct callers，不排除 inline/indirect/alternate writers。child nonzero `+0x100` flag writer、inner child RTTI/callback、event-to-node binding 与执行线程仍 unknown；T6 只观察外层节点且 manager strong count=0，不构成寿命 pin。
-
-- 日期：2026-10-15（Asia/Shanghai）；继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)。静态证据起点 HEAD `eb6cfa7`；`.agents/` 是用户 harness，保持未跟踪且不改动。
-- 产品仍 **NOT READY**，feat-005/006 为 `blocked`。R1–R3 完成门、manager last strong owner、consumer ABI/thread、全局 stop/drain/quiescence、R3 stable identity 与历史 AV 原因仍开放；R4 不准入。
-- 最新证据见[寿命合同 §§7.39–7.59](docs/research/qq-native-lifetime-contract.md#739-taskqueuetaskrunner-弱-pair-与线程字段归属更正-2026-10-15固定样本静态)：§7.59 在 getter/setup、TLS callback direct edges 与 DLL detach 路径中未识别 finalizer，但间接注册表未知；global teardown、manager last owner、wait success 和 callback quiescence 未闭合。此前字段、处理器、File `+0x20` 及外层 watcher 限制见相邻各节。MonitorTask 内层现场 list 仍不无锁读取。产品继续 NOT READY，feat-005/006 blocked，R4 不准入；详见 [执行记录 §2026-10-15](docs/execution/2026-10-11-n4-response-recovery.md) 和 [progress](progress.md)。
-- T8 为已授权的只读 `ReadProcessMemory` 观察（PID 27604，访问 `0x410`），不访问 SnowLuma；无 QQ native/callback 调用、目标写入、消息发送或聊天打开，也未读 `MonitorTask+0x98` 锁内集合。R1–R3/R4 准入合同仍禁止跳过完成门进入 native send。
+- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)。本阶段依据 HEAD `baf228e`，正在提交寿命合同 §7.61 的配套执行记录、状态和交接更新。
+- 最新静态证据见[寿命合同 §§7.60–7.61](docs/research/qq-native-lifetime-contract.md#761-tls-thread-exit-callback-list-writer-and-caller-screen-2026-10-15-fixed-sample-static)：固定 termination array 和 TLS thread-exit list/writer 已有边界；process `_register_onexit_function` 表、indirect/no-.pdata cleanup、global owner finalizer 与动态 callback 内容仍未知。不得把 unknown 表述为“无 finalizer”。
+- 产品仍 **NOT READY**，feat-005/006 为 `blocked`；R1–R3、manager last strong owner、wait success、完整 stop/drain/quiescence、consumer ABI/thread、R3 stable identity 和历史 AV 原因仍开放，R4 不准入。MonitorTask `+0x98` 保护的内层现场 list 不无锁读取；unknown 请求不自动重发，SnowLuma 保持未触碰。
+- 本阶段是固定 wrapper hash 的只读静态分析和文档维护；未访问 QQ/SnowLuma 进程、未调用 native/callback、未写目标、未打开聊天或发送消息，也未运行 Cargo tests。此前 T8 是独立的历史只读观察，不能作为本阶段或当前进程状态的证据。
+- 日期：2026-10-15（Asia/Shanghai）。本阶段只在确需测试账号实际收发消息且其他离线/static work 已穷尽时，暂停并告知用户具体消息动作；否则继续独立推进。
 
 ## Changed Areas
 
-- 本轮增量改动为寿命合同 §7.59、thread contract §40、执行账本、progress 和 session handoff；静态检查 global getter callers、TLS callback 与 DLL detach 入口，未识别 finalizer，间接 callback registry 仍 unresolved。产品 feature 状态未变。
+- 本阶段增量改动为寿命合同 §7.61、执行账本、progress 和 session handoff；静态识别 TLS exit-list writer 与四个直接注册点，global-state owner/finalizer 未闭合。产品 feature 状态未变。
 - 保留已有未跟踪 `.agents/` harness 与 `local-evidence/` 原始现场材料。
 
 ## Next Restartable Steps
 
-1. 不重复 getter/setup direct-caller census；下一静态块追踪 CRT process-detach/onexit 表的初始化与注册 writer，判断间接回调是否能指向 global state 的清理函数。当前只确认 DLL detach 会进入 CRT 生命周期分派、TLS detach 使用间接回调表；不能据此宣称 finalizer 存在或不存在。
-2. 已知三个 lock helper 的 direct E8 census 不再重复；继续调查清理是否依赖 inline/alternate synchronization、TLS/owner 外层排他，以及 manager 最后 strong owner、stop/wait 成功和完整 callback drain/quiescence。R3 stable identity、sender UID→UIN 与历史 AV 仍在计划门内。
-3. 不再重复外层 watcher 快照；当前 T8 manager strong count 为 0 且 lifetime 未 pin。继续不读 `+0x98` 锁内集合，除非未来观察者能在目标内合法持锁并具备销毁前稳定引用。R1–R3/lifetime gates 未闭合前，不调用 QQ native/callback、不发送 R4 样本；unknown 请求不自动重发，SnowLuma 保持未触碰。
+1. 不重复固定 termination-array、TLS `0x3E68018` direct caller 或 getter/setup caller census。下一静态块区分并追踪 generic process `_register_onexit_function`/table writer，与 TLS `+0xB0` list 分开；检查剩余 no-`.pdata` indirect cleanup path 是否能触及 guarded global owner。已知 TLS pair cleanup 是 `0x219551A`，其 `+0x38` release control-block 类型/final release 仍 unresolved。
+2. 已知三个 MonitorTask lock helper 的 direct E8 census 不再重复；继续调查 inline/alternate synchronization、TLS/owner 外层排他，以及 manager 最后 strong owner、stop/wait 成功和完整 callback drain/quiescence。R3 stable identity、sender UID→UIN 与历史 AV 仍在计划门内。
+3. 不再重复外层 watcher 快照；当前 T8 manager strong count 为 0 且 lifetime 未 pin。继续不读 `+0x98` 锁内集合。R1–R3/lifetime gates 未闭合前，不调用 QQ native/callback、不发送 R4 样本；unknown 请求不自动重发，SnowLuma 保持未触碰。
+4. 若后续唯一进展需要测试账号实际收发消息，先停在该门并告知用户具体消息动作；静态、离线或只读工作继续自行推进。
 
 ## Validation
 
