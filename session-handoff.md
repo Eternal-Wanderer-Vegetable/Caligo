@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，当前单一工作块仍为 N4-R2。§7.73/§7.74 与对应 Docker graph closeout 已分别提交至 `54e8228`/`16b1acb`。本轮新增的 callback 测试矩阵与 daemon bridge-ready 同步修正在本证据阶段；当前代码已通过默认与 research 全量离线入口，详情见 execution record 和 progress。提交该阶段后继续固定-hash manager/factory owner、teardown、callback ABI/thread 静态调查。factory instance 仍未连到 guarded manager global `0x67510A0`。
+- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，当前单一工作块仍为 N4-R2。§7.73/§7.74 与对应 Docker graph closeout 已提交至 `54e8228`/`16b1acb`；离线 callback 矩阵和 daemon bridge-ready 测试夹具修复已提交至 `3f79204`，默认与 research 全量离线入口通过。该 HEAD 的 Docker GitNexus closeout 已完成：status up-to-date、all-scope detect 无变化、39 个计划引用路径 clean。当前仅剩本次 graph-closeout 文档记录待提交；随后继续固定-hash manager/factory owner、teardown、callback ABI/thread 静态调查。factory instance 仍未连到 guarded manager global `0x67510A0`。
 - 最新结论见[寿命合同 §7.69](docs/research/qq-native-lifetime-contract.md#769-manager-stopwait-caller-boundary-and-repeated-passive-observation-2026-10-15-fixed-sample-static-read-only-field)：`D313D6` 的 12 个静态 caller 中仅一个严格命中 `ThreadPoolImpl` slot 3；wait helper 不检查 `INFINITE` wait 返回值。两次外部只读观察都将 TaskQueue owner TID 匹配到当前进程线程，但 executor singleton anchor 未命中；不能据此认定 callback consumer 或 quiescence。
 - 本轮进一步更正 §7.28 的地址范围：`0x180D30FF0` 是精确 wrapper hash 内的 `.text`/`.pdata` 函数；全局 setup 和 RTTI-bound `MSFThread_xpng` payload 路径均调用它并将结果送入 `D31686`。全局 payload RTTI、参数语义和 release/finalizer 仍未知；详情见寿命合同 §7.70 / thread contract §42。
 - §7.71 解码出 `D30FF0` 把输入 `R8D` 存入 payload `+0`、拷贝 string-shaped 输入到 `+0x48`，以及其余有限字段初始化；四个直接 caller 中两个传常量 1，两个从输入加载。mode 语义、global payload RTTI 与释放合同仍未知，详见寿命合同 §7.71 / thread contract §43。
@@ -10,13 +10,14 @@
 - §7.73 由同一固定 `wrapper.node` hash 的 RTTI/COL 与直接调用边确认 `ThreadPoolImpl` slot 2 在 `+0xA0` 安装子项，slot 3 对该字段调用 `D313D6` 后释放，slot-0 删除析构先调用 slot 3 再清理其他字段。限定函数无直接 RIP-relative 引用 `0x67510A0`；此局部类寿命合同不证明实例属于全局 manager，也不证明 successful wait 或 quiescence。hash 与边界见寿命合同 §7.73。
 - §7.74 将 pool constructor `0x290C4B8` 的唯一有效 `.pdata` 直接 caller 追到 `ThreadPoolFactoryImpl` primary vtable slot1 `0x173C2BA`，完整链经过五个直接调用边。新增严格 COL/CHD 复核把 factory、pool、`ThreadTaskManagerImpl` 分在不同项目接口继承分支；组合关系仍可能存在。链路没有直接 RIP-relative 引用 manager global `0x67510A0`；工厂 vptr initializer没有直接 `.pdata` 调用者或已扫描形式的 REX.W RIP-relative LEA caller，因此实际工厂实例/manager 所有权仍未知。静态结论与 verifier hashes 见寿命合同 §7.74。
 - R1 offline 已完成；R2/R3 与生命周期门仍开放，feat-005/006 blocked，产品 **NOT READY**。manager final strong owner、wait success、全项 stop/drain/quiescence、consumer ABI/thread、stable identity 和历史 AV 原因未知；R4 不准入。不得无锁读 `MonitorTask+0x98` 内层列表，unknown 不自动重发，SnowLuma 未访问。
-- 本次 turn 扩充了研究构建 callback 矩阵并修复测试夹具缺少 bridge-ready 同步造成的一次 `no active session` 失败；20 次 `daemon_chain` stress、`init.ps1 -Mode research` 与 `init.ps1 -Mode default` 通过。隔离进程仅合成不可读诊断指针，不是 QQ 或历史 `0xC0000005` 复现。没有访问 QQ/SnowLuma 进程、调用 QQ native/callback、读取锁内列表、写目标进程或执行消息操作。
+- `3f79204` 的 GitNexus closeout 刷新到该 commit；保留分析器截断上限，不能把无变化 detect 解释为代码零影响或静态生命周期门通过。plan snapshot 为 schema 2、39/39 clean、absent=0；详情与哈希见 execution record。本次没有访问 QQ/SnowLuma 进程、调用 QQ native/callback、读取锁内列表、写目标进程或执行消息操作。
+- 本次 turn 扩充了研究构建 callback 矩阵并修复测试夹具缺少 bridge-ready 同步造成的一次 `no active session` 失败；20 次 `daemon_chain` stress、`init.ps1 -Mode research` 与 `init.ps1 -Mode default` 通过。隔离进程仅合成不可读诊断指针，不是 QQ 或历史 `0xC0000005` 复现。
 - 之前两次只读 observer 选择了当时用户指定的 QQ root PID `27604`（创建时间 `2026-10-15T00:59:34.989Z`），并核对磁盘/期望 `wrapper.node` hash 一致。该次进程观察仅限线程/manager 摘要；没有读取聊天数据或 `MonitorTask+0x98` 锁内列表，也没有 native/callback、目标写入或消息操作。
 - 当独立准入门闭合且下一步确需测试账号主动发/收指定 QQ 消息时，停止并说明准确动作；目前继续离线与静态工作。
 
 ## Changed Areas
 
-- §7.67–§7.74 的固定样本 evidence 与 graph closeout 已提交至 `54e8228`/`16b1acb`。当前阶段修改 `consumer_probe.rs`、`native_session.rs`、`daemon_chain.rs`，并更新 execution/progress/feature/handoff 以记录离线覆盖和完整默认/research验证；本阶段 commit 尚待完成。raw test logs 位于 ignored `local-evidence/n4-r2-readonly-20261015/`，`.agents/` harness 保持未跟踪，不纳入提交。
+- §7.67–§7.74 的固定样本 evidence 与 graph closeout 已提交至 `54e8228`/`16b1acb`；离线 callback 矩阵及确定性 daemon-chain readiness 修复已提交至 `3f79204`。当前待提交改动仅是该 HEAD 的 GitNexus/schema-2 plan closeout 与最新交接记录。raw test/graph logs 位于 ignored `local-evidence/n4-r2-readonly-20261015/`，`.agents/` harness 保持未跟踪，不纳入提交。
 - 保留用户未跟踪 `.agents/` harness 和本机 `local-evidence/`；不要纳入提交。
 
 ## Next Restartable Steps
