@@ -132,8 +132,12 @@ fn connect_control(daemon: &Arc<Daemon>) -> ControlClient {
 
 /// bridge 侧代理:真实 resident + 管道语义(收到 Dispatch → resident 执行
 /// → NativeStarted/SendResult 回执;独立线程)。
-fn spawn_bridge_agent(daemon: Arc<Daemon>, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<u64> {
-    std::thread::spawn(move || {
+fn spawn_bridge_agent(
+    daemon: Arc<Daemon>,
+    stop: Arc<AtomicBool>,
+) -> (std::thread::JoinHandle<u64>, std::sync::mpsc::Receiver<()>) {
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let agent = std::thread::spawn(move || {
         let resident = Arc::new(Resident::new(
             ChainHost {
                 send_ids: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -143,6 +147,10 @@ fn spawn_bridge_agent(daemon: Arc<Daemon>, stop: Arc<AtomicBool>) -> std::thread
         resident.bootstrap().unwrap();
         let mut native_sends = 0u64;
         let mut bridge = connect_bridge(&daemon);
+        // BridgeClient::connect returns only after the daemon has attached the
+        // session and acknowledged Hello. Let tests establish that precondition
+        // before issuing control-plane sends.
+        ready_tx.send(()).expect("test waits for bridge readiness");
         // resident 的 bootstrap ListenerAdd 已发生(常驻一次初始化)。
         loop {
             if stop.load(Ordering::Relaxed) {
@@ -259,7 +267,8 @@ fn spawn_bridge_agent(daemon: Arc<Daemon>, stop: Arc<AtomicBool>) -> std::thread
         let report = resident.close().unwrap();
         assert_eq!(report.listener_removed, Some(true));
         native_sends
-    })
+    });
+    (agent, ready_rx)
 }
 
 fn http_request(address: SocketAddr, token: &str, method: &str, path: &str, body: &str) -> String {
@@ -279,7 +288,10 @@ fn http_request(address: SocketAddr, token: &str, method: &str, path: &str, body
 fn full_chain_send_event_and_stop() {
     let (daemon, runner, journal) = start_daemon("chain");
     let stop = Arc::new(AtomicBool::new(false));
-    let agent = spawn_bridge_agent(daemon.clone(), stop.clone());
+    let (agent, bridge_ready) = spawn_bridge_agent(daemon.clone(), stop.clone());
+    bridge_ready
+        .recv_timeout(Duration::from_secs(3))
+        .expect("bridge session must be active before control sends");
 
     let mut control = connect_control(&daemon);
 
@@ -506,7 +518,10 @@ fn event_roundtrip_through_pipe_and_journal() {
 fn onebot_http_uses_daemon_receipt_and_persisted_message_id() {
     let (daemon, runner, _) = start_daemon("onebot-http");
     let stop_agent = Arc::new(AtomicBool::new(false));
-    let agent = spawn_bridge_agent(daemon.clone(), stop_agent.clone());
+    let (agent, bridge_ready) = spawn_bridge_agent(daemon.clone(), stop_agent.clone());
+    bridge_ready
+        .recv_timeout(Duration::from_secs(3))
+        .expect("bridge session must be active before HTTP requests");
     let listener = caligo_core::onebot_server::bind_loopback("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let http_daemon = daemon.clone();

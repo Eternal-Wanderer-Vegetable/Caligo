@@ -464,6 +464,55 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "research")]
+    struct InlineConsumerOps;
+
+    #[cfg(feature = "research")]
+    impl NativeOps for InlineConsumerOps {
+        fn probe_ready(&mut self, _svc: usize) -> Result<(), OpsError> {
+            Ok(())
+        }
+
+        fn submit(&mut self, _svc: usize, cookie: &Cookie, body: &[u8]) -> Result<(), OpsError> {
+            assert_eq!(body, b"BODY");
+            let src = crate::consumer_probe::build_cb_for_cookie(cookie);
+            let mut delegate = [0u64; 4];
+            // Model the native manager's clone -> inline response -> destroy
+            // sequence while NativeSession::submit is still on the stack.
+            unsafe {
+                crate::consumer_probe::consumer_manager(
+                    delegate.as_mut_ptr().add(2).cast(),
+                    0,
+                    src.as_ptr().cast_mut().cast(),
+                    0x10,
+                    delegate.as_mut_ptr().cast(),
+                );
+                let invoke: unsafe extern "system" fn(
+                    *mut core::ffi::c_void,
+                    u32,
+                    i32,
+                    *const core::ffi::c_void,
+                    *const core::ffi::c_void,
+                ) = core::mem::transmute(delegate[3] as usize);
+                invoke(
+                    delegate.as_mut_ptr().cast(),
+                    0x10,
+                    0,
+                    core::ptr::null(),
+                    1usize as *const core::ffi::c_void,
+                );
+                crate::consumer_probe::consumer_manager(
+                    delegate.as_mut_ptr().cast(),
+                    1,
+                    delegate.as_ptr().cast_mut().cast(),
+                    0x10,
+                    core::ptr::null_mut(),
+                );
+            }
+            Ok(())
+        }
+    }
+
     fn seq_from(start: u64) -> SeqAllocator<Box<dyn FnMut(u64) -> Result<(), std::io::Error>>> {
         SeqAllocator::new(start, Box::new(|_| Ok(())))
     }
@@ -516,6 +565,62 @@ mod tests {
         let done = s.take_terminal();
         assert_eq!(done.len(), 1);
         assert_eq!(done[0].0, "r1");
+    }
+
+    #[cfg(feature = "research")]
+    #[test]
+    fn inline_consumer_callback_is_captured_during_submit_then_applied_once() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let _callback_lock = crate::consumer_probe::TEST_LOCK.lock().unwrap();
+        static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0xC011_BACC_0000);
+        let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        let report = std::env::temp_dir().join(format!("caligo-inline-{generation:x}.jsonl"));
+        let _ = std::fs::remove_file(&report);
+        let wide: Vec<u16> = report
+            .as_os_str()
+            .to_string_lossy()
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        assert!(crate::consumer_probe::leak_ctx(0x180000000, wide.as_ptr(), generation).is_some());
+
+        let mut cookie_bytes = [0u8; 16];
+        cookie_bytes[..8].copy_from_slice(&generation.to_le_bytes());
+        cookie_bytes[8..].copy_from_slice(&0x51u64.to_le_bytes());
+        let cookie = Cookie(cookie_bytes);
+        let mut attach = proof();
+        attach.session_generation = generation;
+        let mut session = NativeSession::new(seq_from(19));
+        let mut ops = InlineConsumerOps;
+        session.attach(&mut ops, attach).unwrap();
+
+        assert_eq!(
+            session.enqueue_send(&mut ops, "inline-request", cookie, b"BODY"),
+            SendAcceptance::Dispatched { cookie, seq: 19 }
+        );
+        assert!(
+            !report.exists(),
+            "inline callback must only capture; the worker owns report IO"
+        );
+
+        let captured = crate::consumer_probe::drain_responses();
+        assert_eq!(captured, vec![(cookie, 0, String::new())]);
+        assert!(matches!(
+            session.on_response(&cookie, ResponseOutcome::BusinessAccepted),
+            Completion::AcceptedUnconfirmed { request_id } if request_id == "inline-request"
+        ));
+        assert_eq!(session.ledger().pending().len(), 1);
+        assert_eq!(
+            session.invalidate("inline sample closed"),
+            vec!["inline-request".to_string()]
+        );
+        assert_eq!(session.ledger().pending().len(), 0);
+
+        let report_text = std::fs::read_to_string(&report).unwrap();
+        assert!(report_text.contains("\"consumer_result\""));
+        assert!(report_text.contains("\"manager_calls\":2"));
+        let _ = std::fs::remove_file(report);
     }
 
     #[test]

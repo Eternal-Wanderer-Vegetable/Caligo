@@ -640,13 +640,14 @@ pub fn drain_responses() -> Vec<(crate::native_response::Cookie, i32, String)> {
 }
 
 #[cfg(test)]
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0xCA11_0000);
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn context() -> (&'static ConsumerCtx, std::path::PathBuf, Vec<u16>) {
         let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
         let report = std::env::temp_dir().join(format!("caligo-cp-{generation:x}.jsonl"));
@@ -665,6 +666,14 @@ mod tests {
         let mut raw = [0u8; 24];
         raw[0] = (s.len() as u8) << 1;
         raw[1..1 + s.len()].copy_from_slice(s);
+        raw
+    }
+
+    fn heap_string(s: &[u8]) -> [u8; 24] {
+        let mut raw = [0u8; 24];
+        raw[0] = 1;
+        raw[8..16].copy_from_slice(&(s.len() as u64).to_le_bytes());
+        raw[16..24].copy_from_slice(&(s.as_ptr() as usize as u64).to_le_bytes());
         raw
     }
 
@@ -737,6 +746,18 @@ mod tests {
                 ctx.wrapper_base + EMPTY_INV_RVA
             ]
         );
+        let mut destroyed = [0u64; 2];
+        // SAFETY: op=1 receives the same live source pair and writable slots.
+        unsafe {
+            consumer_manager(
+                destroyed.as_mut_ptr().cast(),
+                1,
+                dest.as_mut_ptr().cast(),
+                0x10,
+                core::ptr::null_mut(),
+            );
+        }
+        assert_eq!(destroyed, reset, "op 1 writes the profiled empty pair");
         let err = short_string(b"ok");
         let _: unsafe extern "system" fn(*mut c_void, u32, i32, *const c_void, *const c_void) =
             consumer_invoke;
@@ -760,6 +781,72 @@ mod tests {
         let output = std::fs::read_to_string(report).unwrap();
         assert!(output.contains("\"err_code\":0"));
         assert!(!output.contains("span_shape"));
+    }
+
+    #[test]
+    fn empty_and_heap_error_spans_obey_the_capture_budget() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let (ctx, report, _wide) = context();
+        let make_cookie = |suffix: u64| {
+            let mut cookie = crate::native_response::Cookie([0; 16]);
+            cookie.0[..8].copy_from_slice(&ctx.generation.to_le_bytes());
+            cookie.0[8..].copy_from_slice(&suffix.to_le_bytes());
+            cookie
+        };
+        let empty_cookie = make_cookie(1);
+        let exact_cookie = make_cookie(2);
+        let oversize_cookie = make_cookie(3);
+        let empty_delegate = build_cb_for_cookie(&empty_cookie);
+        let exact_delegate = build_cb_for_cookie(&exact_cookie);
+        let oversize_delegate = build_cb_for_cookie(&oversize_cookie);
+        let exact_bytes = vec![b'x'; MAX_ERR_BYTES];
+        let exact_span = heap_string(&exact_bytes);
+        let oversize_bytes = vec![b'y'; MAX_ERR_BYTES + 1];
+        let oversize_span = heap_string(&oversize_bytes);
+        let response_uid = 1usize as *const c_void;
+
+        // Null is the valid empty diagnostic span. The two heap-shaped spans
+        // cover the inclusive byte budget and the first omitted-over-budget size.
+        unsafe {
+            consumer_invoke(
+                empty_delegate.as_ptr().cast_mut().cast(),
+                0x10,
+                0,
+                core::ptr::null(),
+                response_uid,
+            );
+            consumer_invoke(
+                exact_delegate.as_ptr().cast_mut().cast(),
+                0x10,
+                0,
+                exact_span.as_ptr().cast(),
+                response_uid,
+            );
+            consumer_invoke(
+                oversize_delegate.as_ptr().cast_mut().cast(),
+                0x10,
+                0,
+                oversize_span.as_ptr().cast(),
+                response_uid,
+            );
+        }
+        assert!(!report.exists(), "callback thread must not write reports");
+
+        let drained = drain_responses();
+        assert_eq!(drained.len(), 3);
+        let result_for = |cookie: crate::native_response::Cookie| {
+            drained
+                .iter()
+                .find(|(seen, _, _)| *seen == cookie)
+                .expect("each admitted callback is returned")
+        };
+        assert_eq!(result_for(empty_cookie).1, 0);
+        assert_eq!(result_for(empty_cookie).2, "");
+        assert_eq!(result_for(exact_cookie).2, "x".repeat(MAX_ERR_BYTES));
+        assert_eq!(
+            result_for(oversize_cookie).2,
+            "<diagnostic omitted: over budget>"
+        );
     }
 
     #[test]
@@ -846,8 +933,8 @@ mod tests {
         }
         assert_eq!(drain_responses().len(), 1);
 
-        let guard = GenerationGuard::new(ctx.generation);
-        guard.quarantine();
+        // Dropping the owner guard is the resident shutdown path.
+        drop(GenerationGuard::new(ctx.generation));
         // The quarantine check returns before touching the error pointer; the
         // fifth response-UID argument is opaque.
         unsafe {
@@ -917,6 +1004,58 @@ mod tests {
             orphaned_before + 1
         );
         assert!(drain_responses().is_empty());
+    }
+
+    #[test]
+    fn unreadable_diagnostic_pointer_is_contained_in_an_independent_process() {
+        const CHILD_MODE: &str = "CALIGO_CONSUMER_POINTER_CHILD";
+        let _lock = TEST_LOCK.lock().unwrap();
+        if std::env::var_os(CHILD_MODE).is_some() {
+            let (ctx, _report, _wide) = context();
+            let mut cookie = crate::native_response::Cookie([0; 16]);
+            cookie.0[..8].copy_from_slice(&ctx.generation.to_le_bytes());
+            cookie.0[8..].copy_from_slice(&0xBADu64.to_le_bytes());
+            let delegate = build_cb_for_cookie(&cookie);
+            // This address is outside the low-address sentinel range, so the
+            // test reaches the guarded self-process read and its failure path.
+            unsafe {
+                consumer_invoke(
+                    delegate.as_ptr().cast_mut().cast(),
+                    0x10,
+                    0,
+                    0x10000usize as *const c_void,
+                    1usize as *const c_void,
+                );
+            }
+            let captured = drain_responses();
+            assert_eq!(
+                captured,
+                vec![(cookie, 0, "<diagnostic unreadable>".to_string())]
+            );
+            println!("CAPTURE=unreadable; CHILD=clean");
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "consumer_probe::tests::unreadable_diagnostic_pointer_is_contained_in_an_independent_process",
+                "--nocapture",
+            ])
+            .env(CHILD_MODE, "1")
+            .output()
+            .expect("spawn isolated callback child");
+        assert!(
+            output.status.success(),
+            "child exit={:?}\nstdout={}\nstderr={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("CAPTURE=unreadable; CHILD=clean"),
+            "child did not report its capture result"
+        );
     }
 
     #[test]
