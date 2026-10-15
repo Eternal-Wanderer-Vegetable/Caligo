@@ -2,23 +2,24 @@
 
 ## Current Objective
 
-- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，本次继续单一工作块 N4-R2。地址范围更正 `3291e95` 与其 graph closeout `2d2330f` 已提交；当前追加 `D30FF0` payload field/caller 静态结果 §7.71 / thread §43。
+- 继续执行 [N4 响应恢复计划](docs/plans/2026-10-11-gitnexus-plan-caligo-n4-response-recovery.md)，本次继续单一工作块 N4-R2。地址范围更正 `3291e95` 与其 graph closeout `2d2330f` 已提交；§7.71 / thread §43 记录 `D30FF0` payload fields。本阶段新增 §7.72 / thread §44，分类 `D3355C` 的第二直接调用点。
 - 最新结论见[寿命合同 §7.69](docs/research/qq-native-lifetime-contract.md#769-manager-stopwait-caller-boundary-and-repeated-passive-observation-2026-10-15-fixed-sample-static-read-only-field)：`D313D6` 的 12 个静态 caller 中仅一个严格命中 `ThreadPoolImpl` slot 3；wait helper 不检查 `INFINITE` wait 返回值。两次外部只读观察都将 TaskQueue owner TID 匹配到当前进程线程，但 executor singleton anchor 未命中；不能据此认定 callback consumer 或 quiescence。
 - 本轮进一步更正 §7.28 的地址范围：`0x180D30FF0` 是精确 wrapper hash 内的 `.text`/`.pdata` 函数；全局 setup 和 RTTI-bound `MSFThread_xpng` payload 路径均调用它并将结果送入 `D31686`。全局 payload RTTI、参数语义和 release/finalizer 仍未知；详情见寿命合同 §7.70 / thread contract §42。
-- §7.71 解码出 `D30FF0` 把输入 `R8D` 存入 payload `+0`、拷贝 string-shaped 输入到 `+0x48`，以及其余有限字段初始化；四个直接 caller 中两个传常量 1，两个从输入加载。mode 语义、global payload RTTI 与释放合同仍未知，详见待提交寿命合同 §7.71 / thread contract §43。
+- §7.71 解码出 `D30FF0` 把输入 `R8D` 存入 payload `+0`、拷贝 string-shaped 输入到 `+0x48`，以及其余有限字段初始化；四个直接 caller 中两个传常量 1，两个从输入加载。mode 语义、global payload RTTI 与释放合同仍未知，详见寿命合同 §7.71 / thread contract §43。
+- §7.72 复核 `D3355C` 的第二直接调用点 `C71F9A`：它传入对象基址（首 qword 被当作 handle），调用前触及 `+0x18/+0x60`；与 `D313D6` 的 `&child+0x10` 路径区分。wait 结果均不检查；严格 RTTI/vtable 筛查没有连接该路径与 `0x67510A0`。证据 hashes 与范围见寿命合同 §7.72。
 - R1 offline 已完成；R2/R3 与生命周期门仍开放，feat-005/006 blocked，产品 **NOT READY**。manager final strong owner、wait success、全项 stop/drain/quiescence、consumer ABI/thread、stable identity 和历史 AV 原因未知；R4 不准入。不得无锁读 `MonitorTask+0x98` 内层列表，unknown 不自动重发，SnowLuma 未访问。
 - 本次两次只读 observer 重新选中同一用户指定最新 QQ root PID `27604`（创建时间 `2026-10-15T00:59:34.989Z`），并校验磁盘/期望 `wrapper.node` hash 一致。该进程观察仅限外部只读线程/manager 摘要；没有读取聊天数据或 `MonitorTask+0x98` 锁内列表，也没有 native/callback、目标写入或消息操作。
 - 当独立准入门闭合且下一步确需测试账号主动发/收指定 QQ 消息时，停止并说明准确动作；目前继续离线与静态工作。
 
 ## Changed Areas
 
-- §7.67、§7.68 分别在 `22b6dbd`、`014651c` 提交；`abcc97c` 记录 slot-4 GitNexus closeout；§7.69 已提交，§7.70 / thread §42 地址更正和其 closeout 提交为 `3291e95`、`2d2330f`。当前工作区追加 §7.71 / thread §43、progress/execution/handoff。verifier/report 与 observer 数据保存在 ignored `local-evidence/`；`.agents/` harness 保持未跟踪、不纳入提交。
+- §7.67、§7.68 分别在 `22b6dbd`、`014651c` 提交；`abcc97c` 记录 slot-4 GitNexus closeout；§7.69 已提交，§7.70 / thread §42 地址更正和其 closeout 提交为 `3291e95`、`2d2330f`；§7.71 / thread §43 提交为 `eb0bdcf`。本阶段 §7.72 / thread §44、progress/execution/handoff 待分阶段验证提交。verifier/report 与 observer 数据保存在 ignored `local-evidence/`；`.agents/` harness 保持未跟踪、不纳入提交。
 - 保留用户未跟踪 `.agents/` harness 和本机 `local-evidence/`；不要纳入提交。
 
 ## Next Restartable Steps
 
-1. 继续追 `ThreadPoolImpl` primary slot 3 caller `0x290C612` 与其它 `D313D6` callers，确认是否存在连接到 guarded global `0x67510A0` 的 owner teardown 路径；现有 strict-vtable no-match 仅是有界静态结果。
-2. 核实 `D3355C` 上游是否有 wait-success 结果门，并继续查清 manager 全局 final strong release 与 teardown/registration hook。现有 helper 本身无结果检查，不能作 successful join 证据。
+1. 继续追 `ThreadPoolImpl` primary slot 3 caller `0x290C612` 与其它 `D313D6` callers，寻找连接 guarded global `0x67510A0` 的 owner teardown 路径；§7.72 已把 `D3355C` 两个 direct callers 分开，但第二条路径也没有 manager 关联证据。
+2. 检查 `D313D6` 与 `C71F9A` 上游是否存在检查 `D3355C` wait 结果的调用合同，并继续查 manager 全局 final strong release 与 teardown/registration hook。当前可见调用者均不能证明 successful join。
 3. 沿 R2 路径闭合所有 manager entries 的 stop 与 callback drain/quiescence；动态 owner-TID match 不等于 callback consumer 或执行。
 4. 继续跟 consumer 实际 OS thread/callback ABI 与 R3 stable identity/UID→UIN/历史 AV；偏移或函数级 caller overlap不能充当同对象/同线程证明。
 5. R1–R3、固定 hash 与寿命/ABI/线程门未闭合前，不调用 QQ native/callback，也不执行 R4 消息样本。需要用户主动发/收时，先停下并给出精确消息及方向。
