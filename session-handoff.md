@@ -10,7 +10,7 @@
 - §7.73 由同一固定 `wrapper.node` hash 的 RTTI/COL 与直接调用边确认 `ThreadPoolImpl` slot 2 在 `+0xA0` 安装子项，slot 3 对该字段调用 `D313D6` 后释放，slot-0 删除析构先调用 slot 3 再清理其他字段。限定函数无直接 RIP-relative 引用 `0x67510A0`；此局部类寿命合同不证明实例属于全局 manager，也不证明 successful wait 或 quiescence。hash 与边界见寿命合同 §7.73。
 - §7.74 的历史有界 caller 结论由 §7.76 补充：guard-backed accessor `0x173C214` 直接进入 factory static initializer，`0x9E2898` 三次调用 accessor，三条上游 helper 中一条经 `LoginService` slot 4；旧 per-function `incoming_direct=0` 因 RVA/VA compare bug 已撤回，采用全 executable xref 的 3 / 2 / 2 / 1 次 validated `.pdata` 调用计数。当前被动样本见 thread contract §48 与 lifetime §7.77。该工厂运行 singleton 存在，但与 manager 全局所有权关联仍未建立。
 - R1 offline 已完成；R2/R3 与生命周期门仍开放，feat-005/006 blocked，产品 **NOT READY**。manager final strong owner、wait success、全项 stop/drain/quiescence、consumer ABI/thread、stable identity 和历史 AV 原因未知；R4 不准入。不得无锁读 `MonitorTask+0x98` 内层列表，unknown 不自动重发，SnowLuma 未访问。
-- `ecf367a` 的 GitNexus closeout 刷新到该 commit；status 为 up-to-date，runner identity current，all-scope detect 为 0 changed，schema-2 plan snapshot 为 39/39 clean、absent=0。分析器召回/截断边界保留在 execution record；无变化 detect 不能解释为代码零影响或静态生命周期门通过。本阶段没有访问 QQ/SnowLuma 进程、调用 QQ native/callback、读取锁内列表、写目标进程或执行消息操作。
+- 文档证据提交 `88e4605` 的 Docker GitNexus 1.6.12 强制 PDG refresh 为 up-to-date：18,785 nodes / 49,844 edges / 151 clusters / 480 flows，schema-4 runner current、272 files、incomplete reasons empty；all-scope detect 无变化。schema-2 plan snapshot 为 39/39 clean、absent=0，原计划摘要未变。分析器召回/截断边界和 ignored 原始输出在 execution ledger；这只闭合文档索引核对，不证明生命周期或现场行为。
 - 本次 turn 扩充了研究构建 callback 矩阵并修复测试夹具缺少 bridge-ready 同步造成的一次 `no active session` 失败；20 次 `daemon_chain` stress、`init.ps1 -Mode research` 与 `init.ps1 -Mode default` 通过。隔离进程仅合成不可读诊断指针，不是 QQ 或历史 `0xC0000005` 复现。
 - 本轮当前-root 被动观察仍只确认 TaskQueue owner TID 与一个外层 `MonitorTask`，不证明 callback 消费。之后找到独立 QQ `0xC0000409`/`BEX64` 转储 `QQ.exe.8184.dmp`（SHA-256 `A35A14C341D30C6927A5C3E7E0BD8BEECCBB0EB04BF57FD5E5F8B8BEF8FF7C5C`）：TID 41888、`caligo_bridge.dll` timestamp `0x6AC82A49`、RVA `0x104096`；线程/寄存器与 G2 修复提交 `50d517b` 的记录相符。故障时 DLL/PDB 不在，未声称符号化。它不同于 research `0xC0000005`，也不关闭 R2/R3；metadata 在 `local-evidence/n4-r2-readonly-20261016/qq-8184-dump-metadata.json`。
 - **2026-10-16 post-restart user-triggered sample:** 用户报告已发送测试消息。08:05:37 +08:00 最新独立 QQ root PID 40240（08:00:35 启动）仍存活，版本 9.9.33-52230；已加载 `wrapper.node` 与冻结 SHA-256 `63112AB9161E127F5F7E17998A7196E143808923FB54CBBF7B4E21426187A5F0` 相同。被动主机盘点未发现 Caligo/bridge/core 进程、该 QQ root 中的 Caligo 类模块、常规 Caligo 运行日志目录；Docker 仅有 GitNexus 容器。没有捕获消息正文，也没有请求/回调证据；结论为样本**无法验证**，不等同发送失败。脱敏状态快照：`local-evidence/n4-r2-readonly-20261016/user-triggered-check-20261016.json`。未调用 native/callback、未写目标、未回复或重放消息。R4 仍不准入。
@@ -19,7 +19,7 @@
 
 ## Changed Areas
 
-- §7.75–§7.78 的 manager-state 引用与 accessor caller evidence、§47/48 的只读样本、WER 边界、factory singleton 静态追踪均已提交至寿命/线程合同与 execution ledger。原始 PE/observer/graph 输出留在 ignored `local-evidence/n4-r2-readonly-20261015/`。`.agents/` harness 保持未跟踪，不纳入提交。
+- §7.75–§7.78 的 manager-state 引用与 accessor caller evidence、§47/48 的只读样本、WER 边界、factory singleton 静态追踪已提交至寿命/线程合同与 execution ledger。2026-10-16 找到的独立 8184 dump 与 G2 修复提交相关性仅记入执行台账；脱敏 metadata 和原始图证据留在 ignored `local-evidence/n4-r2-readonly-20261016/`。`.agents/` harness 保持未跟踪，不纳入提交。
 - 保留用户未跟踪 `.agents/` harness 和本机 `local-evidence/`；不要纳入提交。
 
 - 新增 `QQ.exe.8184.dmp` 的脱敏 metadata 与证据边界见 [execution ledger 的 2026-10-16 dump recovery](docs/execution/2026-10-11-n4-response-recovery.md#2026-10-16-recovery-of-the-local-qq-8184-minidump)。它只更正独立 G2 `0xC0000409` 事故的转储可用性；R2/R3 与 R4 准入不变。
