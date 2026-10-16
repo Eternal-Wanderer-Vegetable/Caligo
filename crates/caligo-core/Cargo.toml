@@ -15,6 +15,11 @@ caligo-bridge = { workspace = true }
 windows-sys = { workspace = true }
 sha2 = { workspace = true }
 iced-x86 = { version = "1.21.0", features = ["decoder"] }
+hmac = "=0.12.1"
+sha1 = "=0.10.6"
+tungstenite = { version = "=0.27.0", features = ["rustls-tls-native-roots", "url"] }
+ureq = { version = "=2.12.1", default-features = false, features = ["tls"] }
+url = "=2.5.8"
 
 [[bin]]
 name = "onebotd"

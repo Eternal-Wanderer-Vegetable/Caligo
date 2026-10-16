@@ -15,14 +15,20 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::ipc::{
-    encode_frame, validate_auth, validate_hello_v3, BridgeMsg, ControlMsg, CoreToBridgeMsg,
-    CoreToControlMsg, EventPayload, FrameDecoder, OutcomePayload, Role, PROTOCOL_VERSION_V3,
+    encode_frame, validate_auth, validate_bridge_hello_v3, validate_hello_v3, BridgeMsg,
+    ControlMsg, CoreToBridgeMsg, CoreToControlMsg, EventPayload, FrameDecoder, OutcomePayload,
+    Role, BUSINESS_PROTOCOL_REVISION, PROTOCOL_VERSION_V3,
 };
+use crate::message_store::MessageStore;
+use crate::onebot::{StoreReader, StoredMessageView};
+use crate::onebot_events::EventBus;
 use crate::runtime::{host_identity, AccountActor, NativeResult, RuntimeConfig};
 use crate::transport::{
     connect_client, generate_token, token_hex, PipeConnection, PipeServer, TransportError,
 };
-use caligo_model::{Direction, EventSource, MsgEvent, NativeMessageId, SendTextRequest, SessionIdentity};
+use caligo_model::{
+    Direction, EventSource, MsgEvent, NativeMessageId, SendTextRequest, SessionIdentity,
+};
 
 /// 会话帧读取错误。
 #[derive(Debug)]
@@ -61,10 +67,17 @@ struct FrameStream {
 
 impl FrameStream {
     fn new() -> Self {
-        Self { dec: FrameDecoder::new(), queue: VecDeque::new() }
+        Self {
+            dec: FrameDecoder::new(),
+            queue: VecDeque::new(),
+        }
     }
 
-    fn recv_raw(&mut self, conn: &PipeConnection, cancel: &AtomicBool) -> Result<Vec<u8>, SessionError> {
+    fn recv_raw(
+        &mut self,
+        conn: &PipeConnection,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<u8>, SessionError> {
         loop {
             if let Some(payload) = self.queue.pop_front() {
                 return Ok(payload);
@@ -117,6 +130,9 @@ pub struct DaemonConfig {
     /// 不发 Stopped 直接断开 —— 模拟"worker 已写入但 core 未消费即崩溃"
     /// 的窗口(T07 反例的确定性构造点)。仅触发一次;生产路径恒 false。
     pub test_fault_break_bridge_after_hello: bool,
+    /// LAB 故障注入(research):SendResult 已由 actor/journal 接受但 ACK
+    /// 尚未写回时断开;用于验证持久结果可重放且不会重新调用 native。
+    pub test_fault_break_bridge_after_result: bool,
 }
 
 /// 常驻 core(LAB 形态;计划 §7-D5)。
@@ -125,6 +141,9 @@ pub struct Daemon {
     auth_hex: std::sync::Mutex<String>,
     core_nonce: u64,
     pub(crate) actor: Mutex<AccountActor>,
+    onebot_events: Mutex<EventBus>,
+    onebot_http_post_events: Mutex<EventBus>,
+    onebot_http_post_ordered: AtomicBool,
     pub(crate) stop: Arc<AtomicBool>,
     pub(crate) epoch: AtomicU64,
     /// 待派发队列(control 受理后经此转 bridge)。
@@ -132,15 +151,34 @@ pub struct Daemon {
     pub(crate) bridge_hello_seen: AtomicBool,
     /// LAB 故障注入的一次性触发闸(与 config.test_fault_break_bridge_after_hello 配合)。
     test_fault_armed: AtomicBool,
+    test_result_fault_armed: AtomicBool,
     /// bridge 会话读唤醒:control 推入派发后置位,使其阻塞读立即返回
     /// (read 以 100ms 粒度轮询该标志)。
     pub(crate) bridge_wake: Arc<AtomicBool>,
+    api_request_seq: AtomicU64,
 }
 
 impl Daemon {
     pub fn start(config: DaemonConfig) -> Result<Arc<Self>, crate::runtime::OpenError> {
-        let (actor, _report) =
-            AccountActor::open(&config.journal_path, config.runtime.clone())?;
+        let message_store = match config.account.parse::<u64>() {
+            Ok(account_id) if account_id > 0 => {
+                let mut path = config.journal_path.clone();
+                path.set_extension("messages.jsonl");
+                Some(
+                    MessageStore::open(path, account_id, None)
+                        .map_err(|e| crate::runtime::OpenError::MessageStore(e.to_string()))?,
+                )
+            }
+            _ => None,
+        };
+        let (actor, _report) = match message_store {
+            Some(store) => AccountActor::open_with_message_store(
+                config.journal_path.clone(),
+                config.runtime.clone(),
+                store,
+            )?,
+            None => AccountActor::open(&config.journal_path, config.runtime.clone())?,
+        };
         let token = generate_token().map_err(|_| {
             crate::runtime::OpenError::Journal(crate::journal::JournalError::Io(
                 std::io::Error::new(std::io::ErrorKind::Other, "no os rng"),
@@ -150,12 +188,17 @@ impl Daemon {
             auth_hex: std::sync::Mutex::new(token_hex(&token)),
             core_nonce: u64::from_le_bytes(token[0..8].try_into().unwrap()),
             actor: Mutex::new(actor),
+            onebot_events: Mutex::new(EventBus::new()),
+            onebot_http_post_events: Mutex::new(EventBus::new()),
+            onebot_http_post_ordered: AtomicBool::new(false),
             stop: Arc::new(AtomicBool::new(false)),
             epoch: AtomicU64::new(1),
             dispatch_out: Mutex::new(Vec::new()),
             bridge_hello_seen: AtomicBool::new(false),
             test_fault_armed: AtomicBool::new(false),
+            test_result_fault_armed: AtomicBool::new(false),
             bridge_wake: Arc::new(AtomicBool::new(false)),
+            api_request_seq: AtomicU64::new(1),
             config,
         }))
     }
@@ -195,7 +238,147 @@ impl Daemon {
         self.epoch.load(Ordering::Relaxed)
     }
 
-/// 阻塞运行:双 accept 循环;停止后收尾 actor(stop→close)。
+    /// Submit one OneBot action through the same durable actor→bridge path as
+    /// control clients. The request ID is generated once and never reused.
+    pub fn submit_onebot_text(
+        &self,
+        target: caligo_model::SessionKey,
+        text: String,
+        deadline_ms: u64,
+    ) -> Result<String, String> {
+        let sequence = self
+            .api_request_seq
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .map_err(|_| "OneBot request ID sequence exhausted")?;
+        let request_id = format!("onebot-{:016x}-{sequence}", self.core_nonce);
+        let mut actor = self
+            .actor
+            .lock()
+            .map_err(|_| "account actor lock poisoned")?;
+        let session = actor
+            .session()
+            .cloned()
+            .ok_or_else(|| "no active QQ session".to_string())?;
+        let mut request = SendTextRequest {
+            request_id: request_id.clone(),
+            session_identity: session,
+            target,
+            text,
+            payload_hash: 0,
+            deadline_ms,
+        };
+        request.payload_hash = SendTextRequest::compute_payload_hash(
+            request.session_identity.session_generation,
+            &request.target,
+            &request.text,
+            deadline_ms,
+        );
+        actor
+            .submit_send(request.clone())
+            .map_err(|error| format!("send request rejected: {error:?}"))?;
+        let wire_seq = actor
+            .dispatch_begin(&request_id)
+            .map_err(|error| format!("dispatch preparation failed: {error:?}"))?;
+        let timeout_ms = actor.remaining_timeout_ms(&request_id).unwrap_or_default();
+        self.dispatch_out
+            .lock()
+            .map_err(|_| "dispatch queue lock poisoned")?
+            .push(CoreToBridgeMsg::Dispatch {
+                request_id: request_id.clone(),
+                wire_seq,
+                timeout_ms,
+                target: serde_json::json!({
+                    "account": request.target.account.0,
+                    "kind": request.target.kind.to_string(),
+                    "peer": request.target.peer.0,
+                }),
+                text: request.text,
+            });
+        self.bridge_wake.store(true, Ordering::Relaxed);
+        Ok(request_id)
+    }
+
+    /// State for the same OneBot request, plus a durable public ID if its
+    /// matching projected event has reached MessageStore.
+    pub fn onebot_text_status(
+        &self,
+        request_id: &str,
+        target: &caligo_model::SessionKey,
+    ) -> Option<(caligo_model::ActionState, Option<i32>)> {
+        let actor = self.actor.lock().ok()?;
+        let state = actor.query_request(request_id)?;
+        let message_id = match &state {
+            caligo_model::ActionState::ConfirmedSuccess { native_id } => {
+                actor.onebot_message_id(target, &native_id.0)
+            }
+            _ => None,
+        };
+        Some((state, message_id))
+    }
+
+    /// Subscribe one independent bounded transport queue to accepted OneBot
+    /// message events. Transports never drain the actor's durable IPC cursor.
+    pub fn subscribe_onebot_events(&self, name: &str) -> (u64, std::sync::mpsc::Receiver<String>) {
+        self.onebot_events.lock().unwrap().subscribe(name)
+    }
+
+    /// Enable the OneBot V11 ordering rule: finish HTTP POST event handling
+    /// before forwarding that event to WebSocket event subscribers.
+    pub fn enable_onebot_http_post_ordering(&self) {
+        self.onebot_http_post_ordered.store(true, Ordering::Relaxed);
+    }
+
+    pub fn subscribe_onebot_http_post_events(
+        &self,
+        name: &str,
+    ) -> (u64, std::sync::mpsc::Receiver<String>) {
+        self.onebot_http_post_events.lock().unwrap().subscribe(name)
+    }
+
+    pub fn unsubscribe_onebot_http_post_events(&self, id: u64) -> bool {
+        self.onebot_http_post_events.lock().unwrap().unsubscribe(id)
+    }
+
+    pub fn unsubscribe_onebot_events(&self, id: u64) -> bool {
+        self.onebot_events.lock().unwrap().unsubscribe(id)
+    }
+
+    pub(crate) fn publish_onebot_event_json(&self, event_json: &str) {
+        if self.onebot_http_post_ordered.load(Ordering::Relaxed) {
+            let _ = self
+                .onebot_http_post_events
+                .lock()
+                .unwrap()
+                .publish(event_json);
+        } else {
+            self.publish_onebot_ws_event_json(event_json);
+        }
+    }
+
+    pub(crate) fn publish_onebot_ws_event_json(&self, event_json: &str) {
+        let _ = self.onebot_events.lock().unwrap().publish(event_json);
+    }
+
+    fn publish_onebot_message(&self, event: &MsgEvent) {
+        let message_id = self
+            .actor
+            .lock()
+            .unwrap()
+            .onebot_message_id(&event.session, &event.native_id.0);
+        let Some(message_id) = message_id else {
+            return;
+        };
+        let Some(json) = self.config.account.parse::<u64>().ok().and_then(|self_id| {
+            crate::onebot_events::message_event_json(self_id, message_id, event)
+        }) else {
+            return;
+        };
+        self.publish_onebot_event_json(&json);
+    }
+
+    /// 阻塞运行:双 accept 循环;停止后收尾 actor(stop→close)。
     pub fn run(self: &Arc<Self>) -> Result<(), SessionError> {
         let (bridge_name, control_name) = self.pipe_names();
         eprintln!("[daemon] creating bridge pipe: {bridge_name}");
@@ -272,7 +455,12 @@ impl Daemon {
         }
     }
 
-    fn hello_ack(accepted: bool, reject: Option<String>, build: &str, epoch: u64) -> serde_json::Value {
+    fn hello_ack(
+        accepted: bool,
+        reject: Option<String>,
+        build: &str,
+        epoch: u64,
+    ) -> serde_json::Value {
         serde_json::json!({
             "t": "hello_ack",
             "d": {
@@ -295,6 +483,7 @@ impl Daemon {
         let hello: BridgeMsg = stream.recv_json(&conn, &self.stop)?;
         let BridgeMsg::Hello {
             protocol_version,
+            business_protocol_revision,
             bridge_build,
             auth_token,
             role,
@@ -314,7 +503,13 @@ impl Daemon {
                 &Self::hello_ack(false, Some(reason), &self.config.core_build, epoch),
             );
         };
-        if let Err(e) = validate_hello_v3(protocol_version, role, Role::Bridge, &self.config.core_build) {
+        if let Err(e) = validate_bridge_hello_v3(
+            protocol_version,
+            business_protocol_revision,
+            role,
+            Role::Bridge,
+            &self.config.core_build,
+        ) {
             reject(e.to_string());
             return Ok(());
         }
@@ -435,30 +630,81 @@ impl Daemon {
                 Ok(msg) => match msg {
                     BridgeMsg::NativeStarted { request_id } => {
                         let mut actor = self.actor.lock().unwrap();
-                        let _ = actor.bridge_started(&request_id);
+                        let applied = actor.bridge_started(&request_id).is_ok();
+                        let already_applied = actor
+                            .query_request(&request_id)
+                            .map(|state| {
+                                matches!(
+                                    state,
+                                    caligo_model::ActionState::NativeStarted
+                                        | caligo_model::ActionState::ConfirmedSuccess { .. }
+                                        | caligo_model::ActionState::AcceptedUnconfirmed
+                                        | caligo_model::ActionState::ConfirmedFailure { .. }
+                                        | caligo_model::ActionState::DeliveryUnknown
+                                )
+                            })
+                            .unwrap_or(false);
+                        drop(actor);
+                        if applied || already_applied {
+                            send_json(&conn, &CoreToBridgeMsg::NativeStartedAck { request_id })?;
+                        }
                     }
-                    BridgeMsg::SendResult { request_id, outcome } => {
+                    BridgeMsg::SendResult {
+                        request_id,
+                        outcome,
+                    } => {
+                        let terminal = !matches!(&outcome, OutcomePayload::AcceptedUnconfirmed);
                         let result = match outcome {
-                            OutcomePayload::Success { native_id } => NativeResult::Success {
-                                native_id: native_id.map(NativeMessageId),
-                            },
+                            OutcomePayload::Success { native_id } if !native_id.is_empty() => {
+                                NativeResult::Success {
+                                    native_id: NativeMessageId(native_id),
+                                }
+                            }
+                            OutcomePayload::Success { .. }
+                            | OutcomePayload::AcceptedUnconfirmed => {
+                                NativeResult::AcceptedUnconfirmed
+                            }
                             OutcomePayload::Failure { reason } => NativeResult::Failure { reason },
-                            OutcomePayload::Unknown => NativeResult::Unknown,
+                            OutcomePayload::Unknown { reason } => NativeResult::Unknown { reason },
                         };
-                        let mut actor = self.actor.lock().unwrap();
-                        let _ = actor.bridge_result(&request_id, result);
+                        let applied = {
+                            let mut actor = self.actor.lock().unwrap();
+                            actor.bridge_result(&request_id, result).is_ok()
+                        };
+                        if applied {
+                            if self.config.test_fault_break_bridge_after_result
+                                && !self.test_result_fault_armed.swap(true, Ordering::Relaxed)
+                            {
+                                self.actor
+                                    .lock()
+                                    .unwrap()
+                                    .degrade("lab fault: break after durable result before ack");
+                                session_open.store(false, Ordering::Relaxed);
+                                return Ok(());
+                            }
+                            send_json(
+                                &conn,
+                                &CoreToBridgeMsg::SendResultAck {
+                                    request_id,
+                                    terminal,
+                                },
+                            )?;
+                        }
                     }
                     BridgeMsg::Event { event } => {
                         // wire seq = worker 本地序号(EventAck 的回显键;窗口
                         // 前移以此为准 —— 抑制回显 0 曾致重放风暴,D8 现场)。
                         let wire_seq = event.event_seq;
-                        let mut actor = self.actor.lock().unwrap();
-                        let receipt = actor.on_event(self.to_event(event));
+                        let accepted_event = self.to_event(event);
+                        let receipt = self.actor.lock().unwrap().on_event(accepted_event.clone());
+                        if matches!(&receipt, Ok(crate::runtime::EventReceipt::Published { .. })) {
+                            // The actor journal and MessageStore append have both
+                            // succeeded before any network transport sees it.
+                            self.publish_onebot_message(&accepted_event);
+                        }
                         let (seq, suppressed) = match receipt {
                             Ok(r) => match r {
-                                crate::runtime::EventReceipt::Published { .. } => {
-                                    (wire_seq, false)
-                                }
+                                crate::runtime::EventReceipt::Published { .. } => (wire_seq, false),
                                 crate::runtime::EventReceipt::DuplicateSuppressed => {
                                     (wire_seq, true)
                                 }
@@ -466,9 +712,22 @@ impl Daemon {
                                     (wire_seq, false)
                                 }
                             },
-                            Err(_) => (wire_seq, true),
+                            Err(reason) => {
+                                eprintln!("[daemon] event not durably accepted; leave it unacked: {reason:?}");
+                                // The resident retains this event until EventAck.
+                                // End this connection without an ACK so the replay
+                                // path can retry a failed MessageStore append.
+                                session_open.store(false, Ordering::Relaxed);
+                                return Ok(());
+                            }
                         };
-                        send_json(&conn, &CoreToBridgeMsg::EventAck { event_seq: seq, suppressed })?;
+                        send_json(
+                            &conn,
+                            &CoreToBridgeMsg::EventAck {
+                                event_seq: seq,
+                                suppressed,
+                            },
+                        )?;
                     }
                     BridgeMsg::Health { .. } => {
                         send_json(&conn, &CoreToBridgeMsg::HealthAck {})?;
@@ -479,7 +738,12 @@ impl Daemon {
                         return Ok(());
                     }
                     BridgeMsg::Hello { .. } => {
-                        send_json(&conn, &CoreToBridgeMsg::Reject { reason: "duplicate hello".into() })?;
+                        send_json(
+                            &conn,
+                            &CoreToBridgeMsg::Reject {
+                                reason: "duplicate hello".into(),
+                            },
+                        )?;
                     }
                 },
                 Err(SessionError::Transport(TransportError::TimedOut)) => {
@@ -508,23 +772,43 @@ impl Daemon {
     fn serve_control(self: &Arc<Self>, conn: PipeConnection) -> Result<(), SessionError> {
         let mut stream = FrameStream::new();
         let hello: ControlMsg = stream.recv_json(&conn, &self.stop)?;
-        let ControlMsg::Hello { protocol_version, auth_token, role, .. } = hello else {
-            let _ = send_json(&conn, &CoreToControlMsg::Reject {
-                reason: "first message must be hello".into(),
-            });
+        let ControlMsg::Hello {
+            protocol_version,
+            auth_token,
+            role,
+            ..
+        } = hello
+        else {
+            let _ = send_json(
+                &conn,
+                &CoreToControlMsg::Reject {
+                    reason: "first message must be hello".into(),
+                },
+            );
             return Ok(());
         };
         let epoch = self.epoch.load(Ordering::Relaxed);
-        let ack = |accepted: bool, reject: Option<String>, conn: &PipeConnection| -> Result<(), SessionError> {
-            send_json(conn, &CoreToControlMsg::HelloAck {
-                protocol_version: PROTOCOL_VERSION_V3,
-                core_build: self.config.core_build.clone(),
-                connection_epoch: epoch,
-                accepted,
-                reject_reason: reject,
-            })
+        let ack = |accepted: bool,
+                   reject: Option<String>,
+                   conn: &PipeConnection|
+         -> Result<(), SessionError> {
+            send_json(
+                conn,
+                &CoreToControlMsg::HelloAck {
+                    protocol_version: PROTOCOL_VERSION_V3,
+                    core_build: self.config.core_build.clone(),
+                    connection_epoch: epoch,
+                    accepted,
+                    reject_reason: reject,
+                },
+            )
         };
-        if let Err(e) = validate_hello_v3(protocol_version, role, Role::Control, &self.config.core_build) {
+        if let Err(e) = validate_hello_v3(
+            protocol_version,
+            role,
+            Role::Control,
+            &self.config.core_build,
+        ) {
             ack(false, Some(e.to_string()), &conn)?;
             return Ok(());
         }
@@ -542,10 +826,20 @@ impl Daemon {
             }
             match stream.recv_json::<ControlMsg>(&conn, &self.stop) {
                 Ok(msg) => match msg {
-                    ControlMsg::SendText { request_id, target, text, deadline_ms } => {
+                    ControlMsg::SendText {
+                        request_id,
+                        target,
+                        text,
+                        deadline_ms,
+                    } => {
                         let mut actor = self.actor.lock().unwrap();
                         let Some(session) = actor.session().cloned() else {
-                            send_json(&conn, &CoreToControlMsg::Reject { reason: "no active session".into() })?;
+                            send_json(
+                                &conn,
+                                &CoreToControlMsg::Reject {
+                                    reason: "no active session".into(),
+                                },
+                            )?;
                             continue;
                         };
                         let req = SendTextRequest {
@@ -568,43 +862,75 @@ impl Daemon {
                         match actor.submit_send(req.clone()) {
                             Ok(state) => {
                                 // 受理即派发(dispatch_intent 窗口显式化)。
-                                if actor.dispatch_begin(&request_id).is_ok() {
-                                    self.dispatch_out.lock().unwrap().push(CoreToBridgeMsg::Dispatch {
-                                        request_id: request_id.clone(),
-                                        target,
-                                        text: req.text,
-                                    });
+                                if let Ok(wire_seq) = actor.dispatch_begin(&request_id) {
+                                    let timeout_ms =
+                                        actor.remaining_timeout_ms(&request_id).unwrap_or_default();
+                                    self.dispatch_out.lock().unwrap().push(
+                                        CoreToBridgeMsg::Dispatch {
+                                            request_id: request_id.clone(),
+                                            wire_seq,
+                                            timeout_ms,
+                                            target,
+                                            text: req.text,
+                                        },
+                                    );
                                     self.bridge_wake.store(true, Ordering::Relaxed);
                                 }
-                                send_json(&conn, &CoreToControlMsg::SendAccepted {
-                                    request_id,
-                                    state: format!("{state:?}"),
-                                })?;
+                                send_json(
+                                    &conn,
+                                    &CoreToControlMsg::SendAccepted {
+                                        request_id,
+                                        state: format!("{state:?}"),
+                                    },
+                                )?;
                             }
                             Err(e) => {
-                                send_json(&conn, &CoreToControlMsg::Reject { reason: format!("{e:?}") })?;
+                                send_json(
+                                    &conn,
+                                    &CoreToControlMsg::Reject {
+                                        reason: format!("{e:?}"),
+                                    },
+                                )?;
                             }
                         }
                     }
                     ControlMsg::QueryRequest { request_id } => {
                         let actor = self.actor.lock().unwrap();
                         let (state, native_id) = match actor.request_summary(&request_id) {
-                            Some(s) => (Some(format!("{:?}", s.state)), native_of_summary(&actor, &request_id)),
+                            Some(s) => (
+                                Some(format!("{:?}", s.state)),
+                                native_of_summary(&actor, &request_id),
+                            ),
                             None => (None, None),
                         };
-                        send_json(&conn, &CoreToControlMsg::QueryResult { request_id, state, native_id })?;
+                        send_json(
+                            &conn,
+                            &CoreToControlMsg::QueryResult {
+                                request_id,
+                                state,
+                                native_id,
+                            },
+                        )?;
                     }
                     ControlMsg::CancelQueued { request_id } => {
                         let mut actor = self.actor.lock().unwrap();
                         let verdict = match actor.cancel_queued(&request_id) {
                             Ok(v) => match v {
-                                crate::runtime::CancelOutcome::CancelledUnsent => "cancelled_unsent",
+                                crate::runtime::CancelOutcome::CancelledUnsent => {
+                                    "cancelled_unsent"
+                                }
                                 crate::runtime::CancelOutcome::TooLate => "too_late",
                                 crate::runtime::CancelOutcome::NotFound => "not_found",
                             },
                             Err(_) => "rejected",
                         };
-                        send_json(&conn, &CoreToControlMsg::CancelResult { request_id, verdict: verdict.into() })?;
+                        send_json(
+                            &conn,
+                            &CoreToControlMsg::CancelResult {
+                                request_id,
+                                verdict: verdict.into(),
+                            },
+                        )?;
                     }
                     ControlMsg::DrainEvents { max } => {
                         let mut actor = self.actor.lock().unwrap();
@@ -624,7 +950,12 @@ impl Daemon {
                         return Ok(());
                     }
                     ControlMsg::Hello { .. } => {
-                        send_json(&conn, &CoreToControlMsg::Reject { reason: "duplicate hello".into() })?;
+                        send_json(
+                            &conn,
+                            &CoreToControlMsg::Reject {
+                                reason: "duplicate hello".into(),
+                            },
+                        )?;
                     }
                 },
                 Err(SessionError::Transport(TransportError::TimedOut)) => continue,
@@ -656,6 +987,7 @@ impl Daemon {
             native_id: NativeMessageId(p.native_id),
             text: p.text,
             platform_time: p.platform_time,
+            onebot_projection: p.onebot_projection,
             observed_at_unix_ms: p.observed_at_unix_ms,
             source: match p.source.as_str() {
                 "update" => EventSource::Update,
@@ -670,11 +1002,23 @@ impl Daemon {
     }
 }
 
+impl StoreReader for Daemon {
+    fn get_msg(&self, message_id: i32) -> Option<StoredMessageView> {
+        self.actor.lock().ok()?.get_msg(message_id)
+    }
+
+    fn login_info(&self) -> Option<(u64, String)> {
+        self.actor.lock().ok()?.login_info()
+    }
+
+    fn online_status(&self) -> Option<bool> {
+        self.actor.lock().ok()?.online_status()
+    }
+}
+
 fn native_of_summary(actor: &AccountActor, id: &str) -> Option<String> {
     match actor.query_request(id) {
-        Some(caligo_model::ActionState::ConfirmedSuccess { native_id }) => {
-            native_id.map(|n| n.0)
-        }
+        Some(caligo_model::ActionState::ConfirmedSuccess { native_id }) => Some(native_id.0),
         _ => None,
     }
 }
@@ -696,6 +1040,7 @@ fn daemon_event_payload(ev: MsgEvent) -> EventPayload {
         native_id: ev.native_id.0,
         text: ev.text,
         platform_time: ev.platform_time,
+        onebot_projection: ev.onebot_projection,
         observed_at_unix_ms: ev.observed_at_unix_ms,
         source: match ev.source {
             EventSource::Recv => "recv".into(),
@@ -706,8 +1051,16 @@ fn daemon_event_payload(ev: MsgEvent) -> EventPayload {
 }
 
 fn caligo_target(v: &serde_json::Value) -> caligo_model::SessionKey {
-    let account = v.get("account").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let peer = v.get("peer").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let account = v
+        .get("account")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
+    let peer = v
+        .get("peer")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
     let kind = match v.get("kind").and_then(|x| x.as_str()) {
         Some("group") => caligo_model::SessionKind::Group,
         _ => caligo_model::SessionKind::Private,
@@ -724,16 +1077,23 @@ pub struct ControlClient {
 impl ControlClient {
     pub fn connect(name: &str, auth_token: &str, client_build: &str) -> Result<Self, SessionError> {
         let conn = connect_client(name).map_err(SessionError::Transport)?;
-        send_json(&conn, &ControlMsg::Hello {
-            protocol_version: PROTOCOL_VERSION_V3,
-            client_build: client_build.to_string(),
-            auth_token: auth_token.to_string(),
-            role: Role::Control,
-        })?;
+        send_json(
+            &conn,
+            &ControlMsg::Hello {
+                protocol_version: PROTOCOL_VERSION_V3,
+                client_build: client_build.to_string(),
+                auth_token: auth_token.to_string(),
+                role: Role::Control,
+            },
+        )?;
         // 消费并核对 HelloAck(否则它会被当作第一条请求的应答)。
         let mut stream = FrameStream::new();
         match stream.recv_json::<CoreToControlMsg>(&conn, &AtomicBool::new(false))? {
-            CoreToControlMsg::HelloAck { accepted, reject_reason, .. } => {
+            CoreToControlMsg::HelloAck {
+                accepted,
+                reject_reason,
+                ..
+            } => {
                 if !accepted {
                     return Err(SessionError::Frame(format!(
                         "hello rejected: {}",
@@ -775,21 +1135,29 @@ impl BridgeClient {
         host_created_utc: &str,
     ) -> Result<Self, SessionError> {
         let conn = connect_client(name).map_err(SessionError::Transport)?;
-        send_json(&conn, &BridgeMsg::Hello {
-            protocol_version: PROTOCOL_VERSION_V3,
-            bridge_build: bridge_build.to_string(),
-            auth_token: auth_token.to_string(),
-            role: Role::Bridge,
-            session_generation,
-            account: account.to_string(),
-            module_baseline: module_baseline.to_string(),
-            host_nonce,
-            host_process_created_utc: host_created_utc.to_string(),
-        })?;
+        send_json(
+            &conn,
+            &BridgeMsg::Hello {
+                protocol_version: PROTOCOL_VERSION_V3,
+                business_protocol_revision: BUSINESS_PROTOCOL_REVISION,
+                bridge_build: bridge_build.to_string(),
+                auth_token: auth_token.to_string(),
+                role: Role::Bridge,
+                session_generation,
+                account: account.to_string(),
+                module_baseline: module_baseline.to_string(),
+                host_nonce,
+                host_process_created_utc: host_created_utc.to_string(),
+            },
+        )?;
         // 消费并核对 HelloAck。
         let mut stream = FrameStream::new();
         match stream.recv_json::<CoreToBridgeMsg>(&conn, &AtomicBool::new(false))? {
-            CoreToBridgeMsg::HelloAck { accepted, reject_reason, .. } => {
+            CoreToBridgeMsg::HelloAck {
+                accepted,
+                reject_reason,
+                ..
+            } => {
                 if !accepted {
                     return Err(SessionError::Frame(format!(
                         "hello rejected: {}",

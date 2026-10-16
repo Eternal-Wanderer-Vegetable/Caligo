@@ -32,6 +32,7 @@ const ANCHOR_VTBL_SVC: u64 = 0x3F6DED8;
 const ANCHOR_VTBL_CORE: u64 = 0x3F70C18;
 const ANCHOR_VTBL_EXEC: u64 = 0x3FAD868;
 const GLOBAL_DISPATCHER_OBJ: u64 = 0x67510A8; // b816e8 静态存储 +8(发送链提交目标)
+const TASK_RUNNER_VTBL: u64 = 0x43B6088; // 固定 wrapper hash: TaskRunner@TaskQueue
 
 const SLOT_COUNT: usize = 16; // 覆盖 vtable+0x38(slot7,发送路径调用点)
 
@@ -266,13 +267,15 @@ fn print_summary(r: &ObserveReport) {
     }
     if let Some(g) = &r.global_dispatcher {
         println!(
-            "[observe-msf] 全局 dispatcher @+{:#x}: obj={:#x} vptr_rva={:?}({}) owner_tid={:?} pair={:?} slot0={}",
+            "[observe-msf] 全局提交目标 @+{:#x}: obj={:#x} vptr_rva={:?}({}) raw+0x58={:?} TaskQueue+0x58={:?} stable={} owner_tid_in_process={:?} slot0={}",
             GLOBAL_DISPATCHER_OBJ,
             g.obj,
             g.vptr_rva,
             g.vptr_module.as_deref().unwrap_or("?"),
-            g.field_58_tid,
-            g.field_8_pair,
+            g.field_58_raw_dword,
+            g.task_queue_link.as_ref().and_then(|q| q.owner_thread_id),
+            g.task_queue_link.as_ref().is_some_and(|q| q.snapshot_stable),
+            g.task_queue_owner_tid_matches_process_thread,
             g.slots.first().cloned().unwrap_or_default()
         );
     }
@@ -380,10 +383,74 @@ struct GlobalDispatcherReport {
     vptr_rva: Option<u64>,
     vptr_module: Option<String>,
     slots: Vec<String>,
-    /// dispatcher+0x58 的 owner TID(31F88EA 跨线程判定字段)。
-    field_58_tid: Option<i32>,
-    /// dispatcher+8 的内联 pair(队列对象)。
-    field_8_pair: Option<u64>,
+    /// 目标对象 +0x58 的原始 DWORD；仅凭偏移不能解释为 TID。
+    field_58_raw_dword: Option<u32>,
+    /// 仅当目标 vptr 精确匹配本固定样本 TaskRunner RTTI 时跟随其 weak pair。
+    task_queue_link: Option<TaskQueueLinkReport>,
+    /// TID 来自稳定双读且非零时，指示它是否出现在本次线程快照。
+    task_queue_owner_tid_matches_process_thread: Option<bool>,
+}
+
+#[derive(serde::Serialize)]
+struct TaskQueueLinkReport {
+    task_queue_obj: Option<u64>,
+    control_block: Option<u64>,
+    strong_count_before: Option<i32>,
+    owner_thread_id: Option<u32>,
+    strong_count_after: Option<i32>,
+    snapshot_stable: bool,
+}
+
+#[derive(Clone, Copy)]
+struct TaskQueueWeakSample {
+    object: Option<u64>,
+    control_block: Option<u64>,
+    strong_count: Option<i32>,
+    owner_thread_id: Option<u32>,
+}
+
+fn task_queue_samples_match(before: TaskQueueWeakSample, after: TaskQueueWeakSample) -> bool {
+    before.object.is_some_and(|p| p > 0x10000)
+        && before.object == after.object
+        && before.control_block.is_some_and(|p| p > 0x10000)
+        && before.control_block == after.control_block
+        && before.strong_count.is_some_and(|n| n > 0)
+        && before.strong_count == after.strong_count
+        && before.owner_thread_id.is_some_and(|tid| tid != 0)
+        && before.owner_thread_id == after.owner_thread_id
+}
+
+fn read_task_queue_sample(obs: &Observer, task_runner: u64) -> TaskQueueWeakSample {
+    let object = obs.q(task_runner + 8).filter(|p| *p > 0x10000);
+    let control_block = obs.q(task_runner + 0x10).filter(|p| *p > 0x10000);
+    let strong_count = control_block.and_then(|p| obs.i32(p + 8));
+    let owner_thread_id = if strong_count.is_some_and(|n| n > 0) {
+        object.and_then(|p| obs.u32(p + 0x58)).filter(|tid| *tid != 0)
+    } else {
+        None
+    };
+    TaskQueueWeakSample { object, control_block, strong_count, owner_thread_id }
+}
+
+fn read_task_runner_queue_link(obs: &Observer, task_runner: u64) -> Option<TaskQueueLinkReport> {
+    let vptr = obs.q(task_runner)?;
+    if vptr.checked_sub(obs.base) != Some(TASK_RUNNER_VTBL) {
+        return None;
+    }
+
+    // RPM cannot pin the remote weak target. A double snapshot is a consistency check,
+    // not a lifetime lock or proof that the target cannot be freed between reads.
+    let before = read_task_queue_sample(obs, task_runner);
+    let after = read_task_queue_sample(obs, task_runner);
+    let snapshot_stable = task_queue_samples_match(before, after);
+    Some(TaskQueueLinkReport {
+        task_queue_obj: before.object,
+        control_block: before.control_block,
+        strong_count_before: before.strong_count,
+        owner_thread_id: snapshot_stable.then_some(before.owner_thread_id).flatten(),
+        strong_count_after: after.strong_count,
+        snapshot_stable,
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -485,6 +552,9 @@ impl Observer {
     fn i32(&self, addr: u64) -> Option<i32> {
         unsafe { rpm::<i32>(self.handle, addr) }
     }
+    fn u32(&self, addr: u64) -> Option<u32> {
+        unsafe { rpm::<u32>(self.handle, addr) }
+    }
     fn hex(&self, addr: u64, len: usize) -> String {
         use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
         let mut buf = vec![0u8; len];
@@ -550,18 +620,26 @@ fn observe(pid: u32, planted_idx: Option<u64>, self_test: bool) -> Result<Observ
     }
 
     // 发送链全局 dispatcher(b7ce8a 经 D32138 提交的目标)。
-    let global_dispatcher = if base != 0 {
+    let mut global_dispatcher = if base != 0 {
         match obs.q(base + GLOBAL_DISPATCHER_OBJ).filter(|v| *v != 0) {
             Some(obj) => {
                 let vptr = obs.q(obj).unwrap_or(0);
+                let vptr_rva = vptr.checked_sub(base).filter(|r| *r < 0x800_0000);
+                let task_queue_link = read_task_runner_queue_link(&obs, obj);
+                if vptr_rva == Some(TASK_RUNNER_VTBL) && task_queue_link.is_none() {
+                    notes.push("TaskRunner vptr 命中但 weak TaskQueue pair 不可读".into());
+                } else if vptr_rva != Some(TASK_RUNNER_VTBL) {
+                    notes.push("全局提交目标不是固定样本 TaskRunner vtable;未解释其 +0x8/+0x10/+0x58".into());
+                }
                 Some(GlobalDispatcherReport {
                     obj,
                     vptr,
-                    vptr_rva: vptr.checked_sub(base).filter(|r| *r < 0x800_0000),
+                    vptr_rva,
                     vptr_module: obs.module_of(vptr).map(|m| m.to_string()),
                     slots: obs.vtable(vptr, 8),
-                    field_58_tid: obs.i32(obj + 0x58),
-                    field_8_pair: obs.q(obj + 8),
+                    field_58_raw_dword: obs.u32(obj + 0x58),
+                    task_queue_link,
+                    task_queue_owner_tid_matches_process_thread: None,
                 })
             }
             None => None,
@@ -709,6 +787,13 @@ fn observe(pid: u32, planted_idx: Option<u64>, self_test: bool) -> Result<Observ
             "TLS index={idx} 全线程读取完成;命中判定 = 值非空且 [值] 的 vptr 落在已知模块"
         ));
     }
+    if let Some(global) = global_dispatcher.as_mut() {
+        global.task_queue_owner_tid_matches_process_thread = global
+            .task_queue_link
+            .as_ref()
+            .and_then(|link| link.owner_thread_id)
+            .map(|tid| threads.iter().any(|thread| thread.tid == tid));
+    }
 
     if self_test {
         // 命中路径必须验证:本线程应带着植入 pair 命中(vptr 落在 ntdll)。
@@ -728,7 +813,7 @@ fn observe(pid: u32, planted_idx: Option<u64>, self_test: bool) -> Result<Observ
     unsafe { CloseHandle(handle) };
 
     Ok(ObserveReport {
-        kind: "caligo-observe-msf-v1",
+        kind: "caligo-observe-msf-v2",
         pid,
         observed_at_unix_ms: now,
         target_process_created_unix_ms: created,
@@ -1448,4 +1533,28 @@ fn dump_chain(obs: &Observer, manager: u64) -> Option<ChainDump> {
         visit_note: note,
         succ_trace_first: first_spine.into_inner().unwrap(),
     })
+}
+
+#[cfg(test)]
+mod task_queue_sample_tests {
+    use super::{task_queue_samples_match, TaskQueueWeakSample};
+
+    fn sample(object: u64, control_block: u64, strong_count: i32, owner_thread_id: u32) -> TaskQueueWeakSample {
+        TaskQueueWeakSample {
+            object: Some(object),
+            control_block: Some(control_block),
+            strong_count: Some(strong_count),
+            owner_thread_id: Some(owner_thread_id),
+        }
+    }
+
+    #[test]
+    fn task_queue_tid_requires_same_live_weak_pair_and_tid_in_both_reads() {
+        let first = sample(0x100000, 0x200000, 2, 1234);
+        assert!(task_queue_samples_match(first, first));
+        assert!(!task_queue_samples_match(first, sample(0x100008, 0x200000, 2, 1234)));
+        assert!(!task_queue_samples_match(first, sample(0x100000, 0x200008, 2, 1234)));
+        assert!(!task_queue_samples_match(first, sample(0x100000, 0x200000, 0, 1234)));
+        assert!(!task_queue_samples_match(first, sample(0x100000, 0x200000, 2, 1235)));
+    }
 }

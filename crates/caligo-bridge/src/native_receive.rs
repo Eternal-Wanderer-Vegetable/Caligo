@@ -124,8 +124,6 @@ pub fn normalize(head: &CapturedRecordHead) -> NormalizedNotice {
     }
 }
 
-
-
 // ---------------------------------------------------------------------------
 // N1(2026-10-10):消息记录 CPB 读取器(键表来源:实例 27108 活体差分,
 // 台账 2026-10-10 八/九;访问器 0x1821878c0 capstone 实证)。
@@ -164,7 +162,12 @@ pub trait MemoryReader {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecordFields {
     pub sender_uid: Option<String>,
+    /// Resolved sender UIN; senderUid is a distinct opaque identity and is not
+    /// copied here without a proven UID→UIN mapping.
+    pub sender_uin: Option<String>,
     pub peer_uid: Option<String>,
+    /// Stable native message identity. Current CPB key map has no proven field.
+    pub native_id: Option<String>,
     pub text: Option<String>,
     /// 绝对消息 seq(0x9c43 / 2;N3R18 真值精确吻合)。
     pub seq: Option<u64>,
@@ -186,7 +189,10 @@ impl<'a> CpbEntries<'a> {
 
     pub fn iter_keys(&self) -> impl Iterator<Item = (u32, u64)> + '_ {
         self.raw.chunks_exact(12).map(|c| {
-            (u32::from_le_bytes(c[0..4].try_into().unwrap()), u64::from_le_bytes(c[4..12].try_into().unwrap()))
+            (
+                u32::from_le_bytes(c[0..4].try_into().unwrap()),
+                u64::from_le_bytes(c[4..12].try_into().unwrap()),
+            )
         })
     }
 
@@ -203,10 +209,7 @@ fn ascii_at(rd: &dyn MemoryReader, addr: u64) -> Option<String> {
         return None;
     }
     let ok_str = |s: &[u8]| -> Option<String> {
-        if s.len() < 4
-            || s.len() > 63
-            || !s.iter().all(|&b| b >= 0x20 && b < 0x7f)
-        {
+        if s.len() < 4 || s.len() > 63 || !s.iter().all(|&b| b >= 0x20 && b < 0x7f) {
             return None;
         }
         Some(String::from_utf8_lossy(s).into_owned())
@@ -236,7 +239,10 @@ fn peer_at(rd: &dyn MemoryReader, addr: u64) -> Option<String> {
     }
     if buf[0] == 0x0a && buf[1] > 0 && buf[1] as usize <= 62 {
         let n = buf[1] as usize;
-        if buf[2..2 + n].iter().all(|&b| b.is_ascii_graphic() || b == b' ') {
+        if buf[2..2 + n]
+            .iter()
+            .all(|&b| b.is_ascii_graphic() || b == b' ')
+        {
             return Some(String::from_utf8_lossy(&buf[2..2 + n]).into_owned());
         }
     }
@@ -273,7 +279,11 @@ pub fn read_record_fields(rd: &dyn MemoryReader, cpb_obj: u64) -> RecordFields {
     }
     let entries = u64::from_le_bytes(hdr[0..8].try_into().unwrap());
     let count = u32::from_le_bytes(hdr[8..12].try_into().unwrap());
-    if count == 0 || count > 80 || !(0x1_0000..0x7FFF_FFFE_FFFF).contains(&entries) || entries & 7 != 0 {
+    if count == 0
+        || count > 80
+        || !(0x1_0000..0x7FFF_FFFE_FFFF).contains(&entries)
+        || entries & 7 != 0
+    {
         return f;
     }
     let mut eb = vec![0u8; count as usize * 12];
@@ -313,8 +323,6 @@ pub fn read_record_fields(rd: &dyn MemoryReader, cpb_obj: u64) -> RecordFields {
     }
     f
 }
-
-
 
 // ---------------------------------------------------------------------------
 // N3(2026-10-10 续):diff 式接收原语。
@@ -405,7 +413,10 @@ mod tests {
     /// 规范化不发明:sender/peer/时间/native ID 恒 None(证据未到)。
     #[test]
     fn normalization_fabricates_nothing() {
-        let n = normalize(&CapturedRecordHead::from_qwords(synth_standard("1234567890", 7)));
+        let n = normalize(&CapturedRecordHead::from_qwords(synth_standard(
+            "1234567890",
+            7,
+        )));
         assert_eq!(n.self_account.as_deref(), Some("1234567890"));
         assert_eq!(n.per_msg32, Some(7));
         assert_eq!(n.sender, None, "sender 未定证");
@@ -443,8 +454,14 @@ mod tests {
     /// (本层不做任何合并;T05 同文不同 ID 不去重的接收侧对应物)。
     #[test]
     fn normalize_does_not_dedup() {
-        let a = normalize(&CapturedRecordHead::from_qwords(synth_standard("1234567890", 7)));
-        let b = normalize(&CapturedRecordHead::from_qwords(synth_standard("1234567890", 7)));
+        let a = normalize(&CapturedRecordHead::from_qwords(synth_standard(
+            "1234567890",
+            7,
+        )));
+        let b = normalize(&CapturedRecordHead::from_qwords(synth_standard(
+            "1234567890",
+            7,
+        )));
         assert_eq!(a, b, "同头重复规范化应一致(由上层按 ID 去重)");
         assert!(a.native_id.is_none(), "无稳定 ID 时上层不得据此合并");
     }
@@ -534,19 +551,29 @@ mod record_tests {
         mem.put(0x1d772ac4780, &snd);
         // peer:TLV {0x0a, 9, "700000001"}(群码形态,合成)。
         let mut peer = vec![0u8; 128];
-        peer[..11].copy_from_slice(b"
-	700000001");
+        peer[..11].copy_from_slice(
+            b"
+	700000001",
+        );
         mem.put(0x1d772854b60, &peer);
         // 正文:元素 blob {0x08, len, utf8}。
         let mut txt = vec![0u8; 600];
-        txt[0] = 9;  // type u8
-        txt[1] = 8;  // len u8
+        txt[0] = 9; // type u8
+        txt[1] = 8; // len u8
         txt[2..10].copy_from_slice(b"N3R17-K3");
         mem.put(0x1d772854650, &txt);
 
         let f = read_record_fields(&mem, cpb);
-        assert_eq!(f.seq, Some(397942), "K3 seq 绝对值(0xc24ec/2;台账九数据,算术已更正)");
-        assert_eq!(f.platform_time, Some(1791607545), "K3 平台时间(0xd59385f2/2;精确吻合 r17 真值)");
+        assert_eq!(
+            f.seq,
+            Some(397942),
+            "K3 seq 绝对值(0xc24ec/2;台账九数据,算术已更正)"
+        );
+        assert_eq!(
+            f.platform_time,
+            Some(1791607545),
+            "K3 平台时间(0xd59385f2/2;精确吻合 r17 真值)"
+        );
         assert_eq!(f.session_id, Some(0x1f666a44));
         assert_eq!(f.sender_uid.as_deref(), Some("u_1918755fTESTSELF0000"));
         assert_eq!(f.peer_uid.as_deref(), Some("700000001"), "peer TLV 解码");
@@ -604,7 +631,15 @@ mod record_tests {
     #[test]
     fn seen_records_absorb_yields_only_fresh() {
         let mut seen = SeenRecords::new();
-        let mk = |obj: u64, seq: Option<u64>| (obj, RecordFields { seq, ..Default::default() });
+        let mk = |obj: u64, seq: Option<u64>| {
+            (
+                obj,
+                RecordFields {
+                    seq,
+                    ..Default::default()
+                },
+            )
+        };
         // 首批:两条新 + 一条无 seq(记为 0)。
         let b1 = vec![mk(1, Some(100)), mk(2, Some(101)), mk(3, None)];
         let fresh = seen.absorb(&b1);
@@ -620,9 +655,7 @@ mod record_tests {
         assert!(seen.absorb(&b3).is_empty(), "seq 回退不回滚");
         assert_eq!(seen.len(), 4);
     }
-
 }
-
 
 // ---------------------------------------------------------------------------
 // N3 接线预备(2026-10-10):进程内读取与 CPB 收集。
@@ -690,7 +723,7 @@ pub fn collect_record_fields(
 /// 同过滤模式:MEM_COMMIT|MEM_PRIVATE,4KB≤region<1GB,无 GUARD/NOACCESS)。
 pub fn scan_cpb_objects_inproc(wrapper_base: u64) -> Vec<u64> {
     use windows_sys::Win32::System::Memory::{
-        MEM_COMMIT, MEM_PRIVATE, MEMORY_BASIC_INFORMATION, PAGE_GUARD, PAGE_NOACCESS, VirtualQuery,
+        VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_PRIVATE, PAGE_GUARD, PAGE_NOACCESS,
     };
     let mut out = Vec::new();
     // SAFETY: 自进程只读查询与读取。
@@ -699,7 +732,12 @@ pub fn scan_cpb_objects_inproc(wrapper_base: u64) -> Vec<u64> {
         let max = 0x7FFF_FFFE_FFFFusize;
         while addr < max {
             let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
-            if VirtualQuery(addr as *const core::ffi::c_void, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) == 0 {
+            if VirtualQuery(
+                addr as *const core::ffi::c_void,
+                &mut mbi,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            ) == 0
+            {
                 break;
             }
             let region = mbi.RegionSize;
@@ -719,4 +757,3 @@ pub fn scan_cpb_objects_inproc(wrapper_base: u64) -> Vec<u64> {
     }
     out
 }
-

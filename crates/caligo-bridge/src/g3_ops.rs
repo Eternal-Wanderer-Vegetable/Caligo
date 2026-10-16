@@ -1,13 +1,16 @@
 //! G3 原生调用封装为 [`NativeOps`](crate::native_session::NativeOps)(N3 现场验证;
 //! 计划 §7-N3:把已证 g3 FFI 序列封装为 NativeSession 的派发后端)。
 //!
-//! 安全边界:与 g3_send_run 同纪律 —— getter 租约 + 锚点核对 +
-//! transport 在位检查先于任何原生调用;body data 经 QQ operator new 分配
-//! 后移转(本侧永不释放);每次 submit 均为完整独立调用(零常驻修改)。
+//! 安全边界:一个 G3NativeOps 实例持有单个 getter pair；提交前核对锚点与
+//! transport。732A80 同步复制 body 后由本侧经 QQ 配对 delete 释放输入缓冲；
+//! pair 在异步回调排空/服务失效寿命未证前保留，不在 Drop 中释放。
 
-use crate::native_session::{OpsError, NativeOps};
 use crate::native_response::Cookie;
+use crate::native_session::{NativeOps, OpsError};
 use core::ffi::c_void;
+
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("the frozen QQ wrapper ABI is Windows x64 only");
 
 /// g3 原生调用所需 wrapper 内 RVA(与 g3.rs 同源)。
 mod rva {
@@ -15,6 +18,8 @@ mod rva {
     pub const ANCHOR_SVC_VTBL: usize = 0x3F6DED8;
     pub const SEND_SSO: usize = 0x732A80;
     pub const OPERATOR_NEW: usize = 0xB75000;
+    pub const OPERATOR_DELETE: usize = 0xB75029;
+    pub const PAIR_RELEASE: usize = 0x1DB2;
     pub const EMPTY_FN_CALLABLE: usize = 0x72D596;
     pub const EMPTY_FN_DTOR: usize = 0x72D5C8;
     pub const SVC_TRANSPORT: usize = 0x60;
@@ -23,97 +28,176 @@ mod rva {
 type GetterFn = unsafe extern "system" fn(out: *mut ServicePair) -> *mut ServicePair;
 type SendSsoFn = unsafe extern "system" fn(usize, usize, usize, u8, usize);
 type OperatorNewFn = unsafe extern "system" fn(usize) -> *mut c_void;
+type OperatorDeleteFn = unsafe extern "system" fn(*mut c_void);
+type PairReleaseFn = unsafe extern "system" fn(*mut ServicePair);
 
 #[repr(C)]
+#[derive(Default)]
 struct ServicePair {
-    obj: *mut c_void,
-    ctrl: *mut c_void,
+    // The frozen target is Windows x64: these two pointer-width words have the
+    // same ABI layout as the QQ pair, while keeping this retained lease Send.
+    obj: usize,
+    ctrl: usize,
+}
+
+struct QqOwnedBuffer {
+    ptr: *mut c_void,
+    delete_fn: OperatorDeleteFn,
+}
+
+impl QqOwnedBuffer {
+    fn as_ptr(&self) -> *mut c_void {
+        self.ptr
+    }
+}
+
+impl Drop for QqOwnedBuffer {
+    fn drop(&mut self) {
+        // SAFETY: ptr came from this exact wrapper's B75000 and B75029 is its
+        // statically verified paired QQ delete wrapper.
+        unsafe { (self.delete_fn)(self.ptr) };
+    }
 }
 
 /// g3 原生调用 ops(每个实例绑定一个 wrapper 基址)。
 pub struct G3NativeOps {
     wrapper_base: usize,
+    service_pair: Option<ServicePair>,
+    submitted: bool,
 }
 
 impl G3NativeOps {
     pub fn new(wrapper_base: usize) -> Self {
-        Self { wrapper_base }
+        Self {
+            wrapper_base,
+            service_pair: None,
+            submitted: false,
+        }
     }
 
-    /// 就绪探针(零副作用):getter 租约 + 锚点核对;成功返回**真实服务
-    /// 对象地址**(诚实证据,供 `AttachProof.service_addr` 登记;ops.submit
-    /// 每次调用自行重新租约,本地址不用于派发)。
+    pub fn wrapper_base(&self) -> usize {
+        self.wrapper_base
+    }
+
+    /// 获取并缓存本实例唯一的 getter pair。重复探测复用同一个 lease，避免
+    /// 每次 env check/submit 都增加一次 QQ 强引用。成功返回真实服务对象地址。
     pub fn probe_service(&mut self) -> Result<usize, OpsError> {
+        if let Some(pair) = self.service_pair.as_ref() {
+            let svc = pair.obj;
+            if self.validate_service(svc).is_ok() {
+                return Ok(svc);
+            }
+            if !self.submitted {
+                self.release_unsubmitted_service_pair();
+            }
+            return Err(OpsError::NotReady(
+                "probe: cached service is not ready".into(),
+            ));
+        }
+
         let wb = self.wrapper_base;
-        // SAFETY: 同 submit ①②;只读,零写入。
+        // SAFETY: getter writes the fixed-profile {obj, ctrl} pair to its out
+        // argument and returns that same address.
         unsafe {
             let getter: GetterFn = core::mem::transmute(wb + rva::GETTER);
-            let mut pair = ServicePair { obj: core::ptr::null_mut(), ctrl: core::ptr::null_mut() };
+            let mut pair = ServicePair::default();
             let ret = getter(&mut pair as *mut ServicePair);
-            if ret as usize != &mut pair as *mut ServicePair as usize || pair.obj.is_null() {
+            if ret as usize != &mut pair as *mut ServicePair as usize
+                || pair.obj == 0
+                || pair.ctrl == 0
+            {
                 return Err(OpsError::NotReady("probe: getter failed".into()));
             }
-            let svc = pair.obj as usize;
-            let vptr = core::ptr::read_volatile(svc as *const u64);
-            if (vptr as usize).wrapping_sub(wb) != rva::ANCHOR_SVC_VTBL {
-                return Err(OpsError::NotReady("probe: anchor mismatch".into()));
+            let svc = pair.obj;
+            if let Err(error) = self.validate_service(svc) {
+                // No native request has been submitted with this lease yet.
+                // 1DB2 is the fixed-hash pair release helper, distinct from the
+                // callback-manager operation-3 disposer at 2632.
+                let release: PairReleaseFn = core::mem::transmute(wb + rva::PAIR_RELEASE);
+                release(&mut pair as *mut ServicePair);
+                return Err(error);
             }
+            self.service_pair = Some(pair);
             Ok(svc)
         }
     }
 
-    /// 完整 g3 发送序列:adopt → transport → alloc → self str → send。
-    /// 返回 Ok = 已提交(异步;结果需经 CPB 差分确认)。
-    fn native_submit(&self, body: &[u8]) -> Result<(), OpsError> {
+    /// 只在本代尚未尝试任何 native submit 时显式清理 getter lease。
+    /// 成功提交后保留 pair：回调/dispatcher quiescence 尚未证实。
+    pub fn release_unsubmitted_service_pair(&mut self) {
+        if self.submitted {
+            return;
+        }
+        if let Some(mut pair) = self.service_pair.take() {
+            // SAFETY: 1DB2 consumes the address of this exact {obj,ctrl} pair.
+            unsafe {
+                let release: PairReleaseFn =
+                    core::mem::transmute(self.wrapper_base + rva::PAIR_RELEASE);
+                release(&mut pair as *mut ServicePair);
+            }
+        }
+    }
+
+    fn validate_service(&self, svc: usize) -> Result<(), OpsError> {
+        if svc < 0x10000 {
+            return Err(OpsError::PreCall("probe: null service"));
+        }
+        let vptr = read_qword(svc).unwrap_or(0);
+        if (vptr as usize).wrapping_sub(self.wrapper_base) != rva::ANCHOR_SVC_VTBL {
+            return Err(OpsError::NotReady("probe: anchor mismatch".into()));
+        }
+        match read_qword(svc + rva::SVC_TRANSPORT) {
+            Some(transport) if transport > 0x10000 => Ok(()),
+            _ => Err(OpsError::NotReady("transport 未安装".into())),
+        }
+    }
+
+    /// 完整 g3 发送序列: cached service → transport → allocate → send。
+    /// 732A80 在本次同步调用内复制 body；返回后通过同一 QQ allocator pair 释放输入。
+    fn native_submit(&mut self, _cookie: &Cookie, body: &[u8]) -> Result<(), OpsError> {
         let wb = self.wrapper_base;
-        // SAFETY: 与 g3_send_run 同序列;全部地址经锚点核对。
+        let pair = self
+            .service_pair
+            .as_ref()
+            .ok_or(OpsError::PreCall("g3 submit: service lease missing"))?;
+        let svc = pair.obj;
+        self.validate_service(svc)
+            .map_err(|_| OpsError::NotReady("g3 submit: service/transport invalid".into()))?;
+
+        // SAFETY: the exact fixed-profile service pair is retained in self;
+        // local command/body/callback structures live through the synchronous
+        // 732A80 call, whose body copy precedes its asynchronous dispatcher handoff.
         unsafe {
-            // ① getter 租约。
-            let getter: GetterFn = core::mem::transmute(wb + rva::GETTER);
-            let mut pair = ServicePair { obj: core::ptr::null_mut(), ctrl: core::ptr::null_mut() };
-            let ret = getter(&mut pair as *mut ServicePair);
-            if ret as usize != &mut pair as *mut ServicePair as usize || pair.obj.is_null() {
-                return Err(OpsError::PreCall("g3 adopt: getter failed"));
-            }
-            let svc = pair.obj as usize;
-            let vptr = core::ptr::read_volatile(svc as *const u64);
-            if (vptr as usize).wrapping_sub(wb) != rva::ANCHOR_SVC_VTBL {
-                return Err(OpsError::PreCall("g3 adopt: anchor mismatch"));
-            }
-
-            // ② transport 在位。
-            let transport = match read_qword(svc + rva::SVC_TRANSPORT) {
-                Some(t) if t > 0x10000 => t as usize,
-                _ => return Err(OpsError::NotReady("transport 未安装".into())),
-            };
-
-            // ③ body 分配(QQ operator new;QQ 侧释放)。
             let new_fn: OperatorNewFn = core::mem::transmute(wb + rva::OPERATOR_NEW);
-            let buf = new_fn(body.len().max(1));
-            if buf.is_null() {
+            let delete_fn: OperatorDeleteFn = core::mem::transmute(wb + rva::OPERATOR_DELETE);
+            let ptr = new_fn(body.len().max(1));
+            if ptr.is_null() {
                 return Err(OpsError::PreCall("g3 alloc: operator new null"));
             }
-            core::ptr::copy_nonoverlapping(body.as_ptr(), buf as *mut u8, body.len());
-            let begin = buf as u64;
-            let mut vec_hdr: [u64; 3] = [begin, begin + body.len() as u64, begin + body.len() as u64];
+            let buf = QqOwnedBuffer { ptr, delete_fn };
+            core::ptr::copy_nonoverlapping(body.as_ptr(), buf.as_ptr() as *mut u8, body.len());
+            let begin = buf.as_ptr() as u64;
+            let mut vec_hdr: [u64; 3] =
+                [begin, begin + body.len() as u64, begin + body.len() as u64];
 
-            // ④ self string(svc+0x1f0 → 24B)。
-            let mut self_str = [0u8; 24];
-            if !copy_self_string(svc + 0x1F0, new_fn, &mut self_str) {
-                return Err(OpsError::PreCall("g3 selfstr: unreadable"));
-            }
-
-            // ⑤ cmd + 空回调。
             let mut cmd = [0u8; 24];
             let cmd_name = b"MessageSvc.PbSendMsg";
             cmd[0] = (cmd_name.len() as u8) << 1;
             cmd[1..1 + cmd_name.len()].copy_from_slice(cmd_name);
-            let mut cb = [0u64; 4];
-            cb[2] = (wb + rva::EMPTY_FN_CALLABLE) as u64;
-            cb[3] = (wb + rva::EMPTY_FN_DTOR) as u64;
+            #[cfg(feature = "research")]
+            let mut cb = crate::consumer_probe::build_cb_for_cookie(_cookie);
+            #[cfg(not(feature = "research"))]
+            let mut cb = {
+                let mut cb = [0u64; 4];
+                cb[2] = (wb + rva::EMPTY_FN_CALLABLE) as u64;
+                cb[3] = (wb + rva::EMPTY_FN_DTOR) as u64;
+                cb
+            };
 
-            // ⑥ 提交(异步;QQ dispatcher 执行)。
             let send: SendSsoFn = core::mem::transmute(wb + rva::SEND_SSO);
+            // Conservatively quarantine the service lease from the moment native
+            // entry is attempted; no callback drain/unload proof exists yet.
+            self.submitted = true;
             send(
                 svc,
                 cmd.as_mut_ptr() as usize,
@@ -121,21 +205,29 @@ impl G3NativeOps {
                 1,
                 cb.as_mut_ptr() as usize,
             );
+            // QqOwnedBuffer drops here, after 732A80's synchronous body copy.
         }
-        // 移转后 buf/cb 所有权归 QQ;本侧不再触碰。
-        let _ = Cookie([0u8; 16]); // cookie 语义由 NativeSession 层管理
         Ok(())
     }
 }
 
 impl NativeOps for G3NativeOps {
-    fn probe_ready(&mut self, _service_addr: usize) -> Result<(), OpsError> {
-        // 最小就绪探针:getter 租约 + 锚点核对(零副作用)。
-        self.probe_service().map(|_| ())
+    fn probe_ready(&mut self, service_addr: usize) -> Result<(), OpsError> {
+        match self.service_pair.as_ref() {
+            Some(pair) if pair.obj == service_addr && pair.ctrl != 0 => {
+                self.validate_service(service_addr)
+            }
+            _ => Err(OpsError::PreCall("probe: service lease mismatch")),
+        }
     }
 
-    fn submit(&mut self, _service_addr: usize, _cookie: &Cookie, body: &[u8]) -> Result<(), OpsError> {
-        self.native_submit(body)
+    fn submit(
+        &mut self,
+        _service_addr: usize,
+        cookie: &Cookie,
+        body: &[u8],
+    ) -> Result<(), OpsError> {
+        self.native_submit(cookie, body)
     }
 }
 
@@ -147,47 +239,17 @@ fn read_qword(addr: usize) -> Option<u64> {
     let mut got = 0usize;
     // SAFETY: 自进程 RPM;栈缓冲。
     unsafe {
-        ReadProcessMemory(GetCurrentProcess(), addr as *const c_void, (&mut out as *mut u64).cast(), 8, &mut got)
+        ReadProcessMemory(
+            GetCurrentProcess(),
+            addr as *const c_void,
+            (&mut out as *mut u64).cast(),
+            8,
+            &mut got,
+        )
     };
-    if got == 8 { Some(out) } else { None }
-}
-
-/// self string 拷贝(短/长形态;长形态 data 换 QQ 分配副本)。
-unsafe fn copy_self_string(addr: usize, new_fn: OperatorNewFn, dst: &mut [u8; 24]) -> bool {
-    let mut raw = [0u64; 3];
-    for (i, slot) in raw.iter_mut().enumerate() {
-        match read_qword(addr + i * 8) {
-            Some(v) => *slot = v,
-            None => return false,
-        }
-    }
-    let q0 = raw[0].to_le_bytes();
-    if q0[0] & 1 == 0 {
-        // 短形态:24B 原样。
-        for (i, q) in raw.iter().enumerate() {
-            dst[i * 8..i * 8 + 8].copy_from_slice(&q.to_le_bytes());
-        }
-        true
+    if got == 8 {
+        Some(out)
     } else {
-        // 长形态:头部原样 + data 换 QQ 分配副本。
-        let size = raw[1] as usize;
-        let data_ptr = raw[2] as usize;
-        if size == 0 || size > 256 || data_ptr < 0x10000 {
-            return false;
-        }
-        let copy = new_fn(size + 1);
-        if copy.is_null() {
-            return false;
-        }
-        let mut tmp = [0u8; 256];
-        let src = data_ptr as *const u8;
-        core::ptr::copy_nonoverlapping(src, tmp.as_mut_ptr(), size);
-        core::ptr::write(copy as *mut u8, 0);
-        // 写 NUL 后重拷正文(顺序:先 copy 再 NUL)。
-        core::ptr::copy_nonoverlapping(tmp.as_ptr(), copy as *mut u8, size);
-        dst[0..8].copy_from_slice(&raw[0].to_le_bytes());
-        dst[8..16].copy_from_slice(&(size as u64).to_le_bytes());
-        dst[16..24].copy_from_slice(&(copy as u64).to_le_bytes());
-        true
+        None
     }
 }

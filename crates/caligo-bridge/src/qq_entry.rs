@@ -32,8 +32,7 @@ const NAME_UV_HANDLE_SIZE: &str = "uv_handle_size";
 const NAME_UV_LOOP_ALIVE: &str = "uv_loop_alive";
 const NAME_UV_CLOSE: &str = "uv_close";
 const NAME_ISOLATE_GETCURRENT: &str = "?GetCurrent@Isolate@v8@@SAPEAV12@XZ";
-const NAME_REQUEST_INTERRUPT: &str =
-    "?RequestInterrupt@node@@YAXPEAVEnvironment@1@P6AXPEAX@Z1@Z";
+const NAME_REQUEST_INTERRUPT: &str = "?RequestInterrupt@node@@YAXPEAVEnvironment@1@P6AXPEAX@Z1@Z";
 
 type FnUvAsyncInit = unsafe extern "C" fn(
     loop_: *mut core::ffi::c_void,
@@ -152,12 +151,12 @@ struct EntryShared {
     sym_uv_close: AtomicUsize,
     sym_isolate_get_current: AtomicUsize,
     // 机器状态。
-    tid: AtomicUsize,          // owner 线程(首入回调线程)
-    handle: AtomicUsize,       // uv_async 句柄
-    ready: AtomicUsize,        // 1 = 首入完成
-    error_code: AtomicUsize,   // ERR_*;0 = 无
-    error_aux: AtomicUsize,    // 附带数值(size/r)
-    quarantine: AtomicUsize,   // pump 发现错误线程
+    tid: AtomicUsize,        // owner 线程(首入回调线程)
+    handle: AtomicUsize,     // uv_async 句柄
+    ready: AtomicUsize,      // 1 = 首入完成
+    error_code: AtomicUsize, // ERR_*;0 = 无
+    error_aux: AtomicUsize,  // 附带数值(size/r)
+    quarantine: AtomicUsize, // pump 发现错误线程
     close_req: AtomicUsize,
     closed: AtomicUsize,
     pumps: AtomicU64,
@@ -441,7 +440,8 @@ unsafe extern "system" fn first_entry_cb(_ctx: *mut core::ffi::c_void) {
             return;
         }
         core::ptr::write_bytes(handle, 0, size);
-        let init: FnUvAsyncInit = EntrySymbols::to_fn(ENTRY.sym_uv_async_init.load(Ordering::Acquire));
+        let init: FnUvAsyncInit =
+            EntrySymbols::to_fn(ENTRY.sym_uv_async_init.load(Ordering::Acquire));
         let r = (init)(
             ENTRY.loop_ptr.load(Ordering::Acquire) as *mut core::ffi::c_void,
             handle as *mut core::ffi::c_void,
@@ -502,7 +502,8 @@ impl EntryHandle {
         // SAFETY: 地址来自导出解析/注入;uv_async_send 是 libuv 唯一
         // 明确允许跨线程调用的接口。
         unsafe {
-            let send: FnUvAsyncSend = EntrySymbols::to_fn(ENTRY.sym_uv_async_send.load(Ordering::Acquire));
+            let send: FnUvAsyncSend =
+                EntrySymbols::to_fn(ENTRY.sym_uv_async_send.load(Ordering::Acquire));
             (send)(ENTRY.handle.load(Ordering::Acquire) as *mut core::ffi::c_void) == 0
         }
     }
@@ -620,16 +621,27 @@ pub fn bootstrap(cfg: &EntryConfig, symbols: &EntrySymbols) -> Result<EntryHandl
     ENTRY
         .sym_uv_loop_alive
         .store(symbols.uv_loop_alive, Ordering::Release);
-    ENTRY.sym_uv_close.store(symbols.uv_close, Ordering::Release);
+    ENTRY
+        .sym_uv_close
+        .store(symbols.uv_close, Ordering::Release);
     ENTRY
         .sym_isolate_get_current
         .store(symbols.isolate_get_current, Ordering::Release);
     // 阶段 3:首入(RequestInterrupt;回调同步或异步执行均按状态机等待)。
-    append_stage(report, "interrupt_posted", true, "posting first-entry payload");
+    append_stage(
+        report,
+        "interrupt_posted",
+        true,
+        "posting first-entry payload",
+    );
     // SAFETY: env 经新鲜度门;符号 ABI 见类型别名(K2/K3 反汇编实证)。
     unsafe {
         let ri: FnRequestInterrupt = EntrySymbols::to_fn(symbols.request_interrupt);
-        ri(cfg.env as *mut core::ffi::c_void, first_entry_cb, std::ptr::null_mut());
+        ri(
+            cfg.env as *mut core::ffi::c_void,
+            first_entry_cb,
+            std::ptr::null_mut(),
+        );
     }
     // 等待首入完成(空闲 QQ 的 JS 间隙可拖延数分钟 —— K2-03 §12.3 记录;
     // 调用方按 D7 观察窗给足超时,超时不是失败证据,记录后由执行者决策)。
@@ -640,7 +652,12 @@ pub fn bootstrap(cfg: &EntryConfig, symbols: &EntrySymbols) -> Result<EntryHandl
             return Err(e);
         }
         if Instant::now() >= deadline {
-            append_stage(report, "first_entry", false, "timeout(600s;空闲 QQ 首入延迟候选)");
+            append_stage(
+                report,
+                "first_entry",
+                false,
+                "timeout(600s;空闲 QQ 首入延迟候选)",
+            );
             return Err(EntryError::Timeout);
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -788,7 +805,10 @@ impl crate::host_adapter::HostAdapter for QqOwnerAdapter {
     fn current_context_ok(&self) -> bool {
         uv_loop_alive()
     }
-    fn native_op(&mut self, op: crate::host_adapter::HostOp) -> Result<crate::host_adapter::HostOpResult, crate::host_adapter::HostError> {
+    fn native_op(
+        &mut self,
+        op: crate::host_adapter::HostOp,
+    ) -> Result<crate::host_adapter::HostOpResult, crate::host_adapter::HostError> {
         use crate::host_adapter::{HostError, HostOp, HostOpResult};
         match op {
             HostOp::Probe => {
@@ -820,9 +840,7 @@ impl crate::host_adapter::HostAdapter for QqOwnerAdapter {
                 Err(e) => {
                     append_stage_simple("listener_v8_err", false, &format!("{e:?}"));
                     match e {
-                        crate::qq_v8::V8Error::NoCurrentContext => {
-                            Err(HostError::NoCurrentContext)
-                        }
+                        crate::qq_v8::V8Error::NoCurrentContext => Err(HostError::NoCurrentContext),
                         _ => Err(HostError::EnvInvalid),
                     }
                 }
@@ -837,7 +855,12 @@ impl crate::host_adapter::HostAdapter for QqOwnerAdapter {
             },
             // D9:参数化发送(K3 验证脚本经 V8 阶梯;fired 非终态,
             // Promise 结果经轮询 sendResults 回收 —— 见 daemon pump 钩子)。
-            HostOp::SendText { chat_type, peer_uid, text } => {
+            HostOp::SendText {
+                chat_type,
+                peer_uid,
+                text,
+                ..
+            } => {
                 match crate::qq_v8::send_text(chat_type, &peer_uid, &text) {
                     Ok(out) => {
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
@@ -853,7 +876,9 @@ impl crate::host_adapter::HostAdapter for QqOwnerAdapter {
                         }
                         Err(HostError::Native { code: 3 })
                     }
-                    Err(crate::qq_v8::V8Error::NoCurrentContext) => Err(HostError::NoCurrentContext),
+                    Err(crate::qq_v8::V8Error::NoCurrentContext) => {
+                        Err(HostError::NoCurrentContext)
+                    }
                     Err(_) => Err(HostError::EnvInvalid),
                 }
             }

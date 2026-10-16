@@ -6,6 +6,10 @@
 
 use std::fmt;
 
+/// 保留同一原请求迟到强回执的最长窗口；超窗后只保留 core 的
+/// DeliveryUnknown 台账，bridge 释放关联与 resident 结果容量。
+pub const LATE_RECEIPT_GRACE_MS: u64 = 60_000;
+
 /// QQ 账号 ID。
 ///
 /// 以字符串保存:不对号码取值范围、前导零或数值上限做未经证实的假设。
@@ -177,6 +181,31 @@ pub enum EventSource {
     HistoryBackfill,
 }
 
+/// Proven OneBot V11 fields derived from the same native message record.
+/// Missing fields stay `None`; callers must not infer them from opaque UIDs,
+/// local receive sequence, text, or observation time.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct OneBotMessageProjection {
+    /// Resolved numeric peer ID (group number or mapped private UIN).
+    pub peer_id: u64,
+    /// Resolved sender QQ number.
+    pub sender_user_id: u64,
+    /// Platform's actual OneBot-compatible message ID, not Caligo's ID.
+    pub real_id: i32,
+    /// Platform event time in Unix seconds, as required by OneBot V11.
+    pub time: i32,
+    /// Best-effort sender nickname, omitted when unavailable.
+    #[serde(default)]
+    pub sender_nickname: Option<String>,
+    /// OneBot V11 message subtype observed from the native event. Event fanout
+    /// stays disabled when this is unknown (for example, anonymous group msg).
+    #[serde(default)]
+    pub sub_type: Option<String>,
+    /// Native OneBot font field. Missing values are not replaced with a guess.
+    #[serde(default)]
+    pub font: Option<i32>,
+}
+
 /// 常驻接收事件(计划 §6.5 字段集)。`event_seq` 由 core 在持久化时分配。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MsgEvent {
@@ -191,6 +220,8 @@ pub struct MsgEvent {
     pub text: String,
     /// 平台时间(若有;来源单独记录,不猜)。
     pub platform_time: Option<u64>,
+    /// OneBot projection only when each numeric field is independently proven.
+    pub onebot_projection: Option<OneBotMessageProjection>,
     /// 本地观察时间(unix ms,单调性不作保证,仅展示)。
     pub observed_at_unix_ms: u64,
     pub source: EventSource,
@@ -241,10 +272,16 @@ pub enum ActionState {
     Queued,
     DispatchIntent,
     NativeStarted,
-    /// QQ 服务明确成功且已关联实际原生消息身份(若本版本拿不到关联,
-    /// 不得进入此态 —— 见 §6.6 的契约约束)。
-    ConfirmedSuccess { native_id: Option<NativeMessageId> },
-    ConfirmedFailure { reason: String },
+    /// QQ 服务明确成功且已关联实际原生消息身份。
+    ConfirmedSuccess {
+        native_id: NativeMessageId,
+    },
+    /// 服务已受理,但当前响应没有可关联的稳定 native 身份。
+    /// 这是可恢复事实:保留请求等待强身份或最终 unknown,也不自动重发。
+    AcceptedUnconfirmed,
+    ConfirmedFailure {
+        reason: String,
+    },
     /// 仅 bridge 确认从未开始调用才允许;core 单方面超时不得断言。
     CancelledUnsent,
     /// native 是否执行不确定(崩溃窗口/结果丢失/迟到未回)。
@@ -376,10 +413,22 @@ mod tests {
         let t1 = SessionKey::new("10001", SessionKind::Private, "123456");
         let t2 = SessionKey::new("10001", SessionKind::Group, "123456"); // 同数字不同种类
         let a = SendTextRequest::compute_payload_hash(1, &t1, "hi", 30_000);
-        assert_ne!(a, SendTextRequest::compute_payload_hash(1, &t2, "hi", 30_000));
-        assert_ne!(a, SendTextRequest::compute_payload_hash(1, &t1, "hi ", 30_000));
-        assert_ne!(a, SendTextRequest::compute_payload_hash(2, &t1, "hi", 30_000));
-        assert_eq!(a, SendTextRequest::compute_payload_hash(1, &t1, "hi", 30_000));
+        assert_ne!(
+            a,
+            SendTextRequest::compute_payload_hash(1, &t2, "hi", 30_000)
+        );
+        assert_ne!(
+            a,
+            SendTextRequest::compute_payload_hash(1, &t1, "hi ", 30_000)
+        );
+        assert_ne!(
+            a,
+            SendTextRequest::compute_payload_hash(2, &t1, "hi", 30_000)
+        );
+        assert_eq!(
+            a,
+            SendTextRequest::compute_payload_hash(1, &t1, "hi", 30_000)
+        );
     }
 
     #[test]
@@ -389,10 +438,13 @@ mod tests {
         assert!(!ActionState::NativeStarted.is_terminal());
         assert!(ActionState::DeliveryUnknown.is_terminal());
         assert!(ActionState::CancelledUnsent.is_terminal());
-        assert!(ActionState::ConfirmedSuccess { native_id: None }.is_terminal());
+        assert!(ActionState::ConfirmedSuccess {
+            native_id: NativeMessageId("N1".into())
+        }
+        .is_terminal());
+        assert!(!ActionState::AcceptedUnconfirmed.is_terminal());
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // K4-D7b:CLG1 帧编解码与 IPC v2 桥方向消息(纯数据,从 caligo-core 下沉;

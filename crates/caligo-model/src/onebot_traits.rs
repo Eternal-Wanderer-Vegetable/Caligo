@@ -2,27 +2,59 @@
 
 use serde_json::Value;
 
+/// OneBot send target. Private `user_id` is a UIN and must not be treated as a
+/// resolved QQ UID by the native encoder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendTarget {
+    Group { group_id: u64 },
+    Private { user_id: u64 },
+}
+
 /// 发送载荷(已通过参数校验;wire 编码与原生派发由实现方承担)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendPayload {
-    /// 群 = Some(群码);私聊 = None。
-    pub group: Option<u64>,
-    pub peer_uid: Option<String>,
+    pub target: SendTarget,
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendDisposition {
+    /// Durable queue acceptance only; no OneBot message ID is known.
+    AcceptedUnconfirmed,
+    /// A single dispatch ended without a stable public message identity.
+    /// Callers must report an unknown result and must not retry automatically.
+    DeliveryUnknown { reason: String },
+    /// This transport/target pair has no proven implementation path.
+    Unsupported { reason: String },
+    /// Terminal receipt and persistent OneBot message ID are available.
+    Confirmed { message_id: i32 },
 }
 
 /// 发送汇(N3 NativeSession 实现;此处解耦以便测试)。
 pub trait SendSink {
-    /// 受理发送;Ok(true) = 已派发(结果走事件通道),Err(原因) = 拒绝。
-    fn send(&mut self, payload: &SendPayload) -> Result<bool, String>;
+    /// Dispatch once. A queued result is not a successful standard OneBot send.
+    fn send(&mut self, payload: &SendPayload) -> Result<SendDisposition, String>;
+}
+
+/// Complete message fields required by OneBot get_msg.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMessageView {
+    pub message_id: i32,
+    pub message_type: String,
+    pub real_id: i32,
+    pub sender: Value,
+    pub message: Value,
+    pub time: i32,
 }
 
 /// 消息查询源(消息存储实现)。
 pub trait StoreReader {
-    /// 按 OneBot message_id 查询;返回 (seq, 平台时间, 文本)。
-    fn get_msg(&self, message_id: i64) -> Option<(u64, u64, String)>;
-    /// 登录账号(启动时由宿主身份填充)。
-    fn self_id(&self) -> u64;
+    /// 按已持久化的 OneBot int32 message_id 查询完整标准消息。
+    fn get_msg(&self, message_id: i32) -> Option<StoredMessageView>;
+    /// Login identity is absent until the host provides both account and nickname.
+    fn login_info(&self) -> Option<(u64, String)>;
+    /// Actual daemon/session state, absent until wired to the live actor.
+    fn online_status(&self) -> Option<bool>;
 }
 
 /// 解析 message 段:字符串或标准数组,提取纯文本;未支持段显式失败。

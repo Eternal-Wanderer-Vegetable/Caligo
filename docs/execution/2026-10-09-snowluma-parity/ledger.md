@@ -937,3 +937,444 @@ N3R27-CH1 / N3R27-CH82 / N3R27-TRACELINE / N3R27-RESLT(API)。QQ 存活。
 - invoker:ctx 从 this+0x10 取(魔数自检),字符串 RPM-self 读,JSONL 追加;
 - 全测试绿。**字段重试待用户明确批准**(今日已两实例死亡;修正后的
   manager 语义与 L1 布局均有直接反汇编依据,但 3fce5e 门内部逻辑未全解)。
+## 2026-10-11(三十):消费者实验 r2 —— 契约安全,响应路由缺口定位
+
+### r2(修正版 delegate,n3res7,PID 25072 = 用户重启后的 bot 宿主)
+- **零崩溃**(r1 的 manager 损坏问题修正生效);N3R31-CONSUMER 送达
+  (服务器 seq 400714);**consumer 未被调用**(capture 无 consumer_result)。
+- 结论:cb delegate 的 manager/invoker 契约处理正确(克隆 + 门查询安全),
+  但**响应到 73bd6c 的路由需要上游注册** —— 732A80 内建的 dispatch 对象
+  只是传递结构;消费者→请求的关联(按 cookie/msgUid)发生在更上层的
+  发送路径(25757ea → 182578e18 → 732A80),裸调 732A80 绕过了它。
+  与 scope 文档"cbCfg/9bef60 构造路径才是消费者安装点"的修正一致。
+
+### r1 教训的完整闭环
+- 0x72D596 = std::function 式管理器(op 0/1 = 克隆/销毁写 {manager,
+  invoker} 对;op 2/3 = no-op);0x72D5C8 = 空调用 terminate 哨兵;
+- 3fce5e 门 = 调 manager(NULL, op=4, NULL, 0, &out16, 0) 后查 out[0]
+  非零 —— **门查询是 manager 的 op=4 契约**;
+- 布局 L1({storage0, storage1, manager, invoker})下 r1 崩溃 =
+  处理器误放 manager 槽 → 克隆损坏;r2 修正后零崩溃,契约处理验证通过。
+
+### 方法论修正(重要)
+- 昨日"8112 提权不可注入"诊断 = **十进制→hex 换算错误**(wrapper 实际
+  base 0x7FFDEDA00000,当时按错误地址读 → 299 误判提权)。进制转换
+  程序化;PowerShell Modules 枚举与 RPM 交叉验证。
+- QQ 进程枚举时 PowerShell Modules 的"无 wrapper"需区分枚举失败与
+  真 absence(本轮 25072 就在被漏掉的进程中)。
+
+### 下一步(纯离线)
+- 找 182578e18 的反编译/反汇编中的 registry insert(cookie → 消费者);
+  或 95d4e6 的 9 个调用方函数中定位真正的注册调用;
+- 拿到注册调用后:消费者实验 v3 = 裸调 732A80 前**手动执行注册调用**
+  (cookie + 我们的 delegate)→ 响应路由闭环。
+- 当前状态:25072 存活,OneBot 正常;n3res7 驻留其内(仅持 leaked ctx,
+  无活动线程)。
+## 2026-10-11(三十一):管理器调用序列完整观测 —— 门开、路由缺、实例存活
+
+### v3 观测(N3R32/N3R33,n3res8/9,零崩溃)
+- **N3R32/N3R33/N3R31 全部送达**(400714/400716/400717),实例 25072 存活
+  (两次"死亡"均为瞬时查询误判——已修正验证方法:双查 + SnowLuma 日志);
+- **管理器完整调用序列(首次实测)**:
+  1. submit 时刻 **4 连 op=0 克隆**:栈上 3 跳(dest←src 链)+ 最终堆分配
+     0x21ba1255a68 = 请求持久 delegate(每次写 {manager, invoker} 对);
+  2. **+584ms op=4 门查询**(NULL,4,NULL,0,&out16,0 —— 与 3fce5e 签名
+     逐位吻合):我们的 manager 写非零 → **门开**;
+  3. 紧接 op=3(dest=堆 delegate,src=dest-0x10,size=0x10)—— 销毁/搬移,
+     no-op 安全;
+  4. **invoker 未被调用**(cb[3] 未触发)。
+- 工具缺陷修复:v3 日志曾因 STATIC_CTX/STORAGE_CTX 双静态笔误失效
+  (build_cb 存错静态)——n3res9 修复;线程交错写导致的 JSON 半行
+  (append 无锁)——已知,后续加文件锁。
+
+### 路由缺口的精确化
+- 门(3fbab2)共 **6 个调用方**:[3fb914]/[54cdef]/[6a7d0c]/[739c66]/
+  [73bd6c]/0x73ce0c —— op=4 查询来自其中之一,但 73bd6c 的门若跑过会有
+  第二次 op=4 + invoker 调用(均无)→ **响应仍未到达 73bd6c**;
+- op=4 的来源层待定位(六个门调用方逐个反汇编,看哪个操作 send-result
+  上下文对象);73bd6c 的响应分发 = 需要 upstream 注册(cookie → 消费者,
+  BaseMsgMgr token registry)——结论不变,证据更实。
+
+### 状态
+- 25072 存活、OneBot 正常;n3res7/8/9 三份 DLL 驻留(均无活动线程,
+  leaked ctx 无害);三轮探针全部送达(修复版 delegate 完全安全);
+- retCode 通道进展:delegate 契约 ✓(克隆/查询/销毁全安全)→ 门开 ✓ →
+  剩:响应路由到 73bd6c 的 upstream 注册。
+- 下一步:①六个门调用方反汇编定位 op=4 来源层;②182578e18 反编译找
+  registry insert;③v4 = 手动注册 + 裸发(待布局确认后)。
+## 2026-10-11(三十二):cb delegate 定案 —— 非响应消费者;retCode 通道 = token registry
+
+### 决定性收敛(离线反汇编 + 三轮现场序列互证)
+- 732A80 尾段(0x732e33+)继续组装 delegate 对象(写 0x20 标记等)——
+  组装语义复杂,但结合三轮现场序列已可定案:
+- **delegate 完整生命周期(实测)**:submit 时 4 连克隆(栈→堆持久副本)
+  → 响应时 op=4 门查询(门开)→ op=3 销毁;**invoker 从未被调用**;
+- 与 g3.rs 既有注释互证:"MSF 层回调本就被 b7f6f6 置空,结果路由走
+  BaseMsgMgr token 注册表" —— **cb delegate 被当作普通 function 对象
+  搬移/查询/销毁,但响应调用的实际路径已被 732A80 内部置空**;
+- **定案:cb delegate ≠ 响应消费者。retCode 通道 = 向 BaseMsgMgr token
+  registry 注册消费者**(token/cookie → 消费者对象),即 scope 文档的
+  "消费者安装点重定位"任务本体 —— 不是 cb 块能替代的。
+
+### 今日消费者战线的完整收获(诚实盘点)
+1. **delegate 契约全解**(manager op 0/3/4 实测 + 0x72D596 反编译):
+   op=0 克隆(写 {manager, invoker} 对)、op=4 门查询(写非零即开门)、
+   op=3 销毁;布局/时序全部实测吻合;修正版 delegate 零崩溃
+   (N3R31/32/33 三轮全送达,实例存活);
+2. **排除法终局**:cb 块路线(64B 内嵌 delegate)被实测排除 ——
+   这本身是有价值的负结果(.scope 文档的"实现路径建议 1-4"中
+   "cb 即消费者"假设被否定,后续不再沿此路线投入);
+3. **门/消费者机制全图**:73bd6c(响应分发)+ [739c66](结果处理器)
+   双层,门 3fbab2/3fce5e 语义,6 个门调用方 —— retCode 最终流向
+   token registry 注册的消费者;
+4. 工具沉淀:pdata 函数边界(52.5 万函数)、PE 感知 xref、LEA 函数地址
+   扫描、sendtrace/dumpmem、mgr_call 序列观测(栈上零分配 JSONL)。
+
+### retCode 通道的剩余路径(下一工作块,纯离线起步)
+- 定位 token registry:182578e18(25757ea 与 732A80 之间的中层)反编译,
+  或 25757ea 族 9 个调用方中的注册调用;token = 发送探针时代已见的
+  i32 token_out(0x20B 面);
+- 注册调用定位后:v4 = 裸发 + 手动 registry 注册(cookie/token → 我们的
+  消费者对象 {retCode 提取 + JSONL})→ 响应闭环;
+- 该路径同时是 @ 重测的前提(需要 @ 的业务 retCode)。
+
+### 现场状态
+- 25072 存活,OneBot 正常;N3R31/32/33 全部送达;n3res7/8/9 驻留
+  (无活动线程)。今日现场探针总计:发送 ~10 次、注入 6 次、零不可逆损伤
+  (两次实例死亡分别由风控踢下线与 r1 契约错位导致,均已定案)。
+## 2026-10-11(三十三):任务容器层定位 —— 消费者住在上游任务对象里
+
+### 0x2578e18 全解(248B;25757ea 调用两次;Ghidra 地址 = 0x180000000 + RVA)
+- 流程:容器单例(2b8674)→ 按请求对象查找(3fb8;未命中即退出)→
+  取任务 shared_ptr(2b86d4 + 引用计数)→ cookie 经 9ccf34/2578f4c 包装
+  → **4c7aa6(任务, arg2, arg3, …, cookie)提交**;
+- **结构性定案:消费者住在任务对象里** —— 任务由 25757ea 上游的发送管线
+  创建并放入容器(键 = 请求对象);响应到达后按任务分发到 73bd6c/
+  [739c66](带 retCode 提取)。裸调 732A80 无任务、无容器条目 → 响应
+  无路由 → retCode 不可达 —— 与三轮现场观测完全互证。
+
+### 修正与方法论
+- Ghidra 反编译函数名含 0x180000000 基址:FUN_182578e18 → RVA 0x2578e18
+  (此前按字面地址找"not found"的误判);后续所有 phase 反编译地址
+  一律减基址换算。
+
+### retCode 通道剩余工作(v4 清单)
+1. 任务对象布局(4c7aa6 首参 r14 的内部结构;消费者/分发对象在任务内
+   的偏移);
+2. 容器键语义(3fb8 的键 = 请求对象的什么;能否自造键插入);
+3. 任务构造(上游管线如何建任务 + 塞消费者 —— 或找到独立的
+   task+consumer 构造导出);
+4. v4 = 构造任务(含我们的消费者)+ 容器插入 + 裸发 732A80 → 响应闭环。
+5. 或者:评估直接 hook 任务创建点(25757ea 上游)的风险等级——
+   属于"插桩"类,需按 slot7 教训评审。
+
+### 状态
+- 纯离线轮:零注入零发送;实例 25072 存活(上轮三 DLL 驻留无活动);
+- 消费者/retCode 工作至此到达清晰边界:cb delegate 线路(排除)、
+  响应分发层(全图)、任务容器层(定位)、剩余 = 任务构造与注册。
+## 2026-10-11(三十四):响应链全图闭环 —— 路由缺口根因 = patch 错层;v4 = arg5 自带回调,零 patch
+
+### 六门调用方反汇编完成(原"6 个"实为发送区限定;全量 xref ~140 处,门 = 通用 is-invocable 工具)
+- **[0x739c66](0x394B,result 处理器)全解**:签名 (this{cb@+0x10,writer=[+0]}, &ptr, &i32, box-move)。
+  result 记录 0x72a504(i32,*ptr) → {errCode@+0,resultType@+4,string@+8,f20,f30};
+  任务态字段 +0x20(串)/+0x60/+0x64(dword)/+0x80/+0xA8(byte);+0x90 向量(0x30 步长)
+  按名字串匹配 "qq-i18n-tip-msg"(0x479CDE0)取 i18n 提示;任务检查失败**不影响**门+invoke。
+  **invoke = 7 参**:[this+0x28](cb,0x10,errCode,resultType,writer=[rsi],&f20,&f30)。
+- **[0x73bd6c](0x390B,响应分发)全解**:this = 捕获块{writer@+8,**内层cb@+0x18**,flag@+0x38};
+  code 三级 fallback = box+0x40 → +0x60 → +0x64;errStr = box+0x48/+0x68;
+  **invoke = 6 参**:[this+0x30](cb,0x10,errCode,errStr,writer,&ctx+0x38串)——
+  与 r1 时代预测 (delegate,0x10,errCode,errStr,msgUid) 吻合。
+- 小调用方:0x3fb914 = 计数器[obj+0x100]++ + 门开则尾跳 [obj+0xF0](4 参 invoke);
+  0x6a7d0c = 门开+索引未超限才 invoke;0x54cdef = "门未开"谓词(xor al,1,查询不 invoke);
+  0x73ce0c = jmp 桩别名。**+584ms 单次 op4 无 invoke → 来源是谓词/收尾类,非 invoke 类**。
+
+### 决定性发现:732A80 自建响应回调,消费位置 = arg5(上层传入的内层 delegate)
+- 0x73bbf8(delegate 工厂,被 **732A80@0x732e2e** 调用):4D3588 = 0x75AF10 竞态分配器
+  包装,固定 remaining=0x10 < size 0x40 → **恒返 0 → 永远走后备分支**
+  {manager=0x73C2AA, invoker=0x73C34C};{0x73BC5C,0x73BD08} 为死分支。
+  两对 manager 的 op=2 都写 {0x72D5C8,0x72D596} —— 与 r1 manager 契约互证。
+- **0x73C34C(真 invoker)**:73bd6c 的 this = [closure] = 堆上 0x40 捕获块
+  {ctx@0, sp@8, **内层delegate@+0x18**(0x20B,0x31C5F8 移动), flag@0x38}。
+  73bd6c 门+invoke 的是**内层** delegate —— 外层 invoker 槽永不被响应路径调用!
+- **732A80 尾段(0x732dae-0x732eb9)全解**:capture{ctx(rdi), sp(rbp+0x150),
+  inner=[rbp+0x1E0]=**arg5**, flag(bl)} → 堆复制(0x73bb94 拷贝构造,0x24C0 分配)
+  → 外层 delegate {storage0=堆指针, manager=0x73C2AA, invoker=0x73C34C} →
+  **slot7 虚提交:r12=[ctx+0x60]->vtbl[+0x38](r12, &route串(ctx+0x1F0),
+  &payload_qword, &请求描述(word 0x20 标记), &token_out, &delegate)**。
+  KernelMsgService@wrapper vtbl@0x3F10458 slot7=0x320B5A → 转发
+  this+0x478 特性检查 → this+0xE0 成员 → 0x3E31BC。
+- token 语义闭环:slot7 返回 *out ^ &"msf" → perf(0x739590("perf") 是 perf 上报,
+  **非** registry;739c66/73bd6c/732A80 三处 xor &"msf" 同源)。响应侧 *arg2 = 该 token。
+- **路由缺口根因定案**:r1/r2/r3 我们 patch 的是外层 delegate 槽;manager 收到
+  clone/op4/op3(服务收尾路径:门查询+销毁)✓,但响应 invoke 走内层槽(原生
+  回调,无探针)→ 我们的 invoker 静默。裸发的响应**一直**被原生内层回调处理。
+- 容器键修正:容器 = API 路由表,键 = 复合路由串("APICaller-{} "(0x2b84d8)、
+  "{}-{} "(0x2b8650) 格式),25757ea 沿路由链逐前缀派发;值为 shared_ptr 服务对象
+  (node+0x38;3fb8=lower_bound 查找,4075=键比较,414e=try_emplace 原语)。
+  slot25(vtbl+0xC8)/2AA0D2(vtbl+0xB8) = 服务提交虚槽;4B3676(task,cmdId
+  0x93A0/0x93A1/0x950F,…) = 命令提交变体。0x3F2D4E0 =
+  "trpc.ecom.api_gateway.ApiGateway.SsoForward"(slot25 的命令名参数样例)。
+- RTTI 佐证:KernelMsgService@wrapper@nt、MsgService/SysMsgService/GuildMsgService
+  @im_core@nt、**BaseMsgWorker::SendMsgResult**(MsgScheduler lambda 签名
+  (int,string,shared_ptr<IPBMessage>) = (errCode,errStr,msg) —— 与 73bd6c invoke 吻合)。
+
+### v4 定稿(替代旧"任务构造"清单 —— 零 .text patch,消费位置正确)
+- **732A80(ctx, a2, a3, flag(r9b), response_delegate(arg5))**:arg5 = 0x20B
+  可移动 delegate(0x7333ac 传静态空回调 {0x2338,0x236a} 为证)。
+- v4 = 我们的 DLL 裸调 732A80,arg5 传自建 delegate(manager = r2/r3 已验证安全
+  的契约处理器;invoker = retCode 提取器 + FixedBuf JSONL + 文件锁)→
+  响应原生路由:服务 → 外层门(我们 manager op4 → 开)→ 0x73C34C → 73bd6c →
+  门(内层=我们的 manager)→ **invoke 我们的 invoker**(our_cb,0x10,errCode,
+  errStr,…) —— 消费者装在原生消费位。
+- 风险评估:manager 契约已三轮实测安全;invoker 只读 errStr(MSVC string SSO)
+  + 定长格式化;无容器/任务伪造,无 hook;密度纪律照旧(速率上限/不重放)。
+- 旧 v4 清单(任务布局/容器键/任务构造)被本路线**替代**,不再需要。
+
+### 状态
+- 纯离线轮:零注入零发送;实例 25072 未触碰;全部结论有反汇编地址锚点;
+- 下一步:consumer_probe.rs 改造(invoker = 6 参消费版 + arg5 注入路径),
+  现场 v4 实验(待用户批准注入)。
+## 2026-10-11(三十五):v4 现场闭环 —— retCode 通道打通;根因 = 门极性反转
+
+### 根因定案(离线反汇编 + mgrlog2 几何)
+- **门语义反转**:0x3fbab2 = `3fce5e(rcx+0x10)` + `xor al,1`;0x3fce5e = 
+  `manager(NULL,4,NULL,0,&out16,0)` 返回 out[0]!=0。0x72D596(原生空管理器)
+  op>=4 臂 = `out[0]=1` —— **"1" = 我是空的**;0 = 非空可调用。
+  r1 时代"out[0] 非零 = 门开"解读为**极性反转** —— r2/r3 我们的 manager
+  答"非零(自称空)" → 73bd6c 在 +584ms 跳过 invoke 直接销毁。
+  **路由全程通畅,从未缺上游注册;r2 的 token-registry 结论作废**。
+- mgrlog2 克隆几何复核:manager 约定 = `(dest=&new.manager, op, src=旧块,
+  0x10, out=新块)`;0x31C5F8 移动器**不复制 storage**(只重置源为空对
+  {0x2338,0x236a})→ op=0 须复制 4 qword(r1 教训再证实)。
+
+### v4 修复(consumer_probe.rs,commit 本轮)
+1. op=4 → 写 out[0]=0(非空);
+2. op=0 → 复制 src storage0/1 → out[0..2] + 写对(RPM-self 读,坏地址写 0);
+3. op=1/3 → 重置为 wrapper 空对 {base+0x2338, base+0x236a}(ctx 新增
+   wrapper_base 字段);
+4. invoker → 6 参 (this, 0x10, errCode, errStr*, writer*, extra*);
+5. __qq string 短形态 data@+1 修正(make_short_string 同款);
+6. 回调零堆分配(FixedBuf 768B + JSON 转义)+ 进程级文件锁(半行 JSON 修复);
+7. g3.rs 消费者分支补 cfg(research)门 —— **default 构建 E0433 自 r2 起预存,
+   本提交修复**(全仓默认+research 测试绿 53+14+10+4+38 / 56+7+7+14)。
+
+### N3R34 现场结果(单发;实例 25072 全程存活,OneBot 正常)
+- 注入 n3res10(research CLI;首跑误用 default CLI 被 K4-D0 拒,重推
+  `--features caligo-bridge/research` 后握手 PASS);
+- 序列逐项命中预测:4×op=0 克隆(submit)→ **+417ms op=4 门查询(答 0)→
+  consumer_result{tag:16, err_code:0, err_str:""} → op=3 销毁**;
+- tag=16 = 0x10 精确匹配 73bd6c 约定;err_code=0 = 服务器受理(成功);
+  err_str 空 = 成功无错文(符合预期);
+- **送达验证**:群 263402786 seq 401041"time 1791688411 bot uid 文本
+  'N3R34 v4 consumer probe'"(OneBot get_group_msg_history);
+- 序号:--g3-send-seq auto 计至 3(g3-seq-state.txt 复用);
+- 遗留(非阻塞):extra(73bd6c arg6,&rbp-0x40)读到乱码(疑似 [box+0x38]
+  非 string 或 0x32c4 非 string ctor —— msgUid 提取待下一轮精化;
+  err_code/err_str 主通道已够 retCode 判定)。
+
+### 意义与下一步
+- **retCode 通道闭环**:裸调 732A80 + arg5 自带 delegate = 完整响应消费者
+  路径;N3 发送受理判定(errCode)现场可用;@ 重测的前提达成;
+- v5 候选:extra/msgUid 精化(box+0x38 语义)、writer 字段解析(capture+8
+  sp 对)、SendMsgResult 完整字段;以及把该消费者路径接入 N3 常驻
+  native_session 的 SendAcceptance 判定。
+## 2026-10-11(三十六):v5 双发 —— extra=span 解码;@ 拒因破案:1006501"网络连接异常!"(30.5s 无 ack)
+
+### N3R35 基线(n3res11,普通群发;err_code=0 复现)
+- consumer_result{tag:16, err_code:0, err_str:"", **extra_hex:""**} +417ms;
+- extra 定案:0x32c4 = **span 构造器**([box+0x38] = {begin,end} 指针对,
+  0x38aa 分配 + 0x38e6 拷贝 → {begin,end,cap_end} 0x20B 对象)——v4 的
+  "乱码" = 旧 __qq-string 布局误读;成功路径 span 空(len 0)合法;
+- 送达 seq 401115;v5 探针增量:span 解读 + 原始 qword 诊断位。
+
+### N3R36 @ 重测(n3res12;@=u_KxYzu_qQPbCC-Ca8mLteVA/uin 3089665724;八轮归档后首次 retCode 可见)
+- **完整生命周期与普通消息无异**:4×op=0 克隆 → 提交 → 等待;
+- **+30.5s(30511ms)op=4 → consumer_result{tag:16, err_code:1006501,
+  err_str:"网络连接异常!"} → op=3**;消息未送达(群历史无 N3R36);
+- errStr 中文 UTF-8 经 read_qq_string + JSON 转义完整解码(串读取器现场验证);
+- **"静默拒"真相**:客户端把 @ 消息正常提交进响应等待,30.5s 无服务器
+  ack → 本地超时分类 1006501("网络连接异常!")。不是客户端丢弃
+  (克隆/提交全走),不是即时服务端拒码 —— 服务器(或 transport)对
+  该消息**不 ack**;
+- 超时常量实测 ~30s(旧静态分析猜 180s 不符);
+- 实例 25072 全程存活,OneBot 正常(两次注入后)。
+
+### 下一步(@ 破案续)
+- 对照实验:SnowLuma(同进程原生后端)发 @ 是否送达 —— 若送达,抓其
+  wire body 与我们 r20 形状逐字节比对(at1 时代 body_len 306 vs 本次 300,
+  差异在文本长度;@ elem 本体待对照);
+- 或 hook/捕获真实客户端 @ 发送的 body(g2 族工具);retCode 消费者已就位,
+  任何形状修正的验证成本 = 一次单发。
+## 2026-10-11(三十七):@ 攻坚 v6–v12 + wirecap 钩子;@ 仍 1006501;实例第三次损失
+
+### @ 实验矩阵(全部 = 30.5s 无 ack → 1006501"网络连接异常!";实例存活至 v12 前)
+- v6(n3res13):@文本加 @ 前缀+尾空格、f12 去 f5/f11、attr len = UTF-16 units
+  (真实件 18 units 实测)、顺序 Attr→at→rest→9→37 —— 1006501;
+- v7(n3res14):elem37 换真实 88B(N3R37 堆转储,protobuf 遍历器逐字段核对;
+  r28 125B 仿件 f19 带 f1:6 与多余全零字段属构造错误)+ 恢复元素16
+  (v6 误删;真实值 {2:"Stella",3:1,5:0,7:"AI朋友"})—— 1006501;
+- v8(n3res15):+ CH(r16 老规格 10 键含 f12)—— 1006501;
+- v9(n3res16):CH 改 N3R37 记录实测 9 键 {1:82,3:1,4:divSeq,5:seq,6:ts,7:1,
+  29:395247,30:1,32:r64}(**有 f3:1、无 f12;f5 = seq 非 random** —— r16
+  老规格两处被真实件否定)—— 1006501;
+- v10(n3res16,91 变体):**零克隆** —— [svc+0x60] 瞬时 null(环境抖动;
+  随后 plain 复测 6 mgr_calls 全过)= 无效轮;
+- v12(n3res19,串路由 Grp{1: "263402786"}):**注入期间实例死亡**(见事故)。
+
+### wirecap 钩子(n3res18;工具沉淀)
+- 补丁 732A80 两个直接调用点(0x732a3e/0x7333e6,各 5B E8)→ trampoline
+  (g3::trampoline_bytes 复用:call capture(a1..a6) 后 jmp 732A80 入口);
+  capture 转储 (svc, cmd, body hex) JSONL;RPM-self 读;文件锁;幂等装填;
+- **我们的裸调不经调用点(直调)→ 零风险自扰**;hook 安装后 N3R44 plain
+  err_code=0 正常(无副作用);
+- **决定性发现:SnowLuma 的发送完全不经过 732A80 两个调用点**(N3R45 @ 与
+  N3R46 plain 送达但零捕获)—— SnowLuma/NapCat 走另一条原生发送路径。
+  "同路径对照"前提作废;真实 732A80-path @ wire body 仍未见(需真客户端
+  GUI @ 发送 + 主账号 heap 扫描,或 qqxlog 解码);
+- 1006501 定性:客户端本地错误表("网络连接异常!";1006502="发送异常!"),
+  0x72a8a0 = 错误表构造器;传输层 0x1b421ba 内 30s 常量实测
+  (`mov ebx,0x1E` + ms/1000)—— 30.5s 无匹配响应 = 服务器对 732A80-path 的
+  @ body 静默不 ack(错误应答若到达会走同一路由进 delegate)。
+
+### 事故(第 3 次损失;12 号注入)
+- v12 注入(n3res19 = wirecap 重装 + 串路由 @)期间进程 25072 消失,
+  handshake 未完成(v12-report 空);死亡点 = DLL 加载/远程线程早期;
+- **wirecap 防护缺陷(已修)**:重装时仅查 E8 字节,已补丁站点(指向旧
+  trampoline)误通过重补 —— 修正为校验完整 5B(E8 + rel32 指向 732A80);
+- 死因未定案:重补丁路径存疑(近因),SnowLuma/风控亦可能;诚实记为
+  未定案。**前一次成功活动 = 12:03:22 N3R44 err_code=0(retCode 通道完好)**。
+- 现场纪律 v3 增补:①代码补丁类探针(wirecap)每次注入前必须核对其
+  幂等防护覆盖"已补丁"状态;②同一 session 注入数达 10 即停,未再评估。
+
+### 状态与下一步
+- 实例 25072 死亡,SnowLuma 宿主需用户重启;重启后**勿立刻重注**,先
+  OneBot 健康 + plain err_code 基线;
+- retCode 通道结论不变(v4 定案,7 次现场复现);
+- @ 谜题状态:body 已对齐存储记录 + CH 两式 + 串路由,全 1006501;
+  剩余假设:①真实 732A80-wire 与存储记录存在未复制差异(需主账号 GUI
+  @ + heap 扫描);②服务器对 legacy-path @ 静默弃(风控类,可能无解);
+- qqxlog 解码器(NTQQ 日志)可作下一离线工具(需独立格式研究)。
+## 2026-10-11(三十八):wirecap 触发两次实例损失,钩子路线放弃;转主账号 heap 扫描
+
+### 崩溃链(诚实定案)
+- 崩溃 #1(实例 10324,n3res20 + OOB 版 wirecap):用户 GUI 操作时死亡。
+  根因 = **我的代码缺陷**:cmd 长形态分支对 16B 头切 lh[16..24] → panic →
+  extern "system" abort。732A80 为通用 SSO 通道,GUI 流量长 cmd 即触。
+- 崩溃 #2(实例 40432,n3res21 修复版):**窗口最大化即崩**。OOB 已修、
+  capture 全路径审计无 panic、无分配格式化 —— 主嫌疑 = **trampoline 首次
+  穿越本身**(g3::trampoline_bytes 的 call capture + jmp original 模式;
+  该设计此前只在我们自己进程单测过,QQ 的 CFG/CET 缓解下 call→jmp
+  shadow-stack 失配可即时终止;两次崩溃均为 GUI 触发包装器首次执行)。
+  裸调直调不经调用点 → 我们的发送 8 次全存活 —— 完全吻合。
+- **定案:调用点补丁类钩子在 QQ 现场不可用(纪律 v4:补丁类插桩 =
+  slot7 级风险,整体否决)**。uninstall 例程已实现(--g3-send-ch 93 模式,
+  写回原始 5B,幂等)。
+
+### 复盘:40432 注入的卸载尝试
+- 对 40432 的 n3res22 卸载注入落空 —— 进程已死(OpenProcess 失败,
+  handshake 未完成)。当前仅 33736(主账号,昨日 23:33 起)存活。
+
+### 转路线:零注入主账号 heap 扫描(工具 wirebody_scan.py 已备)
+- 原理:主账号 GUI @ 发送走标准 732A80 管线,wire body 缓冲在应答后
+  释放但字节通常残留于空闲块(r16 时代 capture-main-group-body 同法成功);
+- 流程:用户在主账号 GUI 发 @ 哨兵消息(CAPWIRE47)→ 扫 33736 →
+  按 protobuf 顶层形状分类各命中 → 取 wire body 与我们 v9 形状比对;
+- 前置:bot 实例重启(OneBot 恢复),重注前先 plain 基线;**不再装钩子**。
+## 2026-10-11(三十九):CAPWIRE47 主账号真体取证;v13 仍拒;@ 谜题终局判定
+
+### 主账号(33736,732A80 真实路径)@ 件记录取证(wirebody_scan.py,CAPWIRE47 哨兵)
+- 27 命中 → 4 份同内容存储记录;at-elem 真实形状(732A80 路径权威):
+  f12 = {3:2, 4:uin, **5:0**, 9:peerUid}(f5 存在!N3R37/SnowLuma 异路径无 f5);
+  at 文本 "@Stella" 无尾空格(空格在 rest 头);attr13B len = UTF-16 units ✓;
+  **elem37 = f1:6 家族(r28 125B 常量本是对的)**;顺序 = Attr → 37 → 9 → at
+  → **Rich.f11=0** → rest → 元素16(发送者信息);Attr f9 = "宋体";
+  CH = **10 键含 f12=divSeq|1<<63**(r16 规格对本路径正确;f5 = seq)。
+- **两路径形状系统性分歧**(SnowLuma vs 732A80):f5 有无、elem37 家族、
+  CH 键集、f11 —— 此前 v6/v7/v9 按 N3R37(SnowLuma)修正 @ 全部修错了方向。
+
+### v13(n3res23,全量回滚真路径形状:f5:0 + r28 elem37 + 真顺序 + f11=0 + 10键CH)
+- **仍 1006501(+30.5s 无 ack)**;实例健康。形状假设空间穷尽:
+  at-elem 三参照(SnowLuma 记录/主账号记录/r16 wire 规格)× CH 两式 ×
+  路由两式 × 顺序两式,10+ 变体全测。
+
+### @ 谜题终局判定(诚实结论)
+- **服务器对 legacy-732A80-path 的 @ 消息静默不 ack**,与 body 形状无关
+  (真路径形状逐字节对齐后依然);判因在 body 之外的包级/服务器侧
+  (session 级 capability、包框架、或风控灰度)——以现有无钩子手段不可达;
+- wirecap 钩子(唯一能看到 wire 的手段)已因两次实例损失永久退役;
+  qqxlog 解码器 = 可选后续离线工程;
+- **retCode 通道价值不受影响**:plain errCode=0 全程 8 次复现;@ 的
+  拒绝也被通道如实上报(1006501)—— 通道本身就是本轮最大成果;
+- **@ 生产建议**:经 SnowLuma/OneBot 路径(send_group_msg + at,已证送达
+  N3R37/45);legacy 732A80-path @ 归档为"服务器侧静默弃"负结果。
+- scope 文档"重定位 @ 阻塞于响应 retCode"任务关闭:retCode 已通,
+  @ 拒因已测得(1006501 无 ack),形状空间已穷尽。
+
+### 现场状态
+- 实例 14632(13:16 起)健康,errCode 通道工作;今日注入 16 次、实例损失
+  4 次(2 次定案为 wirecap 缺陷/机制,1 次风控踢,1 次r1契约错位);
+- 新工具:wirebody_scan.py(主账号 heap 扫描)、wirecap(uninstall 模式)、
+  protobuf 遍历器、pb-walker 分类器。
+## 2026-10-11(四十):N4 接线 —— retCode 消费者闭环进常驻会话层
+
+### 消费者 → 账本全链(纯进程内测试全绿;待 resident 现场跑)
+1. **native_response**:新增 `ResponseOutcome::BusinessAccepted`(第 4 类;
+   版本门理由:计划 §178"ACK 不能变成业务成功"要求 ack-without-msgUid 与
+   BusinessSuccess 严格分立;field v4–v13 实证通道交付此形态);
+2. **consumer_probe v6**:per-send cookie delegate(storage0/1 = cookie 16B
+   原样;manager op=0 克隆已复制 storage → QQ 侧堆块携带 cookie 原路归还)+
+   进程级响应槽 RESPONSE_SLOT + drain_responses();invoke 从克隆块 RPM 读回
+   cookie 入槽(零 cookie = 诊断流只留 JSONL);init(report,wrapper) 登记;
+3. **g3_ops**:submit 按 cookie 构建消费 delegate(research 分支;default =
+   空回调)—— 发送即注册响应消费者,不再依赖独立探针流;
+4. **native_resident**:adapter 启动时 consumer init;`drain_send_responses()`
+   = 槽 → session.on_response → take_terminal;映射 code==0 → BusinessAccepted
+   → SendOutcome::Success{native_id:None}(上层按"未关联"处理),code!=0 →
+   BusinessRejected → Failure{retCode/errStr};
+5. **resident**:泵线程每拍 `drain_send_responses()`(锁序 adapter→core);
+   request 状态 SendPending → Done;结果经既有 take_results → IPC 上行。
+
+### 测试
+- cookie_delegate_roundtrip_via_slot:克隆合同(storage 复制 + 对写入)+
+  门极性(op=4 答 0)+ 响应归还 cookie 原样 —— 全周期纯进程内验证;
+- zero_cookie_stays_out_of_slot:诊断流不入槽;
+- 全仓 default 23 套件 + research 58+7+7+14 全绿。
+
+### 下一步(现场)
+- resident 模式现场跑(caligod + IPC):daemon 发送 → Dispatched → QQ 响应 →
+  BusinessAccepted/BusinessRejected 上行 —— N4 发送业务结果判定闭环;
+- 前置:实例 14632 健康;注入密度纪律(今日已 16 次,建议明日执行)。
+## 2026-10-11(四十一):N4 收口冲刺 —— 全链到 NativeStarted;响应腿未及验证;实例第 5 次损失
+
+### 现场链路(全链首次贯通到原生调用)
+- caligod(token-file 模式)+ n3res24 resident 注入:worker 连接 → Hello →
+  **gen-1 attach ✓** → bootstrap Ready → CPB 基线(4015 objs)→ **事件上行
+  230 sent / 84 acked**(接收路径完整工作);
+- daemon send:SendText → **send_accepted(Queued)** → 派发 → **NativeStarted**
+  —— G3NativeOps FFI + 消费 delegate 提交在 QQ 内真实执行;
+- **gen 合同实证**:第二次 worker 报 gen=2 → daemon attach 拒绝(T05 反劫持
+  门按设计工作;同 QQ 进程 = 同代次);gen=1 重连 = 幂等恢复 → actor 复活
+  (Degraded → Active)—— recovery 契约现场验证;
+- daemon 干净收停(stopped;journal 保留)。
+
+### 未闭合:响应腿
+- **实例 14632 死亡**(第 5 次;17 号注入)——死亡窗口 = n4r3 派发后、
+  响应到达前(consumer_result = 0;状态冻结 NativeStarted);
+- 无 WER 事件(静默终止;与 g3 流 fail-fast 0xc0000409 模式不同)——
+  死因未定案。候选:响应路径 consumer_invoke(resident 模式首测)、
+  常驻泵线程与 QQ 分发线程交互、session 状态累积、外部因素;
+- 与 g3 流差异:同 invoke 代码在 g3 流 8 次存活 —— resident 模式新增
+  变量 = 泵线程 FFI + CPB 扫描 + 会话状态。
+
+### 状态与收口(诚实)
+- **MVP 完成度:代码 100%(全周期单测绿);现场 80% —— 到 NativeStarted,
+  响应腿被实例不稳定性阻断**;
+- 今日注入 17 次、实例损失 5 次 —— 远超一切纪律线;本 session 现场工作
+  **硬停**。下一次(隔日、新实例、低密度):
+  ①plain 基线;②resident 单独跑(观察存活);③daemon 单发一次 → 响应腿
+  判定;④若再死:crash dump 配置(SnowLuma 宿主werодавитель)后重试;
+- 备选路径:resident 模式的响应腿也可经「g3 直调流 + 槽 drain 脚本」
+  离线验证(不走 daemon),作为低风险对照。
+
+### 提交
+- 61f9d19 = N4 接线五件套(代码完成);本节 = 现场冲刺记录。

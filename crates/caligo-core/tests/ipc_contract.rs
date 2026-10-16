@@ -4,10 +4,11 @@
 //! K4 加入队列满、迟到回执、core 崩溃重连等场景)。
 
 use caligo_core::ipc::{
-    encode_frame, validate_hello, FrameDecoder, FrameError, HandshakeExpectation, Hello, HelloAck,
-    MAX_FRAME_SIZE, PROTOCOL_VERSION,
+    encode_frame, validate_bridge_hello_v3, validate_hello, EventPayload, FrameDecoder, FrameError,
+    HandshakeExpectation, Hello, HelloAck, MAX_FRAME_SIZE, PROTOCOL_VERSION,
 };
 use caligo_core::CORE_BUILD;
+use caligo_model::ipc_v3::{BUSINESS_PROTOCOL_REVISION, PROTOCOL_VERSION_V3};
 
 fn sample_hello() -> Hello {
     Hello {
@@ -18,6 +19,28 @@ fn sample_hello() -> Hello {
         account: "10001".into(),
         capabilities: vec!["probe-readonly".into()],
     }
+}
+
+#[test]
+fn old_event_payloads_decode_without_onebot_projection() {
+    let payload: EventPayload = serde_json::from_value(serde_json::json!({
+        "event_seq": 1,
+        "session_generation": 2,
+        "session": {"account":"10001", "kind":"group", "peer":"123456"},
+        "direction": "incoming",
+        "sender": "opaque-sender",
+        "native_id": "native-1",
+        "text": "hello",
+        "platform_time": null,
+        "observed_at_unix_ms": 3,
+        "source": "recv"
+    }))
+    .unwrap();
+    assert!(payload.onebot_projection.is_none());
+    assert!(serde_json::to_value(payload)
+        .unwrap()
+        .get("onebot_projection")
+        .is_none());
 }
 
 fn expectation() -> HandshakeExpectation<'static> {
@@ -148,6 +171,38 @@ fn handshake_rejects_wrong_account_when_bound() {
     ));
 }
 
+#[test]
+fn bridge_business_protocol_revision_is_checked_separately_from_ipc_v3() {
+    assert!(validate_bridge_hello_v3(
+        PROTOCOL_VERSION_V3,
+        BUSINESS_PROTOCOL_REVISION,
+        caligo_core::ipc::Role::Bridge,
+        caligo_core::ipc::Role::Bridge,
+        CORE_BUILD,
+    )
+    .is_ok());
+    assert!(matches!(
+        validate_bridge_hello_v3(
+            PROTOCOL_VERSION_V3,
+            BUSINESS_PROTOCOL_REVISION - 1,
+            caligo_core::ipc::Role::Bridge,
+            caligo_core::ipc::Role::Bridge,
+            CORE_BUILD,
+        ),
+        Err(caligo_core::ipc::RejectReason::BusinessProtocolRevisionMismatch { .. })
+    ));
+    assert!(matches!(
+        validate_bridge_hello_v3(
+            PROTOCOL_VERSION_V3,
+            BUSINESS_PROTOCOL_REVISION + 1,
+            caligo_core::ipc::Role::Bridge,
+            caligo_core::ipc::Role::Bridge,
+            CORE_BUILD,
+        ),
+        Err(caligo_core::ipc::RejectReason::BusinessProtocolRevisionMismatch { .. })
+    ));
+}
+
 // ---- K4-D5 前置(L12):增量有界解码 ----
 
 #[test]
@@ -170,7 +225,9 @@ fn l12_decoder_buffer_stays_bounded_under_large_chunks() {
     // 100 个合法帧一次喂入:内部组装缓冲必须远小于输入总量。
     let mut stream = Vec::new();
     for i in 0u32..100 {
-        stream.extend_from_slice(&caligo_core::ipc::encode_frame(format!("f{i}").as_bytes()).unwrap());
+        stream.extend_from_slice(
+            &caligo_core::ipc::encode_frame(format!("f{i}").as_bytes()).unwrap(),
+        );
     }
     let mut d = caligo_core::ipc::FrameDecoder::new();
     let mut out = Vec::new();

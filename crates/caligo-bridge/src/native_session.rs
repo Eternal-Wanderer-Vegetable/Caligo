@@ -14,9 +14,9 @@
 //! - 代次失效后旧结果只审计;关闭排空显式 Unknown,不自动重发;
 //! - Clean 仅在原生侧确认排空时给出,否则 Quarantined(T13)。
 
-use crate::native_response::{
-    Cookie, Completion, ResponseLedger, ResponseOutcome,
-};
+use crate::native_response::{Completion, Cookie, ResponseLedger, ResponseOutcome};
+
+const DEFAULT_RESPONSE_TIMEOUT_MS: u64 = 30_000;
 
 /// 附加证据(调用方已完成门核对后传入;本模块如实登记,不重复核对)。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,7 +66,9 @@ pub enum SessionPhase {
     /// 代次失效(QQ 重登/会话重绑);等待新 proof 重新附加。
     Invalidated,
     /// 已关闭;bool = Clean(原生排空确认)/Quarantined(未确认)。
-    Closed { clean: bool },
+    Closed {
+        clean: bool,
+    },
 }
 
 /// 发送受理分类(受理 ≠ 派发 ≠ 原生开始 ≠ 业务成功)。
@@ -111,7 +113,8 @@ pub trait NativeOps {
     fn probe_ready(&mut self, service_addr: usize) -> Result<(), OpsError>;
     /// 提交一条已编码请求。实现必须:真实调用前核对 ready;返回后不得
     /// 再触碰 body(cookie 所有权语义由真实层定)。
-    fn submit(&mut self, service_addr: usize, cookie: &Cookie, body: &[u8]) -> Result<(), OpsError>;
+    fn submit(&mut self, service_addr: usize, cookie: &Cookie, body: &[u8])
+        -> Result<(), OpsError>;
 }
 
 /// ops 层错误(未发起 = 零原生接触)。
@@ -139,7 +142,9 @@ pub trait SeqSource {
     fn allocate(&mut self) -> Result<u64, std::io::Error>;
 }
 
-impl<P: FnMut(u64) -> Result<(), std::io::Error>> SeqSource for crate::native_response::SeqAllocator<P> {
+impl<P: FnMut(u64) -> Result<(), std::io::Error>> SeqSource
+    for crate::native_response::SeqAllocator<P>
+{
     fn allocate(&mut self) -> Result<u64, std::io::Error> {
         crate::native_response::SeqAllocator::allocate(self)
     }
@@ -179,7 +184,8 @@ impl<S: SeqSource> NativeSession<S> {
         if let Err(OpsError::NotReady(r)) = ops.probe_ready(proof.service_addr) {
             return Err(AttachError::NotReady(r));
         }
-        self.ledger.set_generations(proof.host_generation, proof.session_generation);
+        self.ledger
+            .set_generations(proof.host_generation, proof.session_generation);
         self.proof = Some(proof);
         self.phase = SessionPhase::Ready;
         Ok(())
@@ -204,35 +210,143 @@ impl<S: SeqSource> NativeSession<S> {
             Ok(s) => s,
             Err(e) => {
                 self.counters.allocation_failed += 1;
-                return SendAcceptance::AllocationFailed { reason: e.to_string() };
+                return SendAcceptance::AllocationFailed {
+                    reason: e.to_string(),
+                };
             }
         };
+        let wire_seq = match u32::try_from(seq) {
+            Ok(seq) => seq,
+            Err(_) => {
+                self.counters.allocation_failed += 1;
+                return SendAcceptance::AllocationFailed {
+                    reason: "client_seq exceeds u32".into(),
+                };
+            }
+        };
+        self.enqueue_send_with_wire_seq(ops, request_id, cookie, wire_seq, body)
+    }
+
+    /// Allocate durably first, then encode with that exact wire sequence,
+    /// preregister, and invoke. Allocation failure prevents encoder/native work.
+    pub fn enqueue_encoded_send<O, F>(
+        &mut self,
+        ops: &mut O,
+        request_id: &str,
+        cookie: Cookie,
+        encode: F,
+    ) -> SendAcceptance
+    where
+        O: NativeOps,
+        F: FnOnce(u32) -> Result<Vec<u8>, String>,
+    {
+        if self.phase != SessionPhase::Ready {
+            return SendAcceptance::NotAttached;
+        }
+        let seq = match self.seq.allocate() {
+            Ok(seq) => seq,
+            Err(error) => {
+                self.counters.allocation_failed += 1;
+                return SendAcceptance::AllocationFailed {
+                    reason: error.to_string(),
+                };
+            }
+        };
+        let wire_seq = match u32::try_from(seq) {
+            Ok(seq) => seq,
+            Err(_) => {
+                self.counters.allocation_failed += 1;
+                return SendAcceptance::AllocationFailed {
+                    reason: "client_seq exceeds u32".into(),
+                };
+            }
+        };
+        let body = match encode(wire_seq) {
+            Ok(body) => body,
+            Err(reason) => {
+                return SendAcceptance::RefusedPreCall {
+                    reason: format!("encode: {reason}"),
+                }
+            }
+        };
+        self.enqueue_send_with_wire_seq(ops, request_id, cookie, wire_seq, &body)
+    }
+
+    /// N4 路径使用 core 已先持久化的唯一序号；bridge 不在此另行分配。
+    pub fn enqueue_send_with_wire_seq<O: NativeOps>(
+        &mut self,
+        ops: &mut O,
+        request_id: &str,
+        cookie: Cookie,
+        wire_seq: u32,
+        body: &[u8],
+    ) -> SendAcceptance {
+        self.enqueue_send_with_timeout(
+            ops,
+            request_id,
+            cookie,
+            wire_seq,
+            Some(DEFAULT_RESPONSE_TIMEOUT_MS),
+            body,
+        )
+    }
+
+    /// N4 dispatch path with the caller's remaining response budget.
+    pub fn enqueue_send_with_timeout<O: NativeOps>(
+        &mut self,
+        ops: &mut O,
+        request_id: &str,
+        cookie: Cookie,
+        wire_seq: u32,
+        timeout_ms: Option<u64>,
+        body: &[u8],
+    ) -> SendAcceptance {
+        if self.phase != SessionPhase::Ready {
+            return SendAcceptance::NotAttached;
+        }
         // 预登记先于发起(计划 §5-2)。登记失败(重复 cookie/request)= 调用方
         // 缺陷,不发起。
-        if let Err(e) = self.ledger.register(request_id, cookie) {
+        if let Err(e) =
+            self.ledger
+                .register_with_timeout(request_id, cookie, Some(wire_seq), timeout_ms)
+        {
             self.counters.refused_pre_call += 1;
-            return SendAcceptance::RefusedPreCall { reason: format!("register: {e:?}") };
+            return SendAcceptance::RefusedPreCall {
+                reason: format!("register: {e:?}"),
+            };
         }
         let proof = self.proof.as_ref().expect("phase Ready implies proof");
         match ops.submit(proof.service_addr, &cookie, body) {
             Ok(()) => {
                 self.counters.native_ops += 1;
                 self.counters.dispatched += 1;
-                SendAcceptance::Dispatched { cookie, seq }
+                SendAcceptance::Dispatched {
+                    cookie,
+                    seq: u64::from(wire_seq),
+                }
             }
             Err(OpsError::PreCall(reason)) => {
                 // 零原生接触;回收账本条目(登记撤销 = 以终态失败终结,上层可见)。
                 self.ledger.complete(
                     &cookie,
-                    ResponseOutcome::TransportFailed { reason: format!("pre-call: {reason}") },
+                    ResponseOutcome::TransportFailed {
+                        reason: format!("pre-call: {reason}"),
+                    },
                 );
                 self.ledger.take_terminal();
                 self.counters.refused_pre_call += 1;
-                SendAcceptance::RefusedPreCall { reason: reason.to_string() }
+                SendAcceptance::RefusedPreCall {
+                    reason: reason.to_string(),
+                }
             }
             Err(OpsError::NotReady(reason)) => {
                 // 未发起;回收登记(可重试语义由上层决定)。
-                self.ledger.complete(&cookie, ResponseOutcome::TransportFailed { reason: format!("not-ready: {reason}") });
+                self.ledger.complete(
+                    &cookie,
+                    ResponseOutcome::TransportFailed {
+                        reason: format!("not-ready: {reason}"),
+                    },
+                );
                 self.ledger.take_terminal();
                 self.counters.not_ready += 1;
                 SendAcceptance::NotReady { reason }
@@ -250,7 +364,11 @@ impl<S: SeqSource> NativeSession<S> {
         if self.phase == SessionPhase::Ready {
             self.phase = SessionPhase::Invalidated;
             self.counters.invalidated += 1;
-            self.ledger.drain(reason).into_iter().map(|(id, _)| id).collect()
+            self.ledger
+                .drain(reason)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
         } else {
             Vec::new()
         }
@@ -264,7 +382,9 @@ impl<S: SeqSource> NativeSession<S> {
             .into_iter()
             .map(|(id, _)| id)
             .collect();
-        self.phase = SessionPhase::Closed { clean: native_drain_confirmed };
+        self.phase = SessionPhase::Closed {
+            clean: native_drain_confirmed,
+        };
         CloseReport {
             clean: native_drain_confirmed,
             unknown_requests: unknown,
@@ -272,9 +392,19 @@ impl<S: SeqSource> NativeSession<S> {
         }
     }
 
-    /// 终态取走(交付给 core;交付后迟到回调转 UnknownCookie 审计)。
+    /// 终态取走(交付给 core);期限 Unknown 保留有界 tombstone 供迟到强回执更正。
     pub fn take_terminal(&mut self) -> Vec<(String, ResponseOutcome)> {
         self.ledger.take_terminal()
+    }
+
+    /// Expire unfinished native responses and return terminal outcomes for
+    /// the resident result channel. Unknown registrations remain bounded
+    /// tombstones for late strong receipts.
+    pub fn expire_responses(&mut self, now: std::time::Instant) -> Vec<(String, ResponseOutcome)> {
+        self.ledger.expire_due(now);
+        let out = self.ledger.take_terminal();
+        self.ledger.prune_tombstones(now);
+        out
     }
 }
 
@@ -309,7 +439,13 @@ mod tests {
     impl FakeOps {
         fn new() -> (Self, Rc<RefCell<Vec<String>>>) {
             let calls = Rc::new(RefCell::new(Vec::new()));
-            (Self { calls: calls.clone(), fail: None }, calls)
+            (
+                Self {
+                    calls: calls.clone(),
+                    fail: None,
+                },
+                calls,
+            )
         }
     }
     impl NativeOps for FakeOps {
@@ -318,11 +454,62 @@ mod tests {
             Ok(())
         }
         fn submit(&mut self, svc: usize, cookie: &Cookie, body: &[u8]) -> Result<(), OpsError> {
-            self.calls.borrow_mut().push(format!("submit:{svc}:{}:{}", cookie.0[0], body.len()));
+            self.calls
+                .borrow_mut()
+                .push(format!("submit:{svc}:{}:{}", cookie.0[0], body.len()));
             match &self.fail {
                 Some(e) => Err(e.clone()),
                 None => Ok(()),
             }
+        }
+    }
+
+    #[cfg(feature = "research")]
+    struct InlineConsumerOps;
+
+    #[cfg(feature = "research")]
+    impl NativeOps for InlineConsumerOps {
+        fn probe_ready(&mut self, _svc: usize) -> Result<(), OpsError> {
+            Ok(())
+        }
+
+        fn submit(&mut self, _svc: usize, cookie: &Cookie, body: &[u8]) -> Result<(), OpsError> {
+            assert_eq!(body, b"BODY");
+            let src = crate::consumer_probe::build_cb_for_cookie(cookie);
+            let mut delegate = [0u64; 4];
+            // Model the native manager's clone -> inline response -> destroy
+            // sequence while NativeSession::submit is still on the stack.
+            unsafe {
+                crate::consumer_probe::consumer_manager(
+                    delegate.as_mut_ptr().add(2).cast(),
+                    0,
+                    src.as_ptr().cast_mut().cast(),
+                    0x10,
+                    delegate.as_mut_ptr().cast(),
+                );
+                let invoke: unsafe extern "system" fn(
+                    *mut core::ffi::c_void,
+                    u32,
+                    i32,
+                    *const core::ffi::c_void,
+                    *const core::ffi::c_void,
+                ) = core::mem::transmute(delegate[3] as usize);
+                invoke(
+                    delegate.as_mut_ptr().cast(),
+                    0x10,
+                    0,
+                    core::ptr::null(),
+                    1usize as *const core::ffi::c_void,
+                );
+                crate::consumer_probe::consumer_manager(
+                    delegate.as_mut_ptr().cast(),
+                    1,
+                    delegate.as_ptr().cast_mut().cast(),
+                    0x10,
+                    core::ptr::null_mut(),
+                );
+            }
+            Ok(())
         }
     }
 
@@ -335,8 +522,14 @@ mod tests {
     fn attach_gate_failure_means_zero_native_ops() {
         let (mut ops, calls) = FakeOps::new();
         let mut s = NativeSession::new(seq_from(1));
-        let bad = AttachProof { anchor_candidates: 2, ..proof() };
-        assert_eq!(s.attach(&mut ops, bad), Err(AttachError::AmbiguousAnchor(2)));
+        let bad = AttachProof {
+            anchor_candidates: 2,
+            ..proof()
+        };
+        assert_eq!(
+            s.attach(&mut ops, bad),
+            Err(AttachError::AmbiguousAnchor(2))
+        );
         assert_eq!(s.phase(), &SessionPhase::Detached);
         assert_eq!(s.counters.native_ops, 0);
         assert!(calls.borrow().is_empty());
@@ -350,17 +543,154 @@ mod tests {
         s.attach(&mut ops, proof()).unwrap();
         assert_eq!(s.phase(), &SessionPhase::Ready);
         let acc = s.enqueue_send(&mut ops, "r1", cookie(1), b"BODY");
-        assert_eq!(acc, SendAcceptance::Dispatched { cookie: cookie(1), seq: 7 });
+        assert_eq!(
+            acc,
+            SendAcceptance::Dispatched {
+                cookie: cookie(1),
+                seq: 7
+            }
+        );
         assert_eq!(s.counters.native_ops, 1);
         assert_eq!(calls.borrow().len(), 2, "探针 + 提交");
         assert_eq!(calls.borrow()[0], "probe");
         assert_eq!(calls.borrow()[1], "submit:4096:1:4");
         // inline 回调(提交已返回、响应先到)→ 终态可取走。
-        let c = s.on_response(&cookie(1), ResponseOutcome::BusinessSuccess { native_id: "m1".into() });
+        let c = s.on_response(
+            &cookie(1),
+            ResponseOutcome::BusinessSuccess {
+                native_id: "m1".into(),
+            },
+        );
         assert!(matches!(c, Completion::Terminated { .. }));
         let done = s.take_terminal();
         assert_eq!(done.len(), 1);
         assert_eq!(done[0].0, "r1");
+    }
+
+    #[cfg(feature = "research")]
+    #[test]
+    fn inline_consumer_callback_is_captured_during_submit_then_applied_once() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let _callback_lock = crate::consumer_probe::TEST_LOCK.lock().unwrap();
+        static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0xC011_BACC_0000);
+        let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        let report = std::env::temp_dir().join(format!("caligo-inline-{generation:x}.jsonl"));
+        let _ = std::fs::remove_file(&report);
+        let wide: Vec<u16> = report
+            .as_os_str()
+            .to_string_lossy()
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        assert!(crate::consumer_probe::leak_ctx(0x180000000, wide.as_ptr(), generation).is_some());
+
+        let mut cookie_bytes = [0u8; 16];
+        cookie_bytes[..8].copy_from_slice(&generation.to_le_bytes());
+        cookie_bytes[8..].copy_from_slice(&0x51u64.to_le_bytes());
+        let cookie = Cookie(cookie_bytes);
+        let mut attach = proof();
+        attach.session_generation = generation;
+        let mut session = NativeSession::new(seq_from(19));
+        let mut ops = InlineConsumerOps;
+        session.attach(&mut ops, attach).unwrap();
+
+        assert_eq!(
+            session.enqueue_send(&mut ops, "inline-request", cookie, b"BODY"),
+            SendAcceptance::Dispatched { cookie, seq: 19 }
+        );
+        assert!(
+            !report.exists(),
+            "inline callback must only capture; the worker owns report IO"
+        );
+
+        let captured = crate::consumer_probe::drain_responses();
+        assert_eq!(captured, vec![(cookie, 0, String::new())]);
+        assert!(matches!(
+            session.on_response(&cookie, ResponseOutcome::BusinessAccepted),
+            Completion::AcceptedUnconfirmed { request_id } if request_id == "inline-request"
+        ));
+        assert_eq!(session.ledger().pending().len(), 1);
+        assert_eq!(
+            session.invalidate("inline sample closed"),
+            vec!["inline-request".to_string()]
+        );
+        assert_eq!(session.ledger().pending().len(), 0);
+
+        let report_text = std::fs::read_to_string(&report).unwrap();
+        assert!(report_text.contains("\"consumer_result\""));
+        assert!(report_text.contains("\"manager_calls\":2"));
+        let _ = std::fs::remove_file(report);
+    }
+
+    #[test]
+    fn core_allocated_wire_seq_is_registered_and_not_reallocated_by_bridge() {
+        let (mut ops, calls) = FakeOps::new();
+        let mut s = NativeSession::new(seq_from(100));
+        s.attach(&mut ops, proof()).unwrap();
+        assert_eq!(
+            s.enqueue_send_with_wire_seq(&mut ops, "core-rid", cookie(20), 77, b"BODY"),
+            SendAcceptance::Dispatched {
+                cookie: cookie(20),
+                seq: 77
+            },
+        );
+        assert_eq!(s.ledger().wire_seq_for_request("core-rid"), Some(77));
+        assert_eq!(
+            s.enqueue_send(&mut ops, "legacy-test", cookie(21), b"BODY"),
+            SendAcceptance::Dispatched {
+                cookie: cookie(21),
+                seq: 100
+            },
+            "显式 core 序号路径不消耗 bridge allocator",
+        );
+        assert_eq!(calls.borrow().len(), 3, "probe + 两次提交");
+    }
+
+    #[test]
+    fn durable_allocate_precedes_encode_and_same_sequence_is_registered_and_submitted() {
+        struct OrderedOps(Rc<RefCell<Vec<String>>>);
+        impl NativeOps for OrderedOps {
+            fn probe_ready(&mut self, _: usize) -> Result<(), OpsError> {
+                self.0.borrow_mut().push("probe".into());
+                Ok(())
+            }
+            fn submit(&mut self, _: usize, _: &Cookie, body: &[u8]) -> Result<(), OpsError> {
+                let seq = u32::from_le_bytes(body.try_into().unwrap());
+                self.0.borrow_mut().push(format!("submit:{seq}"));
+                Ok(())
+            }
+        }
+        let order = Rc::new(RefCell::new(Vec::new()));
+        let persist_order = order.clone();
+        let seq = SeqAllocator::new(
+            12,
+            Box::new(move |value| {
+                persist_order.borrow_mut().push(format!("persist:{value}"));
+                Ok(())
+            }),
+        );
+        let mut session = NativeSession::new(seq);
+        let mut ops = OrderedOps(order.clone());
+        session.attach(&mut ops, proof()).unwrap();
+        let encode_order = order.clone();
+        let accepted =
+            session.enqueue_encoded_send(&mut ops, "durable-r", cookie(55), move |wire_seq| {
+                encode_order.borrow_mut().push(format!("encode:{wire_seq}"));
+                Ok(wire_seq.to_le_bytes().to_vec())
+            });
+        assert_eq!(
+            accepted,
+            SendAcceptance::Dispatched {
+                cookie: cookie(55),
+                seq: 12
+            }
+        );
+        assert_eq!(session.ledger().wire_seq_for_request("durable-r"), Some(12));
+        assert_eq!(
+            *order.borrow(),
+            vec!["probe", "persist:12", "encode:12", "submit:12"]
+        );
     }
 
     /// PreCall 拒绝:零原生接触、终态失败、无悬挂条目。
@@ -396,9 +726,10 @@ mod tests {
     #[test]
     fn allocation_failure_blocks_dispatch() {
         let (mut ops, calls) = FakeOps::new();
-        let mut s = NativeSession::new(SeqAllocator::new(1, Box::new(|_| {
-            Err(std::io::Error::other("disk full"))
-        })));
+        let mut s = NativeSession::new(SeqAllocator::new(
+            1,
+            Box::new(|_| Err(std::io::Error::other("disk full"))),
+        ));
         s.attach(&mut ops, proof()).unwrap();
         let acc = s.enqueue_send(&mut ops, "r1", cookie(4), b"x");
         assert!(matches!(acc, SendAcceptance::AllocationFailed { .. }));
@@ -417,10 +748,18 @@ mod tests {
         assert_eq!(drained, vec!["in-flight".to_string()]);
         assert_eq!(s.phase(), &SessionPhase::Invalidated);
         // 旧 cookie 迟到 → UnknownCookie 审计(条目已排空)。
-        let c = s.on_response(&cookie(5), ResponseOutcome::BusinessSuccess { native_id: "m".into() });
+        let c = s.on_response(
+            &cookie(5),
+            ResponseOutcome::BusinessSuccess {
+                native_id: "m".into(),
+            },
+        );
         assert_eq!(c, Completion::UnknownCookie);
         // Invalidated 状态不接受新发送。
-        assert_eq!(s.enqueue_send(&mut ops, "r2", cookie(6), b"x"), SendAcceptance::NotAttached);
+        assert_eq!(
+            s.enqueue_send(&mut ops, "r2", cookie(6), b"x"),
+            SendAcceptance::NotAttached
+        );
     }
 
     /// 关闭:未终态 → Unknown;Clean/Quarantined 如实;关闭后零受理。
