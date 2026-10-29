@@ -1,59 +1,52 @@
 # Caligo
 
-自有 Rust QQ 接入项目:自有桥接(bridge)官方 QQ 会话 → 自有 Rust 核心(core)→ 自有 OneBot V11。
-运行链路不依赖 SnowLuma、NapCat、LLBot、PMHQ 等第三方协议端或专有内核;官方 QQ 自身承担登录、签名、会话与网络通信。
+自有 Rust QQ 接入项目：官方 QQ 会话 → 自有 bridge → 自有 core → OneBot V11。
+官方 QQ 承担登录、签名、会话与网络通信；产品运行链路采用自有实现。
 
-> 当前状态(2026-10-07,K4 阶段):**项目拥有真实收发的研究原型能力**(K3 群/私聊收发有执行者验收记录),但**注入式现场路线已冻结**——六次测试实例损失后(`local-evidence/k3-g/final-boundary.md`),对存活 QQ 的注入类探针暂停;K3 文档中"生产层定型"的表述由 `docs/research/k4-execution-scope.md` 修正为"能力证明,非生产定型"。K4 按 `docs/plans/2026-10-07-gitnexus-plan-caligo-k4-runtime-recovery.md` 重建:宿主合法初始化 → 常驻 bridge → 命名管道 → 常驻 core;现场部分保持暂停直至 D6 准入。普通构建下 `inject`/旧 onebotd/相关 DLL 导出默认拒绝(`--features research` 仅供自建宿主离线研究)。
+**项目仍处研究与整合阶段，生产 MVP 尚未验收。** 最新状态与证据入口见
+[进度记录](progress.md)，产品工作块见 [feature_list.json](feature_list.json)。
+历史研究结果和生产准入按 [原生研究边界](docs/guides/native-research.md)区分。
 
-> 当前状态(2026-10-09,N 阶段开始):上一轮 P0–P9 合同的历史验收见 `docs/execution/2026-10-08-native-contract-recovery/ledger.md`。其中**已完成**:G1 准入、G2 接收注册机制(现场闭环,记录级字段映射仍 blocked)、G3 私聊/群聊文本发送(field-proven-research,r9/r18 送达+渲染)、IPC v3 身份/epoch/恢复、seq/random 研究工具(r19 单调计数)、slot7 插桩路线整体否决(2/2 实例损失)。**未完成(转入 N 计划)**:生产常驻 native bridge、业务响应消费者(retCode 可观测)、完整接收事件、OneBot 网络层。当前执行计划:`docs/plans/2026-10-09-gitnexus-plan-caligo-snowluma-capability-parity.md`,台账 `docs/execution/2026-10-09-snowluma-parity/ledger.md`。发送 wire 权威源 = `caligo-model::qq_wire::send`(field-proven golden fixtures);普通文本支持域仍限 QQ `9.9.33-52230` 单版本,元素37 静态常量未证明跨版本有效。
+## 从这里开始
 
-## 仓库结构
+- 首次阅读：[文档索引](docs/README.md)，按任务查专题、计划或验收记录。
+- 参与开发：[开发与验证指南](docs/guides/development.md)。
+- Agent 工作：[AGENTS.md](AGENTS.md)，随后读进度与交接。
+- 模块与调用链：[架构指南](docs/guides/architecture.md)。
 
-| 路径 | 说明 |
-|---|---|
-| `2026-10-06-gitnexus-plan-caligo-native-qq-kernel.md` | 第一阶段实施计划(K0-K6 逐阶段门槛) |
-| `docs/research/environment.json` | K0 环境/工具链/模块摘要记录 |
-| `docs/research/source-register.md` | 来源登记(采用/参考/拒绝/待审,含固定版本) |
-| `docs/research/test-scope.md` | 测试范围与唯一正文约定(真实账号只在本机 local-evidence) |
-| `docs/research/recovery-notes.md` | 恢复办法与实验收尾流程 |
-| `docs/research/native-entry-contract.md` | K1 入口契约(候选入口、证据、未知项) |
-| `docs/research/loading-route-decision.md` | 加载路线决定(自有 Rust loader,拒绝文件修补) |
-| `docs/research/probe-build-record.md` | probe 构建与测试记录 |
-| `docs/research/identity-invalidation-observations.md` | 身份/失效实验设计与台账 |
-| `docs/contracts/version-adapter-manifest.json` | 单版本模块摘要适配清单 |
-| `crates/caligo-model` | 数据模型:账号、会话、方向、代次 |
-| `crates/caligo-bridge` | 进程内 bridge(cdylib;K4-D0 起宿主入口默认门控,新增 `gate`/`resident`) |
-| `crates/caligo-core` | 进程外核心(library;IPC 帧/握手,K4 增加 runtime/journal/transport) |
-| `crates/caligo-cli` | CLI:`process` / `exports` / `verify-manifest` / 已冻结的 `inject` |
-| `docs/research/k4-execution-scope.md` | K4-D0 遗留路线冻结与门控记录 |
-| `docs/research/k4-incident-register.md` | K4-D1 事故台账与资源审计 |
-| `docs/research/k4-bootstrap-contract.md` | K4-D2 bootstrap 候选契约 |
+## 本地验证
 
-## 构建
+需要 Windows x64、Rust MSVC 工具链（版本由 [rust-toolchain.toml](rust-toolchain.toml) 固定），
+文档检查需要 Node.js。依赖来自 [Cargo.lock](Cargo.lock)，默认离线验证。
 
-```bash
-cargo build --workspace          # 调试构建
-cargo test --workspace           # K4-D0 起含门控/生命周期测试
-cargo build --release --workspace
+```powershell
+.\init.ps1 -Mode docs  # 纯文档检查
+.\init.ps1 -Mode all   # 文档 + 普通构建及 research 离线测试
 ```
 
-需要 Windows x64 + Rust MSVC 工具链(版本见 `rust-toolchain.toml`)。
+验证产物写入 `target-harness/`；脚本行为和单项命令见开发指南。
 
-## probe 用法(只读)
+## 只读 CLI
 
-```bash
-caligo-cli process                                   # 枚举 QQ 进程与 Tencent/.node 模块
-caligo-cli exports <module-path> [--all]             # PE 导出表
+以下为普通构建后的只读入口示例，路径按本机构建目录填写：
+
+```powershell
+caligo-cli process
+caligo-cli exports <module-path> --all
 caligo-cli verify-manifest docs/contracts/version-adapter-manifest.json
 ```
 
-`inject`(旧注入路线)在普通构建中**默认拒绝**(退出码 3);只读子命令不受影响。
-恢复条件与 K4 分阶段准入见 `docs/research/k4-execution-scope.md` §5;
-使用与恢复的历史流程见 `docs/research/recovery-notes.md`。
+版本基线见 [适配清单](docs/contracts/version-adapter-manifest.json)。
+现场使用前阅读原生研究边界与当前交接，不从历史 PID 或旧 DLL 恢复实验。
 
-## 纪律(摘自计划)
+## 仓库内的 skill
 
-- 模块摘要不匹配 → 拒绝 attach/发送,不猜偏移。
-- 运行中的 QQ 实例不会被自动选为实验目标;每次实验由执行者指定并记录。
-- 真实账号、聊天内容、QQ 二进制不入库;现场证据只存本机 `local-evidence/`(已 gitignore)。
-- 在入口契约闭合(ABI/线程/生命周期)前,不调用任何发送入口。
+按指定命令安装：
+
+```powershell
+npx skills add walkinglabs/learn-harness-engineering --skill harness-creator
+```
+
+安装入口：[harness-creator/SKILL.md](.agents/skills/harness-creator/SKILL.md)，
+来源锁定：[skills-lock.json](skills-lock.json)。项目规则在 AGENTS 与专题指南中维护，
+上游 skill 作为工具资源保留。

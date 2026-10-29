@@ -45,35 +45,37 @@ pub mod probe_code {
 
 pub mod asyncrun;
 #[cfg(feature = "research")]
+pub mod consumer_probe;
+#[cfg(feature = "research")]
 pub mod daemon_client;
-pub mod native_abi;
-pub mod native_handle;
-pub mod native_msf;
-pub mod native_receive;
-pub mod native_response;
-pub mod native_send_sink;
-pub mod native_session;
 pub mod envrun;
 pub mod exec;
-pub mod gate;
-pub mod host_adapter;
-pub mod intr;
-pub mod obs;
-#[cfg(feature = "research")]
-pub mod qq_entry;
-#[cfg(feature = "research")]
-pub mod qq_v8;
 pub mod g1;
 pub mod g2;
 pub mod g3;
 pub mod g3_ops;
 pub mod g3_session;
-#[cfg(feature = "research")]
-pub mod consumer_probe;
+pub mod gate;
+pub mod host_adapter;
+pub mod intr;
+pub mod native_abi;
+pub mod native_handle;
+pub mod native_msf;
+pub mod native_receive;
 #[cfg(feature = "research")]
 pub mod native_resident;
+pub mod native_response;
+pub mod native_send_sink;
+pub mod native_session;
+pub mod obs;
+#[cfg(feature = "research")]
+pub mod qq_entry;
+#[cfg(feature = "research")]
+pub mod qq_v8;
 pub mod register;
 pub mod resident;
+#[cfg(feature = "research")]
+pub mod wirecap;
 
 /// 注册入口结果码。
 #[no_mangle]
@@ -645,10 +647,7 @@ pub unsafe extern "system" fn caligo_qq_entry_bootstrap(ctx: *mut QqEntryCtx) ->
         Ok(handle) => {
             // 存档句柄(daemon 导出取用)+ 唤醒面地址 + 报告路径。
             qq_entry::register_report_path(view.report_path as *const u16);
-            qq_entry::store_entry_handle(
-                handle,
-                qq_entry::wake_trampoline_addr(),
-            );
+            qq_entry::store_entry_handle(handle, qq_entry::wake_trampoline_addr());
             qq_entry_code::OK
         }
         Err(e) => match e {
@@ -671,7 +670,9 @@ pub extern "system" fn caligo_qq_entry_shutdown(wait_ms: u32) -> u32 {
     use qq_entry::EntryError;
     // 先停 daemon worker(若已启动):关闭协议不与管道循环竞争。
     if let Some(startup) = qq_entry::peek_daemon_startup() {
-        startup.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        startup
+            .stop
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
     match qq_entry::shutdown(wait_ms) {
         Ok(()) => {
@@ -748,7 +749,10 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
     ) else {
         return c::ERR_BAD_CFG;
     };
-    let session_generation = v.get("session_generation").and_then(|x| x.as_u64()).unwrap_or(0);
+    let session_generation = v
+        .get("session_generation")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0);
 
     // V8 符号解析(D8 监听器/轮询;每代次一次)。
     let qqnt_base = v
@@ -786,8 +790,11 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
         return c::ERR_NOT_BOOTSTRAPPED;
     };
     let stop = handle.daemon_stop_flag();
-    let resident = Arc::new(Resident::new(QqOwnerAdapter::new(handle), ResidentLimits::default()));
-    let (tx, rx) = std::sync::mpsc::channel::<resident::SendOutcome>();
+    let resident = Arc::new(Resident::new(
+        QqOwnerAdapter::new(handle),
+        ResidentLimits::default(),
+    ));
+    let (tx, rx) = std::sync::mpsc::channel::<resident::ResidentNotice>();
     let (etx, erx) = std::sync::mpsc::channel::<resident::OwnedEvent>();
     // resident 初始化必须在 owner 线程执行(计划 §5.1:宿主 API 前的
     // owner 检查不是形式 —— 远程线程调用会被正确拒绝,D7-b 现场实证)。
@@ -811,8 +818,8 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
                 }
             }
             let _ = r.drain();
-            for outcome in r.take_results() {
-                let _ = tx.send(outcome);
+            for notice in r.take_results() {
+                let _ = tx.send(notice);
             }
             // D8 轮询:排空 JS 接收环 → owned 事件注入(每泵一轮;
             // NOT_ARMED/未就绪静默跳过,Err 计数不吞)。
@@ -825,7 +832,8 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
                                 let mut done: Vec<(String, String)> = Vec::new();
                                 let mut rejected: Vec<(String, String)> = Vec::new();
                                 for (mid, st) in sr {
-                                    let status = st.get("status").and_then(|x| x.as_str()).unwrap_or("");
+                                    let status =
+                                        st.get("status").and_then(|x| x.as_str()).unwrap_or("");
                                     if status == "done" {
                                         let nid = st
                                             .get("msgId")
@@ -868,15 +876,14 @@ pub unsafe extern "system" fn caligo_qq_daemon_client_start(cfg_json_ptr: *const
                                         chat_type: it
                                             .get("chatType")
                                             .and_then(|x| x.as_u64())
-                                            .unwrap_or(0) as u32,
+                                            .unwrap_or(0)
+                                            as u32,
                                         peer_uid: g("peerUid"),
                                         peer_uin: g("peerUin"),
                                         sender_uin: g("senderUin"),
                                         native_id: g("msgId"),
                                         text: g("text"),
-                                        msg_time: it
-                                            .get("msgTime")
-                                            .and_then(|x| x.as_u64()),
+                                        msg_time: it.get("msgTime").and_then(|x| x.as_u64()),
                                     };
                                     r.ingest_event(ev);
                                 }

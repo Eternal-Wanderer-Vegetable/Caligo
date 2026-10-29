@@ -9,9 +9,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use caligo_core::ipc::{
-    BridgeMsg, CoreToBridgeMsg, Role, PROTOCOL_VERSION_V2,
-};
+use caligo_core::ipc::{BridgeMsg, CoreToBridgeMsg, Role, PROTOCOL_VERSION_V2};
 use caligo_core::transport::{connect_client, generate_token, token_hex, PipeServer};
 
 fn unique_prefix(tag: &str) -> String {
@@ -34,6 +32,7 @@ fn encode(msg: &BridgeMsg) -> Vec<u8> {
 fn hello(token: &str) -> BridgeMsg {
     BridgeMsg::Hello {
         protocol_version: caligo_core::ipc::PROTOCOL_VERSION_V3,
+        business_protocol_revision: caligo_model::ipc_v3::BUSINESS_PROTOCOL_REVISION,
         bridge_build: "test-bridge".into(),
         auth_token: token.into(),
         role: Role::Bridge,
@@ -137,10 +136,15 @@ fn wrong_auth_token_is_rejected_not_downgraded() {
                     core_build: "test".into(),
                     connection_epoch: 1,
                     accepted,
-                    reject_reason: if accepted { None } else { Some("auth failed".into()) },
+                    reject_reason: if accepted {
+                        None
+                    } else {
+                        Some("auth failed".into())
+                    },
                 };
                 let p = serde_json::to_vec(&ack).unwrap();
-                conn.write_all(&caligo_core::ipc::encode_frame(&p).unwrap()).unwrap();
+                conn.write_all(&caligo_core::ipc::encode_frame(&p).unwrap())
+                    .unwrap();
             }
             _ => panic!(),
         }
@@ -156,7 +160,8 @@ fn wrong_auth_token_is_rejected_not_downgraded() {
         }
     }
     let conn = conn.unwrap();
-    conn.write_all(&encode(&hello("deadbeef-deadbeef-deadbeef-deadbeef"))).unwrap();
+    conn.write_all(&encode(&hello("deadbeef-deadbeef-deadbeef-deadbeef")))
+        .unwrap();
     let mut head = [0u8; 8];
     conn.read_exact(&mut head, None).unwrap();
     let len = u32::from_le_bytes(head[4..8].try_into().unwrap()) as usize;
@@ -164,7 +169,11 @@ fn wrong_auth_token_is_rejected_not_downgraded() {
     conn.read_exact(&mut payload, None).unwrap();
     let ack: CoreToBridgeMsg = serde_json::from_slice(&payload).unwrap();
     match ack {
-        CoreToBridgeMsg::HelloAck { accepted, reject_reason, .. } => {
+        CoreToBridgeMsg::HelloAck {
+            accepted,
+            reject_reason,
+            ..
+        } => {
             assert!(!accepted);
             assert_eq!(reject_reason.as_deref(), Some("auth failed"));
         }
@@ -189,6 +198,12 @@ fn blocked_read_is_cancelled_not_hung() {
     cancel.store(true, Ordering::Relaxed);
     let started = std::time::Instant::now();
     let r = h.join().unwrap();
-    assert!(matches!(r, Err(caligo_core::transport::TransportError::TimedOut)));
-    assert!(started.elapsed() < std::time::Duration::from_secs(3), "取消必须及时返回");
+    assert!(matches!(
+        r,
+        Err(caligo_core::transport::TransportError::TimedOut)
+    ));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "取消必须及时返回"
+    );
 }

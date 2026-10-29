@@ -57,11 +57,15 @@ pub struct RequestRecord {
     pub payload_hash: u64,
     /// 迁移后的状态名(与 caligo_model::ActionState 的 JSON 对应)。
     pub state: String,
-    /// 终态附带的原生消息 ID(仅 ConfirmedSuccess 且已关联时非空)。
+    /// ConfirmedSuccess 的稳定原生消息 ID;旧 ConfirmedSuccess 空值只在
+    /// 恢复时解释为 AcceptedUnconfirmed,原始记录保持不变。
     pub native_id: Option<String>,
     pub at_unix_ms: u64,
     /// 记录该状态所属会话代次(旧代次回执只更新旧代次审计)。
     pub session_generation: u64,
+    /// core 分配并在派发前持久化的 QQ client_seq；旧记录没有此字段。
+    #[serde(default)]
+    pub wire_seq: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -76,6 +80,9 @@ pub struct EventRecord {
     pub native_id: String,
     pub text: String,
     pub platform_time: Option<u64>,
+    /// Old journal rows remain valid and never gain guessed OneBot fields.
+    #[serde(default)]
+    pub onebot_projection: Option<caligo_model::OneBotMessageProjection>,
     pub observed_at_unix_ms: u64,
     pub source: String,
 }
@@ -102,10 +109,15 @@ pub enum SyncMode {
 pub enum JournalError {
     Io(std::io::Error),
     /// 中段损坏(完好记录之后跟有非法数据)。原文件保持不动。
-    Corrupt { offset: u64, reason: String },
+    Corrupt {
+        offset: u64,
+        reason: String,
+    },
     /// 总量上限到达:拒绝新写入,不删除旧记录。
     CapacityExhausted,
-    RecordTooLarge { len: usize },
+    RecordTooLarge {
+        len: usize,
+    },
 }
 
 impl core::fmt::Display for JournalError {
@@ -193,10 +205,7 @@ impl Journal {
                 Err(DecodeError::Bad(reason)) => {
                     if off == 0 {
                         // 首记录即坏:视为整文件损坏,不动文件。
-                        return Err(JournalError::Corrupt {
-                            offset: 0,
-                            reason,
-                        });
+                        return Err(JournalError::Corrupt { offset: 0, reason });
                     }
                     // 坏帧之后仍有可解码记录 → 中段损坏,拒绝;
                     // 否则按尾部截断处理(可能只是最后一条写坏)。
@@ -215,7 +224,8 @@ impl Journal {
         if tail_truncated > 0 {
             file.set_len(good_len).map_err(JournalError::Io)?;
         }
-        file.seek(SeekFrom::Start(good_len)).map_err(JournalError::Io)?;
+        file.seek(SeekFrom::Start(good_len))
+            .map_err(JournalError::Io)?;
         let journal = Self {
             file,
             path,
@@ -270,9 +280,7 @@ impl Journal {
 fn encode_record(rec: &JournalRecord) -> Result<Vec<u8>, JournalError> {
     let payload = serde_json::to_vec(rec).map_err(|e| JournalError::Io(e.into()))?;
     if payload.len() > u32::MAX as usize {
-        return Err(JournalError::RecordTooLarge {
-            len: payload.len(),
-        });
+        return Err(JournalError::RecordTooLarge { len: payload.len() });
     }
     let mut out = Vec::with_capacity(16 + payload.len());
     out.extend_from_slice(&RECORD_MAGIC.to_le_bytes());
@@ -355,6 +363,25 @@ pub fn crc32(data: &[u8]) -> u32 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn old_event_rows_decode_without_onebot_projection() {
+        let row: EventRecord = serde_json::from_value(serde_json::json!({
+            "v": 1,
+            "event_seq": 4,
+            "session_generation": 2,
+            "session": {"account":"10001", "kind":"group", "peer":"123456"},
+            "direction": "incoming",
+            "sender": "opaque-sender",
+            "native_id": "native-1",
+            "text": "hello",
+            "platform_time": null,
+            "observed_at_unix_ms": 5,
+            "source": "recv"
+        }))
+        .unwrap();
+        assert!(row.onebot_projection.is_none());
+    }
+
     fn sample_req(id: &str) -> JournalRecord {
         JournalRecord::Request(RequestRecord {
             v: 1,
@@ -364,6 +391,7 @@ mod tests {
             native_id: None,
             at_unix_ms: 1_000,
             session_generation: 7,
+            wire_seq: None,
         })
     }
 
@@ -389,7 +417,8 @@ mod tests {
         let path = dir.join("j1.log");
         let _ = std::fs::remove_file(&path);
         {
-            let (mut j, report) = Journal::open(&path, DEFAULT_MAX_BYTES, SyncMode::Always).unwrap();
+            let (mut j, report) =
+                Journal::open(&path, DEFAULT_MAX_BYTES, SyncMode::Always).unwrap();
             assert!(report.records.is_empty());
             j.append(&sample_req("a")).unwrap();
             j.append(&JournalRecord::Gap(GapRecord {

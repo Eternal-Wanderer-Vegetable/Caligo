@@ -8,6 +8,7 @@
 //! 用法:caligod --pipe-prefix <name> --journal <path> --baseline <id> --account <u>
 //!            [--expect-pid <n>] [--core-build <s>]
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Ctrl+C 处理器可见的进程级停止标志(与 control Stop 汇合)。
@@ -30,6 +31,14 @@ struct Args {
     /// 凭据文件:存在则读取(重启连续性),不存在则生成并写入(user-only)。
     /// 计划 §6.4:凭据不进 argv/日志 —— 文件是本地私有通道。
     token_file: Option<String>,
+    onebot_http_bind: String,
+    onebot_ws_bind: Option<String>,
+    onebot_http_post_url: Option<String>,
+    onebot_http_post_secret_env: Option<String>,
+    onebot_http_post_timeout_ms: u64,
+    onebot_ws_reverse_url: Option<String>,
+    onebot_ws_reverse_token_env: Option<String>,
+    onebot_ws_reverse_reconnect_ms: u64,
 }
 
 fn parse_args() -> Option<Args> {
@@ -42,6 +51,14 @@ fn parse_args() -> Option<Args> {
         expect_pid: 0,
         core_build: caligo_core::CORE_BUILD.to_string(),
         token_file: None,
+        onebot_http_bind: "127.0.0.1:5700".into(),
+        onebot_ws_bind: None,
+        onebot_http_post_url: None,
+        onebot_http_post_secret_env: None,
+        onebot_http_post_timeout_ms: 5_000,
+        onebot_ws_reverse_url: None,
+        onebot_ws_reverse_token_env: None,
+        onebot_ws_reverse_reconnect_ms: 3_000,
     };
     let mut i = 0;
     while i < args.len() {
@@ -57,22 +74,68 @@ fn parse_args() -> Option<Args> {
             "--expect-pid" => a.expect_pid = next(&mut i)?.parse().ok()?,
             "--core-build" => a.core_build = next(&mut i)?,
             "--token-file" => a.token_file = next(&mut i),
+            "--onebot-http-bind" => a.onebot_http_bind = next(&mut i)?,
+            "--onebot-ws-bind" => a.onebot_ws_bind = Some(next(&mut i)?),
+            "--onebot-http-post-url" => a.onebot_http_post_url = Some(next(&mut i)?),
+            "--onebot-http-post-secret-env" => a.onebot_http_post_secret_env = Some(next(&mut i)?),
+            "--onebot-http-post-timeout-ms" => {
+                a.onebot_http_post_timeout_ms = next(&mut i)?.parse().ok()?
+            }
+            "--onebot-ws-reverse-url" => a.onebot_ws_reverse_url = Some(next(&mut i)?),
+            "--onebot-ws-reverse-token-env" => a.onebot_ws_reverse_token_env = Some(next(&mut i)?),
+            "--onebot-ws-reverse-reconnect-ms" => {
+                a.onebot_ws_reverse_reconnect_ms = next(&mut i)?.parse().ok()?
+            }
             _ => {}
         }
         i += 1;
     }
     if a.pipe_prefix.is_empty() || a.journal.is_empty() || a.account.is_empty() {
         eprintln!(
-            "caligod --pipe-prefix <name> --journal <path> --baseline <id> --account <u> [--expect-pid <n>] [--core-build <s>]"
+            "caligod --pipe-prefix <name> --journal <path> --baseline <id> --account <u> [--expect-pid <n>] [--core-build <s>] [--onebot-http-bind 127.0.0.1:5700] [--onebot-ws-bind 127.0.0.1:6700] [--onebot-http-post-url <url>] [--onebot-http-post-secret-env <name>] [--onebot-ws-reverse-url <ws-url>] [--onebot-ws-reverse-token-env <name>]"
         );
         return None;
     }
     Some(a)
 }
 
+fn read_secret_env(name: Option<&str>) -> Result<Option<String>, String> {
+    let Some(name) = name else { return Ok(None) };
+    std::env::var(name)
+        .map(Some)
+        .map_err(|_| format!("configured credential environment variable {name} is unavailable"))
+}
+
 fn main() {
     let Some(args) = parse_args() else {
         std::process::exit(2);
+    };
+    let reverse_self_id = if args.onebot_ws_reverse_url.is_some() {
+        match args.account.parse::<u64>() {
+            Ok(id) if id > 0 => Some(id),
+            _ => {
+                eprintln!(
+                    "[caligod] reverse OneBot WebSocket requires a positive numeric account ID"
+                );
+                std::process::exit(2);
+            }
+        }
+    } else {
+        None
+    };
+    let http_post_secret = match read_secret_env(args.onebot_http_post_secret_env.as_deref()) {
+        Ok(secret) => secret,
+        Err(error) => {
+            eprintln!("[caligod] {error}");
+            std::process::exit(2);
+        }
+    };
+    let reverse_token = match read_secret_env(args.onebot_ws_reverse_token_env.as_deref()) {
+        Ok(token) => token,
+        Err(error) => {
+            eprintln!("[caligod] {error}");
+            std::process::exit(2);
+        }
     };
     let config = caligo_core::daemon::DaemonConfig {
         pipe_prefix: args.pipe_prefix,
@@ -83,6 +146,7 @@ fn main() {
         expect_client_pid: args.expect_pid,
         runtime: Default::default(),
         test_fault_break_bridge_after_hello: false,
+        test_fault_break_bridge_after_result: false,
     };
     // 凭据:token-file 优先(重启连续性;文件 user-only,不进 argv/日志)。
     // Daemon::start 自身生成随机 token —— token-file 模式下用文件内容覆盖。
@@ -104,6 +168,27 @@ fn main() {
         };
         daemon.set_auth_token(&token);
     }
+    let listener = match caligo_core::onebot_server::bind_loopback(&args.onebot_http_bind) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("[caligod] OneBot HTTP bind failed: {error}");
+            std::process::exit(6);
+        }
+    };
+    let onebot_http_addr: SocketAddr = listener.local_addr().expect("bound listener address");
+    let ws_listener = match args.onebot_ws_bind.as_deref() {
+        Some(address) => match caligo_core::onebot_server::bind_loopback(address) {
+            Ok(listener) => Some(listener),
+            Err(error) => {
+                eprintln!("[caligod] OneBot WebSocket bind failed: {error}");
+                std::process::exit(6);
+            }
+        },
+        None => None,
+    };
+    let onebot_ws_addr = ws_listener
+        .as_ref()
+        .map(|listener| listener.local_addr().expect("bound websocket address"));
     let (bridge_name, control_name) = daemon.pipe_names();
     // 启动信息首行(JSON):管道名 + 认证 token。启动方读取后应立即吞掉该输出。
     println!(
@@ -112,8 +197,70 @@ fn main() {
             "bridge_pipe": bridge_name,
             "control_pipe": control_name,
             "auth_token": daemon.auth_token(),
+            "onebot_http": onebot_http_addr,
+            "onebot_ws": onebot_ws_addr,
+            "http_post_enabled": args.onebot_http_post_url.is_some(),
+            "reverse_ws_enabled": args.onebot_ws_reverse_url.is_some(),
         })
     );
+
+    let onebot_server = {
+        let d = daemon.clone();
+        let token = daemon.auth_token();
+        std::thread::spawn(move || {
+            caligo_core::onebot_server::serve_http(d, &listener, Some(&token))
+        })
+    };
+    let onebot_ws_server = ws_listener.map(|listener| {
+        let d = daemon.clone();
+        let token = daemon.auth_token();
+        std::thread::spawn(move || {
+            caligo_core::onebot_transport::serve_forward_ws(d, listener, Some(token))
+        })
+    });
+    let http_post_worker = args.onebot_http_post_url.map(|url| {
+        daemon.enable_onebot_http_post_ordering();
+        let d = daemon.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            caligo_core::onebot_transport::run_http_post_ready(
+                d,
+                caligo_core::onebot_transport::HttpPostConfig {
+                    url,
+                    secret: http_post_secret,
+                    timeout: std::time::Duration::from_millis(args.onebot_http_post_timeout_ms),
+                },
+                ready_tx,
+            )
+        });
+        if ready_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .is_err()
+        {
+            eprintln!("[caligod] OneBot HTTP POST worker did not become ready");
+            daemon.stop_flag().store(true, Ordering::Relaxed);
+            let _ = worker.join();
+            std::process::exit(7);
+        }
+        worker
+    });
+    let reverse_ws_worker = args.onebot_ws_reverse_url.map(|url| {
+        let d = daemon.clone();
+        let self_id = reverse_self_id.expect("validated before daemon startup");
+        let reconnect_interval =
+            std::time::Duration::from_millis(args.onebot_ws_reverse_reconnect_ms);
+        std::thread::spawn(move || {
+            caligo_core::onebot_transport::run_reverse_ws(
+                d,
+                caligo_core::onebot_transport::ReverseWsConfig {
+                    url,
+                    access_token: reverse_token,
+                    self_id,
+                    reconnect_interval,
+                },
+            )
+        })
+    });
 
     // SAFETY: 处理器为进程生存期静态 fn;仅置原子标志。
     unsafe {
@@ -145,6 +292,26 @@ fn main() {
             eprintln!("[caligod] run thread panicked");
             std::process::exit(5);
         }
+    }
+    let served = onebot_server.join().expect("OneBot HTTP thread panicked");
+    println!("[caligod] OneBot HTTP 已停止，共处理 {served} 个请求");
+    if let Some(server) = onebot_ws_server {
+        println!(
+            "[caligod] OneBot WebSocket 已停止，共接入 {} 个连接",
+            server.join().expect("OneBot WS thread panicked")
+        );
+    }
+    if let Some(worker) = http_post_worker {
+        println!(
+            "[caligod] OneBot HTTP POST 已停止，共上报 {} 条事件",
+            worker.join().expect("OneBot HTTP POST thread panicked")
+        );
+    }
+    if let Some(worker) = reverse_ws_worker {
+        println!(
+            "[caligod] OneBot 反向 WebSocket 已停止，共建立 {} 次连接",
+            worker.join().expect("OneBot reverse WS thread panicked")
+        );
     }
     println!("[caligod] stopped(closed;journal 保留)");
 }

@@ -42,14 +42,19 @@ impl HostAdapter for LabHost {
     fn current_context_ok(&self) -> bool {
         true
     }
-    fn native_op(&mut self, op: HostOp) -> Result<HostOpResult, caligo_bridge::host_adapter::HostError> {
+    fn native_op(
+        &mut self,
+        op: HostOp,
+    ) -> Result<HostOpResult, caligo_bridge::host_adapter::HostError> {
         Ok(match op {
             HostOp::ListenerAdd => HostOpResult::ListenerDeferred,
             HostOp::ListenerRemove { .. } => HostOpResult::ListenerRemoved,
             HostOp::Probe => HostOpResult::ProbeDone,
             HostOp::SendText { .. } => {
                 let n = LAB_SENDS.fetch_add(1, Ordering::Relaxed) + 1;
-                HostOpResult::Sent { native_id: Some(format!("NM-{n}")) }
+                HostOpResult::Sent {
+                    native_id: Some(format!("NM-{n}")),
+                }
             }
         })
     }
@@ -75,7 +80,10 @@ fn unique_prefix(tag: &str) -> String {
 /// start 不创建管道(run 才创建):重连用例借此制造"服务端未就绪"窗口。
 fn start_daemon(
     prefix: &str,
-) -> (Arc<Daemon>, impl FnOnce() -> std::thread::JoinHandle<Result<(), caligo_core::daemon::SessionError>>) {
+) -> (
+    Arc<Daemon>,
+    impl FnOnce() -> std::thread::JoinHandle<Result<(), caligo_core::daemon::SessionError>>,
+) {
     start_daemon_mode(prefix, false)
 }
 
@@ -83,7 +91,21 @@ fn start_daemon(
 fn start_daemon_mode(
     prefix: &str,
     fault_break_after_hello: bool,
-) -> (Arc<Daemon>, impl FnOnce() -> std::thread::JoinHandle<Result<(), caligo_core::daemon::SessionError>>) {
+) -> (
+    Arc<Daemon>,
+    impl FnOnce() -> std::thread::JoinHandle<Result<(), caligo_core::daemon::SessionError>>,
+) {
+    start_daemon_faults(prefix, fault_break_after_hello, false)
+}
+
+fn start_daemon_faults(
+    prefix: &str,
+    fault_break_after_hello: bool,
+    fault_break_after_result: bool,
+) -> (
+    Arc<Daemon>,
+    impl FnOnce() -> std::thread::JoinHandle<Result<(), caligo_core::daemon::SessionError>>,
+) {
     let dir = std::env::temp_dir().join(format!("caligo-dcl-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = DaemonConfig {
@@ -95,6 +117,7 @@ fn start_daemon_mode(
         expect_client_pid: 0, // LAB worker 与测试同进程;PID 校验在此禁用
         runtime: RuntimeConfig::default(),
         test_fault_break_bridge_after_hello: fault_break_after_hello,
+        test_fault_break_bridge_after_result: fault_break_after_result,
     };
     {
         let probe = dir.join("probe-write.txt");
@@ -119,12 +142,9 @@ fn start_daemon_mode(
             journal_dbg
         ),
     };
-    (
-        daemon.clone(),
-        move || {
-            std::thread::spawn(move || daemon.run())
-        },
-    )
+    (daemon.clone(), move || {
+        std::thread::spawn(move || daemon.run())
+    })
 }
 
 fn worker_config(prefix: &str, auth: &str) -> DaemonClientConfig {
@@ -163,7 +183,14 @@ fn reconnect_then_hello_then_clean_stop_without_bootstrap() {
         let resident = resident.clone();
         let stop = stop.clone();
         std::thread::spawn(move || {
-            let r = run_worker(cfg, resident, &wake_false, _rx_placeholder(), _ev_placeholder(), stop);
+            let r = run_worker(
+                cfg,
+                resident,
+                &wake_false,
+                _rx_placeholder(),
+                _ev_placeholder(),
+                stop,
+            );
             w_tx.send(r).unwrap();
         });
     }
@@ -187,7 +214,9 @@ fn reconnect_then_hello_then_clean_stop_without_bootstrap() {
     let mut control = control.expect("control connected(worker 已接入)");
 
     // Health 往返(worker 心跳在跑,daemon 活着)。
-    let r = control.request(caligo_core::ipc::ControlMsg::Health {}).unwrap();
+    let r = control
+        .request(caligo_core::ipc::ControlMsg::Health {})
+        .unwrap();
     assert!(matches!(r, CoreToControlMsg::HealthAck {}));
 
     // 高负载下 worker 首连可能晚于 control:Stop 前等 worker 至少接入一次,
@@ -199,7 +228,9 @@ fn reconnect_then_hello_then_clean_stop_without_bootstrap() {
     }
 
     // Stop:daemon 真实停止协议 → worker 收 Stopped → 干净退出。
-    let r = control.request(caligo_core::ipc::ControlMsg::Stop {}).unwrap();
+    let r = control
+        .request(caligo_core::ipc::ControlMsg::Stop {})
+        .unwrap();
     assert!(matches!(r, CoreToControlMsg::Stopped { .. }));
     let (counters, exit) = match w_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(v) => v,
@@ -233,7 +264,7 @@ fn dispatch_roundtrip_through_real_worker() {
     // (owner = 测试线程,与 drain 一致)。
     resident.bootstrap().unwrap();
     let stop = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = mpsc::channel::<caligo_bridge::resident::SendOutcome>();
+    let (tx, rx) = mpsc::channel::<caligo_bridge::resident::ResidentNotice>();
     let (w_tx, w_rx) = mpsc::channel();
     {
         let cfg = worker_config(&prefix, &auth);
@@ -286,13 +317,23 @@ fn dispatch_roundtrip_through_real_worker() {
     while Instant::now() < round_deadline {
         // resident.drain 只能在 owner 线程(LAB 假宿主以本线程为 owner)。
         let _ = resident.drain();
-        for outcome in resident.take_results() {
-            let _ = tx.send(outcome);
+        for notice in resident.take_results() {
+            let _ = tx.send(notice);
         }
-        if let CoreToControlMsg::QueryResult { state, native_id, .. } =
-            control.request(caligo_core::ipc::ControlMsg::QueryRequest { request_id: "R1".into() }).unwrap()
+        if let CoreToControlMsg::QueryResult {
+            state, native_id, ..
+        } = control
+            .request(caligo_core::ipc::ControlMsg::QueryRequest {
+                request_id: "R1".into(),
+            })
+            .unwrap()
         {
-            if native_id.as_deref() == Some("NM-1") || state.as_deref().map(|s| s.contains("ConfirmedSuccess")).unwrap_or(false) {
+            if native_id.as_deref() == Some("NM-1")
+                || state
+                    .as_deref()
+                    .map(|s| s.contains("ConfirmedSuccess"))
+                    .unwrap_or(false)
+            {
                 confirmed = true;
                 break;
             }
@@ -306,7 +347,9 @@ fn dispatch_roundtrip_through_real_worker() {
     );
 
     // 收尾:Stop → worker CoreStopped。
-    control.request(caligo_core::ipc::ControlMsg::Stop {}).unwrap();
+    control
+        .request(caligo_core::ipc::ControlMsg::Stop {})
+        .unwrap();
     let (counters, exit) = match w_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(v) => v,
         Err(_) => {
@@ -319,6 +362,124 @@ fn dispatch_roundtrip_through_real_worker() {
     assert!(counters.dispatches >= 1);
     assert!(counters.results_sent >= 1);
     assert_eq!(counters.bootstraps_attempted, 0);
+}
+
+/// Native invocation must not be repeated when the core durably applies the
+/// receipt and drops the pipe before its ACK reaches the bridge.
+#[test]
+fn durable_result_is_replayed_after_ack_loss_without_native_retry() {
+    let _g = TEST_SERIAL.lock().unwrap();
+    let prefix = unique_prefix("resultack");
+    let (daemon, make_runner) = start_daemon_faults(&prefix, false, true);
+    let auth = daemon.auth_token().to_string();
+    let runner = make_runner();
+    let resident = Arc::new(Resident::new(LabHost, ResidentLimits::default()));
+    resident.bootstrap().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel::<caligo_bridge::resident::ResidentNotice>();
+    let (w_tx, w_rx) = mpsc::channel();
+    let send_count_before = LAB_SENDS.load(Ordering::Relaxed);
+    {
+        let cfg = worker_config(&prefix, &auth);
+        let resident = resident.clone();
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let r = run_worker(cfg, resident, &wake_true, rx, _ev_placeholder(), stop);
+            w_tx.send(r).unwrap();
+        });
+    }
+    let control_name = pipe_names_from_prefix(&prefix).1;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut control = None;
+    while Instant::now() < deadline {
+        if let Ok(c) = ControlClient::connect(&control_name, &auth, "lab-client") {
+            control = Some(c);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut control = control.expect("control connected");
+
+    let mut accepted = false;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if matches!(
+            control
+                .request(caligo_core::ipc::ControlMsg::SendText {
+                    request_id: "R-ACK-LOSS".into(),
+                    target: serde_json::json!({"account":"10001","kind":"group","peer":"654321"}),
+                    text: "CALIGO-RESULT-ACK-LOSS".into(),
+                    deadline_ms: 30_000,
+                })
+                .unwrap(),
+            CoreToControlMsg::SendAccepted { .. }
+        ) {
+            accepted = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        accepted,
+        "send request must be accepted before recovery check"
+    );
+
+    let expected_native_id = format!("NM-{}", send_count_before + 1);
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut durable_result_visible = false;
+    while Instant::now() < deadline {
+        let _ = resident.drain();
+        for notice in resident.take_results() {
+            let _ = tx.send(notice);
+        }
+        if let CoreToControlMsg::QueryResult { native_id, .. } = control
+            .request(caligo_core::ipc::ControlMsg::QueryRequest {
+                request_id: "R-ACK-LOSS".into(),
+            })
+            .unwrap()
+        {
+            if native_id.as_deref() == Some(expected_native_id.as_str()) {
+                durable_result_visible = true;
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        durable_result_visible,
+        "journaled native receipt must remain queryable"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut replay_observed = false;
+    while Instant::now() < deadline {
+        let counters = caligo_bridge::daemon_client::counters_snapshot();
+        if counters.reconnects >= 1 && counters.results_sent >= 2 {
+            replay_observed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        replay_observed,
+        "unacked durable result must be replayed after reconnect"
+    );
+    assert_eq!(
+        LAB_SENDS.load(Ordering::Relaxed) - send_count_before,
+        1,
+        "recovery must replay only the receipt and never call native twice"
+    );
+
+    control
+        .request(caligo_core::ipc::ControlMsg::Stop {})
+        .unwrap();
+    let (counters, exit) = w_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("worker must stop after recovery");
+    runner.join().unwrap().unwrap();
+    assert_eq!(exit, WorkerExit::CoreStopped);
+    assert!(counters.reconnects >= 1);
+    assert!(counters.results_sent >= 2);
 }
 
 fn wake_false() -> bool {
@@ -334,7 +495,7 @@ fn pipe_names_from_prefix(prefix: &str) -> (String, String) {
 }
 
 // run_worker 的 rx 参数占位(第一个用例不消费结果)。
-fn _rx_placeholder() -> mpsc::Receiver<caligo_bridge::resident::SendOutcome> {
+fn _rx_placeholder() -> mpsc::Receiver<caligo_bridge::resident::ResidentNotice> {
     let (_t, r) = mpsc::channel();
     r
 }
@@ -419,10 +580,15 @@ fn t07_unacked_event_replays_after_break_before_consume() {
         "断开前未确认事件必须经重连重放对账; seen={seen:?}"
     );
 
-    control.request(caligo_core::ipc::ControlMsg::Stop {}).unwrap();
+    control
+        .request(caligo_core::ipc::ControlMsg::Stop {})
+        .unwrap();
     let (counters, exit) = match w_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(v) => v,
-        Err(_) => panic!("worker exit timeout; snapshot={:?}", caligo_bridge::daemon_client::counters_snapshot()),
+        Err(_) => panic!(
+            "worker exit timeout; snapshot={:?}",
+            caligo_bridge::daemon_client::counters_snapshot()
+        ),
     };
     runner.join().unwrap().unwrap();
     assert_eq!(exit, WorkerExit::CoreStopped);
@@ -444,7 +610,7 @@ fn native_started_only_after_resident_accepts() {
     let resident = Arc::new(Resident::new(LabHost, ResidentLimits::default()));
     // 故意不 bootstrap:Dispatch 到达时 submit 返回 NotReady → pending。
     let stop = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = mpsc::channel::<caligo_bridge::resident::SendOutcome>();
+    let (tx, rx) = mpsc::channel::<caligo_bridge::resident::ResidentNotice>();
     let (w_tx, w_rx) = mpsc::channel();
     {
         let cfg = worker_config(&prefix, &auth);
@@ -492,7 +658,9 @@ fn native_started_only_after_resident_accepts() {
     let mut saw_started = false;
     while Instant::now() < deadline {
         if let CoreToControlMsg::QueryResult { state, .. } = control
-            .request(caligo_core::ipc::ControlMsg::QueryRequest { request_id: "R-C5".into() })
+            .request(caligo_core::ipc::ControlMsg::QueryRequest {
+                request_id: "R-C5".into(),
+            })
             .unwrap()
         {
             let s = state.unwrap_or_default();
@@ -514,15 +682,22 @@ fn native_started_only_after_resident_accepts() {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         let _ = resident.drain();
-        for outcome in resident.take_results() {
-            let _ = tx.send(outcome);
+        for notice in resident.take_results() {
+            let _ = tx.send(notice);
         }
-        if let CoreToControlMsg::QueryResult { state, native_id, .. } = control
-            .request(caligo_core::ipc::ControlMsg::QueryRequest { request_id: "R-C5".into() })
+        if let CoreToControlMsg::QueryResult {
+            state, native_id, ..
+        } = control
+            .request(caligo_core::ipc::ControlMsg::QueryRequest {
+                request_id: "R-C5".into(),
+            })
             .unwrap()
         {
             if native_id.as_deref() == Some("NM-1")
-                || state.as_deref().map(|s| s.contains("ConfirmedSuccess")).unwrap_or(false)
+                || state
+                    .as_deref()
+                    .map(|s| s.contains("ConfirmedSuccess"))
+                    .unwrap_or(false)
             {
                 confirmed = true;
                 break;
@@ -532,10 +707,15 @@ fn native_started_only_after_resident_accepts() {
     }
     assert!(confirmed, "bootstrap 后 pending 必须补交并完成全链");
 
-    control.request(caligo_core::ipc::ControlMsg::Stop {}).unwrap();
+    control
+        .request(caligo_core::ipc::ControlMsg::Stop {})
+        .unwrap();
     let (_, exit) = match w_rx.recv_timeout(Duration::from_secs(5)) {
         Ok(v) => v,
-        Err(_) => panic!("worker exit timeout; snapshot={:?}", caligo_bridge::daemon_client::counters_snapshot()),
+        Err(_) => panic!(
+            "worker exit timeout; snapshot={:?}",
+            caligo_bridge::daemon_client::counters_snapshot()
+        ),
     };
     runner.join().unwrap().unwrap();
     assert_eq!(exit, WorkerExit::CoreStopped);
@@ -562,7 +742,14 @@ fn reconnect_requires_same_host_and_advances_epoch() {
         let resident = resident.clone();
         let stop = stop.clone();
         std::thread::spawn(move || {
-            let r = run_worker(cfg, resident, &wake_false, _rx_placeholder(), _ev_placeholder(), stop);
+            let r = run_worker(
+                cfg,
+                resident,
+                &wake_false,
+                _rx_placeholder(),
+                _ev_placeholder(),
+                stop,
+            );
             w_tx.send(r).unwrap();
         });
     }
@@ -601,7 +788,11 @@ fn reconnect_requires_same_host_and_advances_epoch() {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(active, "同宿主重连后 actor 必须 Active(T03);epoch={}", daemon.connection_epoch());
+    assert!(
+        active,
+        "同宿主重连后 actor 必须 Active(T03);epoch={}",
+        daemon.connection_epoch()
+    );
 
     // worker A 干净退出 → daemon 降级,accept 循环继续。
     stop.store(true, Ordering::Relaxed);
@@ -613,8 +804,14 @@ fn reconnect_requires_same_host_and_advances_epoch() {
 
     // T05(反例):同账号同代次、不同宿主 nonce → 必须拒绝。
     match BridgeClient::connect(
-        &bridge_name, &auth, "t05-bridge", 1, "10001", "qq-9.9.33-52230",
-        0x2222_2222, "2026-10-08T00:00:00Z",
+        &bridge_name,
+        &auth,
+        "t05-bridge",
+        1,
+        "10001",
+        "qq-9.9.33-52230",
+        0x2222_2222,
+        "2026-10-08T00:00:00Z",
     ) {
         Err(_) => {} // HelloAck accepted=false → connect Err(即拒绝)
         Ok(_) => panic!("不同宿主的同代次连接必须被拒绝(T05)"),
@@ -626,8 +823,14 @@ fn reconnect_requires_same_host_and_advances_epoch() {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         match BridgeClient::connect(
-            &bridge_name, &auth, "t05-bridge", 1, "10001", "qq-9.9.33-52230",
-            0x1111_1111, "2026-10-08T00:00:00Z",
+            &bridge_name,
+            &auth,
+            "t05-bridge",
+            1,
+            "10001",
+            "qq-9.9.33-52230",
+            0x1111_1111,
+            "2026-10-08T00:00:00Z",
         ) {
             Ok(b) => {
                 bridge = Some(b);
@@ -646,8 +849,13 @@ fn reconnect_requires_same_host_and_advances_epoch() {
             deadline_ms: 30_000,
         })
         .unwrap();
-    assert!(matches!(r, CoreToControlMsg::SendAccepted { .. }), "同宿主重连后业务必须可继续: {r:?}");
+    assert!(
+        matches!(r, CoreToControlMsg::SendAccepted { .. }),
+        "同宿主重连后业务必须可继续: {r:?}"
+    );
 
-    control.request(caligo_core::ipc::ControlMsg::Stop {}).unwrap();
+    control
+        .request(caligo_core::ipc::ControlMsg::Stop {})
+        .unwrap();
     runner.join().unwrap().unwrap();
 }

@@ -250,7 +250,8 @@ unsafe extern "system" fn g3_capture(
                         if addr_plausible(data_ptr) {
                             let take = size.min(STR_CAP);
                             let mut data = [0u64; 16];
-                            let n = read_qwords_into(data_ptr as usize, &mut data[..(take + 7) / 8]);
+                            let n =
+                                read_qwords_into(data_ptr as usize, &mut data[..(take + 7) / 8]);
                             s[OFF_UIN_DATA..OFF_UIN_DATA + n].copy_from_slice(&data[..n]);
                             s[1] |= 1 | 2; // has uin(long)
                         }
@@ -347,7 +348,9 @@ pub fn drain_records() -> (Vec<String>, u64, u64) {
             let off = s[OFF_CANDS + c * 3];
             let ptr = s[OFF_CANDS + c * 3 + 1];
             let first = s[OFF_CANDS + c * 3 + 2];
-            let head_hex = bytes_hex(&qw_slice_bytes(&s[OFF_HEADS + c * 4..OFF_HEADS + c * 4 + 4]));
+            let head_hex = bytes_hex(&qw_slice_bytes(
+                &s[OFF_HEADS + c * 4..OFF_HEADS + c * 4 + 4],
+            ));
             if !cands.is_empty() {
                 cands.push(',');
             }
@@ -383,9 +386,15 @@ fn decode_uin(s: &[u64]) -> String {
     }
     let short = s[1] & 2 == 0;
     let (bytes, _n) = if short {
-        (qw_slice_bytes(&s[OFF_UIN_RAW..OFF_UIN_RAW + 3])[1..23].to_vec(), 0usize)
+        (
+            qw_slice_bytes(&s[OFF_UIN_RAW..OFF_UIN_RAW + 3])[1..23].to_vec(),
+            0usize,
+        )
     } else {
-        (qw_slice_bytes(&s[OFF_UIN_DATA..OFF_UIN_DATA + 16]).to_vec(), 0usize)
+        (
+            qw_slice_bytes(&s[OFF_UIN_DATA..OFF_UIN_DATA + 16]).to_vec(),
+            0usize,
+        )
     };
     let hexs = bytes_hex(&bytes);
     let text: String = String::from_utf8_lossy(&bytes)
@@ -416,8 +425,8 @@ pub fn trampoline_bytes(capture: usize, original: usize) -> Vec<u8> {
     b.extend_from_slice(&[0x41, 0x50]); // push r8
     b.extend_from_slice(&[0x41, 0x51]); // push r9
     b.extend_from_slice(&[0x48, 0x83, 0xEC, 0x28]); // sub rsp,0x28(rsp=R-0x48)
-    // a5: 入口 [R+0x28] = [rsp+0x70];a6: [R+0x30] = [rsp+0x78]。
-    // capture 的栈参:call 前 [rsp+0x20]=a5,[rsp+0x28]=a6。
+                                                    // a5: 入口 [R+0x28] = [rsp+0x70];a6: [R+0x30] = [rsp+0x78]。
+                                                    // capture 的栈参:call 前 [rsp+0x20]=a5,[rsp+0x28]=a6。
     b.extend_from_slice(&[0x48, 0x8B, 0x44, 0x24, 0x70]); // mov rax,[rsp+0x70]
     b.extend_from_slice(&[0x48, 0x89, 0x44, 0x24, 0x20]); // mov [rsp+0x20],rax
     b.extend_from_slice(&[0x48, 0x8B, 0x44, 0x24, 0x78]); // mov rax,[rsp+0x78]
@@ -445,7 +454,9 @@ fn stage(path: *const u16, stage: &str, ok: bool, detail: &str) {
         if len >= 32 * 1024 {
             None
         } else {
-            Some(String::from_utf16_lossy(std::slice::from_raw_parts(path, len)))
+            Some(String::from_utf16_lossy(std::slice::from_raw_parts(
+                path, len,
+            )))
         }
     };
     if let Some(p) = text {
@@ -463,7 +474,11 @@ fn stage(path: *const u16, stage: &str, ok: bool, detail: &str) {
             detail.replace('\\', "\\\\").replace('"', "'")
         );
         use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&p)
+        {
             let _ = f.write_all(line.as_bytes());
         }
     }
@@ -487,8 +502,18 @@ fn swap_slot(slot_addr: usize, new_val: u64) -> Result<u64, String> {
     use windows_sys::Win32::System::Memory::VirtualProtect;
     let mut old_prot = 0u32;
     // SAFETY: 自进程;8B 窗口;old_prot 由系统填写。
-    if unsafe { VirtualProtect(slot_addr as *const c_void, 8, 0x04 /*PAGE_READWRITE*/, &mut old_prot) } == 0 {
-        return Err(format!("VirtualProtect(rw): Win32 {}", unsafe { GetLastError() }));
+    if unsafe {
+        VirtualProtect(
+            slot_addr as *const c_void,
+            8,
+            0x04, /*PAGE_READWRITE*/
+            &mut old_prot,
+        )
+    } == 0
+    {
+        return Err(format!("VirtualProtect(rw): Win32 {}", unsafe {
+            GetLastError()
+        }));
     }
     // SAFETY: 已确认可写;8B 对齐原子访问。
     let prev = unsafe { core::ptr::read_volatile(slot_addr as *const u64) };
@@ -518,7 +543,10 @@ pub unsafe fn g3_probe_run(ctx: *const G3Ctx) -> u32 {
 
     // wrapper 身份核验(getter 租约 + 锚点;g1/g2 同机械)。
     let getter: GetterFn = unsafe { core::mem::transmute(wrapper_base + GETTER_RVA) };
-    let mut pair = ServicePair { obj: core::ptr::null_mut(), ctrl: core::ptr::null_mut() };
+    let mut pair = ServicePair {
+        obj: core::ptr::null_mut(),
+        ctrl: core::ptr::null_mut(),
+    };
     // SAFETY: getter 契约(R2 §4)。
     let ret = unsafe { getter(&mut pair as *mut ServicePair) };
     if ret as usize != &mut pair as *mut ServicePair as usize || pair.obj.is_null() {
@@ -530,7 +558,12 @@ pub unsafe fn g3_probe_run(ctx: *const G3Ctx) -> u32 {
         stage(report_path, "g3_adopt", false, "anchor mismatch");
         return ERR_SWAP_STATE;
     }
-    stage(report_path, "g3_adopt", true, &format!("svc={}", pair.obj as u64));
+    stage(
+        report_path,
+        "g3_adopt",
+        true,
+        &format!("svc={}", pair.obj as u64),
+    );
 
     // 发送侧选址:transport = *(svc+0x60);conn pair = *(transport+0x60)。
     let Some(transport) = safe_read_qword(pair.obj as usize + SVC_FIELD_TRANSPORT) else {
@@ -538,14 +571,22 @@ pub unsafe fn g3_probe_run(ctx: *const G3Ctx) -> u32 {
         return ERR_NO_TRANSPORT;
     };
     if !addr_plausible(transport) {
-        stage(report_path, "g3_site", false, &format!("transport implausible {}", hx(transport)));
+        stage(
+            report_path,
+            "g3_site",
+            false,
+            &format!("transport implausible {}", hx(transport)),
+        );
         return ERR_NO_TRANSPORT;
     }
     let orig_vptr = safe_read_qword(transport as usize).unwrap_or(0);
     let vptr_ok = orig_vptr == (wrapper_base + TRANSPORT_VTBL_RVA) as u64;
     let conn = safe_read_qword(transport as usize + TRANSPORT_FIELD_CONN).unwrap_or(0);
-    let conn_vptr =
-        if addr_plausible(conn) { safe_read_qword(conn as usize).unwrap_or(0) } else { 0 };
+    let conn_vptr = if addr_plausible(conn) {
+        safe_read_qword(conn as usize).unwrap_or(0)
+    } else {
+        0
+    };
     stage(
         report_path,
         "g3_site",
@@ -564,15 +605,28 @@ pub unsafe fn g3_probe_run(ctx: *const G3Ctx) -> u32 {
     }
 
     // 伪 vtable(自分配 RW 数据页;原表 16 qword 副本,slot7 → 蹦床)。
-    let bytes = trampoline_bytes(g3_capture as usize, (wrapper_base + SLOT7_ORIG_RVA) as usize);
+    let bytes = trampoline_bytes(
+        g3_capture as usize,
+        (wrapper_base + SLOT7_ORIG_RVA) as usize,
+    );
     let tramp = unsafe {
         use windows_sys::Win32::System::Memory::{
             VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
         };
-        VirtualAlloc(std::ptr::null(), 0x100, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+        VirtualAlloc(
+            std::ptr::null(),
+            0x100,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_EXECUTE_READWRITE,
+        )
     };
     if tramp.is_null() {
-        stage(report_path, "g3_swap", false, "VirtualAlloc(trampoline) failed");
+        stage(
+            report_path,
+            "g3_swap",
+            false,
+            "VirtualAlloc(trampoline) failed",
+        );
         return ERR_SWAP_STATE;
     }
     // SAFETY: 蹦床页为本进程新分配 RWX,大小 0x100 ≥ bytes.len()。
@@ -585,7 +639,12 @@ pub unsafe fn g3_probe_run(ctx: *const G3Ctx) -> u32 {
     let mut fake_tbl = [0u64; VTBL_COPY_QWORDS];
     let n = read_qwords_into(orig_vptr as usize, &mut fake_tbl);
     if n < 10 {
-        stage(report_path, "g3_swap", false, &format!("vtable copy short: {n}"));
+        stage(
+            report_path,
+            "g3_swap",
+            false,
+            &format!("vtable copy short: {n}"),
+        );
         return ERR_SWAP_STATE;
     }
     fake_tbl[SLOT7_OFF / 8] = tramp as u64;
@@ -593,10 +652,20 @@ pub unsafe fn g3_probe_run(ctx: *const G3Ctx) -> u32 {
         use windows_sys::Win32::System::Memory::{
             VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE,
         };
-        VirtualAlloc(std::ptr::null(), 0x100, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+        VirtualAlloc(
+            std::ptr::null(),
+            0x100,
+            MEM_COMMIT | MEM_RESERVE,
+            PAGE_READWRITE,
+        )
     };
     if fake_vtbl.is_null() {
-        stage(report_path, "g3_swap", false, "VirtualAlloc(fake vtable) failed");
+        stage(
+            report_path,
+            "g3_swap",
+            false,
+            "VirtualAlloc(fake vtable) failed",
+        );
         return ERR_SWAP_STATE;
     }
     // SAFETY: 伪 vtable 页为本进程新分配 RW,大小 0x100 ≥ 16*8。
@@ -622,7 +691,12 @@ pub unsafe fn g3_probe_run(ctx: *const G3Ctx) -> u32 {
     };
     if prev != orig_vptr {
         let _ = swap_slot(transport as usize, orig_vptr);
-        stage(report_path, "g3_swap", false, &format!("prev changed mid-swap: {}", hx(prev)));
+        stage(
+            report_path,
+            "g3_swap",
+            false,
+            &format!("prev changed mid-swap: {}", hx(prev)),
+        );
         return ERR_SWAP_STATE;
     }
     ACTIVE.store(1, Ordering::Release);
@@ -674,15 +748,20 @@ pub unsafe fn g3_probe_run(ctx: *const G3Ctx) -> u32 {
             report_path,
             "g3_restore",
             false,
-            &format!("vptr changed during window (not rewriting stale): {}", hx(cur)),
+            &format!(
+                "vptr changed during window (not rewriting stale): {}",
+                hx(cur)
+            ),
         );
     }
 
     // drain 固定环 → 报告(编码在本线程,可分配)。
     let (records, pushed, dropped) = drain_records();
     use std::io::Write;
-    if let Ok(mut f) =
-        std::fs::OpenOptions::new().create(true).append(true).open(report_path_str(report_path))
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(report_path_str(report_path))
     {
         for rec in &records {
             let _ = writeln!(f, "{rec}");
@@ -693,7 +772,12 @@ pub unsafe fn g3_probe_run(ctx: *const G3Ctx) -> u32 {
             records.len()
         );
     }
-    stage(report_path, "g3_done", true, &format!("captured={pushed} dropped={dropped}"));
+    stage(
+        report_path,
+        "g3_done",
+        true,
+        &format!("captured={pushed} dropped={dropped}"),
+    );
     OK
 }
 
@@ -754,8 +838,9 @@ pub struct G3SendCtx {
     /// {1: 该值, 2: 0, 3: 0}(调查发送漂移的服务端形状策略翻转假设)。
     pub use_ch: u32,
     /// N3R30 消费者实验:0 = QQ 空函数 delegate(现状);非 0 = 我们的
-    /// 响应消费者 delegate(consumer_probe::{invoke,dtor} + ctx),cb 块
-    /// {ctx,flag,invoke,dtor} —— 若门开启,响应/180s 超时写入报告。
+    /// 响应消费者 delegate(v4 = consumer_probe L1 {ctx,1,manager,invoke},
+    /// manager op=4 答 0 = 非空可调用)—— 响应经 73bd6c 门后以 5 参 invoke
+    /// (inner,0x10,errCode,errStr,responseUid)到达。responseUid 保持 opaque。
     pub use_consumer: u32,
 }
 
@@ -787,7 +872,9 @@ unsafe fn read_utf16_opt(ptr: *const u16) -> Option<String> {
         return None;
     }
     // SAFETY: loader 写入的 NUL 结尾缓冲。
-    Some(String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(ptr, len) }))
+    Some(String::from_utf16_lossy(unsafe {
+        std::slice::from_raw_parts(ptr, len)
+    }))
 }
 
 fn pb_len_field_vec(field: u32, body: &[u8]) -> Vec<u8> {
@@ -846,48 +933,49 @@ fn encode_send_msg(
     if group_code == 0 {
         // ===== 私聊(r9 形状;共享 codec)=====
         return caligo_model::qq_wire::send::encode_friend_text(
-            peer_uin,
-            peer_uid,
-            text,
-            client_seq,
-            random,
-            ts,
+            peer_uin, peer_uid, text, client_seq, random, ts,
         )
         .unwrap_or_default();
     }
     if at_uid.is_none() {
         // ===== 群聊(r18 形状:varint 群号;use_ch>0 = 带 CH 调查变体)=====
         return caligo_model::qq_wire::send::encode_group_text_ch(
-            group_code,
-            text,
-            client_seq,
-            random,
-            ts,
-            use_ch,
+            group_code, text, client_seq, random, ts, use_ch,
         )
         .unwrap_or_default();
     }
-    // ===== 群聊 @ 研究分支(r20–r28b 归档;全部静默拒,留作逆向证据)=====
-    // 入口保证 at_uid.is_some()。路由与 r18 相同(Grp varint,无 CH)。
+    // ===== 群聊 @ 研究分支(r20–r28b 归档;v6 = N3R37 真实记录对齐)=====
+    // 入口保证 at_uid.is_some()。
     let mut w = Vec::with_capacity(text.len() + 128);
     let mut routing = Vec::new();
     let mut grp = Vec::new();
-    pb_varint_field(&mut grp, 1, group_code);
+    if use_ch == 92 {
+        // v11(N3R47):路由串形式(r16 主账号 wire 捕获 = Grp{1: code 串};
+        // varint 形式 plain 已证可过,@ 未测 —— wirecap 已证 SnowLuma 不走
+        // 732A80,真实 @ wire 仍未见,串形式 = 最后未测结构差异)。
+        pb_len_field(&mut grp, 1, group_code.to_string().as_bytes());
+    } else {
+        pb_varint_field(&mut grp, 1, group_code);
+    }
     pb_len_field(&mut routing, 2, &grp);
     pb_len_field(&mut w, PB_F_ROUTING_HEAD, &routing);
     let mut rich = Vec::new();
-    // @ 元素构造(2026-10-09 真实 @Stella 消息字节级实证,wirecap/at-capture):
-    // Rich{2: text{1: "@段", 3: attr13B(00 01 <len_be32> 00 <uin_be32> 00 00),
-    // 12: {3: 2(atType), 4: uin, 5: 0, 9: peerUid, 11: 0}}},其余文本是
-    // 独立 text 元素。(r20 误为 {3: uid串} 被拒,此为修正。)
+    // @ 元素构造(v6;N3R37 SnowLuma 送达件堆转储 0x21ba203c387 字节级对齐):
+    // elem(text) = {1: {1: "@<显示名> "(含 @ 前缀 + 尾空格),
+    //   3: attr13B{00,01,len = at段 UTF-16 units,00,uin_be32,00,00},
+    //   12: {3: 2, 4: uin, 5: 0, 9: peerUid}(主账号 CAPWIRE47 记录实测;
+    //   N3R37/SnowLuma 异路径无 f5 —— 已回滚)}}。
+    // at 文本 = "@显示名" 无尾空格(空格在 rest 头,主账号实测)。
     let mut at_parts: Option<(Vec<u8>, Vec<u8>)> = None;
     if let Some(atuid) = at_uid {
         if let Some(sp) = text.find(' ') {
             let (at_name, rest) = text.split_at(sp);
+            let at_text = format!("@{at_name}");
             let mut at_txt = Vec::new();
-            pb_len_field(&mut at_txt, 1, at_name.as_bytes());
+            pb_len_field(&mut at_txt, 1, at_text.as_bytes());
             let mut attr = vec![0u8, 1u8];
-            attr.extend_from_slice(&(at_name.len() as u32).to_be_bytes());
+            // len = at 段 UTF-16 code-unit 数(主账号实测 "@Stella" = 7)。
+            attr.extend_from_slice(&(at_text.chars().count() as u32).to_be_bytes());
             attr.push(0u8);
             attr.extend_from_slice(&at_uin.to_be_bytes());
             attr.extend_from_slice(&[0u8, 0u8]);
@@ -897,7 +985,6 @@ fn encode_send_msg(
             pb_varint_field(&mut f12, 4, at_uin as u64);
             pb_varint_field(&mut f12, 5, 0);
             pb_len_field(&mut f12, 9, atuid.as_bytes());
-            pb_varint_field(&mut f12, 11, 0);
             pb_len_field(&mut at_txt, 12, &f12);
             let mut rest_txt = Vec::new();
             pb_len_field(&mut rest_txt, 1, rest.as_bytes());
@@ -923,48 +1010,81 @@ fn encode_send_msg(
         }
     }
     if let Some((at_txt, rest_txt)) = &at_parts {
-        // r28 完整仿件(归档):Rich.Attr + AT_ELEM37(125B) + 元素9 + at + rest + 元素16。
-        // @ 消息要求 Rich.Attr(field1)——真实 @ 样本含 {1:0,2:ts,3:rand,4:0,5:10,6:0,7:134,8:2,9:"媒体"}
-        // (普通文本无 Attr 可过,@ 被拒两轮后回补;r22)。
+        // v13:CH = 10 键 {1:82, 4:divSeq, 5:seq, 6:ts, 7:1, 12:divSeq|1<<63,
+        // 29:395247, 30:1, 32:r64} —— 主账号 CAPWIRE47 记录实测**含 f12**
+        // (N3R37 异路径 9 键无 f12;两路径 CH 不同,r16 规格对本路径正确)。
+        let div_seq = random as u64;
+        let mut ch = Vec::new();
+        pb_varint_field(&mut ch, 1, 82);
+        pb_varint_field(&mut ch, 4, div_seq);
+        pb_varint_field(&mut ch, 5, client_seq as u64);
+        pb_varint_field(&mut ch, 6, ts);
+        pb_varint_field(&mut ch, 7, 1);
+        pb_varint_field(&mut ch, 12, div_seq | (1u64 << 63));
+        pb_varint_field(&mut ch, 29, 395247);
+        pb_varint_field(&mut ch, 30, 1);
+        let mut r64 = unsafe { core::arch::x86_64::_rdtsc() };
+        r64 ^= r64 >> 32;
+        pb_varint_field(&mut ch, 32, r64);
+        pb_len_field(&mut w, 2, &ch);
+        // Rich.Attr(真实 @ 件必有;f3 = divSeq;f9 = "宋体" 主账号实测)。
         {
             let mut attr = Vec::new();
             pb_varint_field(&mut attr, 1, 0);
             pb_varint_field(&mut attr, 2, ts);
-            pb_varint_field(&mut attr, 3, random as u64);
+            pb_varint_field(&mut attr, 3, div_seq);
             pb_varint_field(&mut attr, 4, 0);
             pb_varint_field(&mut attr, 5, 10);
             pb_varint_field(&mut attr, 6, 0);
             pb_varint_field(&mut attr, 7, 134);
             pb_varint_field(&mut attr, 8, 2);
-            pb_len_field(&mut attr, 9, &[0xe5, 0xaa, 0x92, 0xe4, 0xbd, 0x93]);
+            pb_len_field(&mut attr, 9, &[0xe5, 0xae, 0x8b, 0xe4, 0xbd, 0x93]);
             pb_len_field(&mut rich, 1, &attr);
         }
-        // @ 场景专用 elem37(125B 照抄):field81 形状不同({f2:17} vs 普通版
-        // {f1:2,f2:45}),疑似服务器按此分流消息类型(r28)。
+        {
+            let mut attr = Vec::new();
+            pb_varint_field(&mut attr, 1, 0);
+            pb_varint_field(&mut attr, 2, ts);
+            pb_varint_field(&mut attr, 3, div_seq);
+            pb_varint_field(&mut attr, 4, 0);
+            pb_varint_field(&mut attr, 5, 10);
+            pb_varint_field(&mut attr, 6, 0);
+            pb_varint_field(&mut attr, 7, 134);
+            pb_varint_field(&mut attr, 8, 2);
+            pb_len_field(&mut attr, 9, &[0xe5, 0xae, 0x8b, 0xe4, 0xbd, 0x93]);
+            pb_len_field(&mut rich, 1, &attr);
+        }
+        // @ 场景 elem37(v13 = 回滚 r28 125B:f19 带 f1:6 是本路径真实形状,
+        // CAPWIRE47 记录实测 08 06 开头;v7 按 N3R37 异路径换成无 f1 版系误判)。
         const AT_ELEM37: &[u8] = &[
-            0xaa, 0x02, 0x7a, 0x08, 0x00, 0x50, 0x00, 0x60, 0x00, 0x68, 0x00, 0x80,
-            0x01, 0x00, 0x88, 0x01, 0x00, 0x9a, 0x01, 0x69, 0x08, 0x06, 0x20, 0xcb,
-            0x50, 0x78, 0x00, 0xc8, 0x01, 0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00,
-            0x90, 0x02, 0x00, 0xc8, 0x02, 0x00, 0x98, 0x03, 0x00, 0xa0, 0x03, 0x00,
-            0xb0, 0x03, 0x00, 0xb8, 0x03, 0x00, 0xc0, 0x03, 0x00, 0xd0, 0x03, 0x00,
-            0xe8, 0x03, 0x00, 0x8a, 0x04, 0x02, 0x10, 0x11, 0x90, 0x04, 0x80, 0x01,
-            0xb8, 0x04, 0x00, 0xc0, 0x04, 0x00, 0xca, 0x04, 0x00, 0xf8, 0x04, 0xcc,
-            0x84, 0x08, 0x80, 0x05, 0x4d, 0x88, 0x05, 0x00, 0x80, 0x06, 0x00, 0xb2,
-            0x06, 0x0a, 0x0a, 0x08, 0x08, 0x00, 0x10, 0x00, 0x18, 0x00, 0x20, 0x00,
-            0xd8, 0x06, 0x8b, 0x95, 0x18, 0xa0, 0x07, 0xcf, 0xfe, 0xe3, 0xc3, 0xee,
-            0xdd, 0xc9, 0xa1, 0xef, 0x01,
+            0xaa, 0x02, 0x7a, 0x08, 0x00, 0x50, 0x00, 0x60, 0x00, 0x68, 0x00, 0x80, 0x01, 0x00,
+            0x88, 0x01, 0x00, 0x9a, 0x01, 0x69, 0x08, 0x06, 0x20, 0xcb, 0x50, 0x78, 0x00, 0xc8,
+            0x01, 0x00, 0xf0, 0x01, 0x00, 0xf8, 0x01, 0x00, 0x90, 0x02, 0x00, 0xc8, 0x02, 0x00,
+            0x98, 0x03, 0x00, 0xa0, 0x03, 0x00, 0xb0, 0x03, 0x00, 0xb8, 0x03, 0x00, 0xc0, 0x03,
+            0x00, 0xd0, 0x03, 0x00, 0xe8, 0x03, 0x00, 0x8a, 0x04, 0x02, 0x10, 0x11, 0x90, 0x04,
+            0x80, 0x01, 0xb8, 0x04, 0x00, 0xc0, 0x04, 0x00, 0xca, 0x04, 0x00, 0xf8, 0x04, 0xcc,
+            0x84, 0x08, 0x80, 0x05, 0x4d, 0x88, 0x05, 0x00, 0x80, 0x06, 0x00, 0xb2, 0x06, 0x0a,
+            0x0a, 0x08, 0x08, 0x00, 0x10, 0x00, 0x18, 0x00, 0x20, 0x00, 0xd8, 0x06, 0x8b, 0x95,
+            0x18, 0xa0, 0x07, 0xcf, 0xfe, 0xe3, 0xc3, 0xee, 0xdd, 0xc9, 0xa1, 0xef, 0x01,
         ];
+        // v13 顺序(= 主账号实测):Attr → elem37 → 元素9 → at → Rich.f11=0
+        // → rest → 元素16(r28 顺序本来正确;v6/v7 按 N3R37 重排系误判)。
         pb_len_field(&mut rich, 2, AT_ELEM37);
-        // 元素 9(6B 固定):真实 @ 消息在 elem37 后、@text 前携带
-        // (r25 试探;普通文本可省,疑似 @ 场景服务器要求)。
+        // 元素 9(6B 固定;主账号件 f1 = 动态 id,N3R37 = 0 —— 0 可过)。
         pb_len_field(&mut rich, 2, &[0x4a, 0x04, 0x08, 0x00, 0x40, 0x01]);
         pb_len_field(&mut rich, 2, at_txt);
+        // Rich.f11 = 0(主账号件 at 与 rest 之间携带,异路径无 —— 补齐)。
+        pb_varint_field(&mut rich, 11, 0);
         pb_len_field(&mut rich, 2, rest_txt);
-        // 元素16(20B 照抄,真实 @ 样本链尾;{16:{2:"武舞",3:1,5:3,7:""}}):
-        pb_len_field(&mut rich, 2, &[
-            0x82, 0x01, 0x11, 0x12, 0x09, 0xe6, 0xad, 0xa6, 0xe8, 0x88,
-            0x9e, 0x18, 0x01, 0x28, 0x03, 0x3a, 0x00,
-        ]);
+        // 元素16(发送者信息;本账号真实值,N3R37 记录)。
+        pb_len_field(
+            &mut rich,
+            16,
+            &[
+                0x12, 0x06, 0x53, 0x74, 0x65, 0x6c, 0x6c, 0x61, 0x18, 0x01, 0x20, 0x00, 0x3a, 0x08,
+                0x41, 0x49, 0xe6, 0x9c, 0x8b, 0xe5, 0x8f, 0x8b,
+            ],
+        );
         let body_nested = pb_len_field_vec(PB_F_BODY_RICH, &rich);
         pb_len_field(&mut w, PB_F_BODY, &body_nested);
         pb_varint_field(&mut w, PB_F_CLIENT_SEQ, client_seq as u64);
@@ -1014,8 +1134,27 @@ type SendSsoFn = unsafe extern "system" fn(usize, usize, usize, u8, usize);
 pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     // SAFETY: ctx 由 loader 写入。
     let (wrapper_base, report_path, peer_uin, text_ptr, uid_ptr, group_code, client_seq, random) = unsafe {
-        ((*ctx).wrapper_base, (*ctx).report_path, (*ctx).peer_uin, (*ctx).text_ptr, (*ctx).uid_ptr, (*ctx).group_code, (*ctx).client_seq, (*ctx).random)
+        (
+            (*ctx).wrapper_base,
+            (*ctx).report_path,
+            (*ctx).peer_uin,
+            (*ctx).text_ptr,
+            (*ctx).uid_ptr,
+            (*ctx).group_code,
+            (*ctx).client_seq,
+            (*ctx).random,
+        )
     };
+    // v6 研究增补(research 构建,进程级幂等):wire 捕获钩子 —— 补丁 732A80
+    // 两个调用点,转储所有 732A80 调用的 (cmd, body)。用于抓原生路径
+    // (SnowLuma)的真实 @ wire body 与裸调形状逐字节对照。
+    #[cfg(feature = "research")]
+    if (*ctx).use_ch == 93 {
+        // use_ch=93 = 卸载模式(N3R50 后停用 wirecap;还原调用点原始字节)。
+        crate::wirecap::uninstall(wrapper_base, report_path);
+    } else {
+        crate::wirecap::install(wrapper_base, report_path);
+    }
     // random = 0 时现场生成(每消息新鲜值;真实客户端同语义,服务器不校验来源)。
     let random = if random == 0 {
         let mut t = unsafe { core::arch::x86_64::_rdtsc() };
@@ -1027,7 +1166,10 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
 
     // adopt(getter 租约;g1/g2/g3 探测同机械)。
     let getter: GetterFn = unsafe { core::mem::transmute(wrapper_base + GETTER_RVA) };
-    let mut pair = ServicePair { obj: core::ptr::null_mut(), ctrl: core::ptr::null_mut() };
+    let mut pair = ServicePair {
+        obj: core::ptr::null_mut(),
+        ctrl: core::ptr::null_mut(),
+    };
     // SAFETY: getter 契约(R2 §4)。
     let ret = unsafe { getter(&mut pair as *mut ServicePair) };
     if ret as usize != &mut pair as *mut ServicePair as usize || pair.obj.is_null() {
@@ -1053,7 +1195,12 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     }
     let t_vptr = safe_read_qword(transport as usize).unwrap_or(0);
     let ok = (t_vptr as usize).wrapping_sub(wrapper_base) == TRANSPORT_VTBL_RVA;
-    stage(report_path, "g3s_site", ok, &format!("transport={transport:x} vptr={t_vptr:x}"));
+    stage(
+        report_path,
+        "g3s_site",
+        ok,
+        &format!("transport={transport:x} vptr={t_vptr:x}"),
+    );
     if !ok {
         return ERR_NO_TRANSPORT;
     }
@@ -1073,7 +1220,12 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
         }
         String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text_ptr, len) })
     };
-    stage(report_path, "g3s_text", true, &format!("bytes={}", text.len()));
+    stage(
+        report_path,
+        "g3s_text",
+        true,
+        &format!("bytes={}", text.len()),
+    );
 
     // 对端 uid(可空)。
     let peer_uid = read_utf16_opt(uid_ptr);
@@ -1084,12 +1236,27 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     let at_uid = read_ascii_opt((*ctx).at_uid_ptr);
     let at_uin = (*ctx).at_uin;
     let use_ch = (*ctx).use_ch;
-    let body = encode_send_msg(peer_uin, peer_uid.as_deref(), group_code, &text, client_seq, random, at_uid.as_deref(), at_uin, use_ch);
+    let body = encode_send_msg(
+        peer_uin,
+        peer_uid.as_deref(),
+        group_code,
+        &text,
+        client_seq,
+        random,
+        at_uid.as_deref(),
+        at_uin,
+        use_ch,
+    );
     stage(
         report_path,
         "g3s_encode",
         true,
-        &format!("len={} ch={} head={}", body.len(), use_ch, bytes_hex(&body[..body.len().min(24)])),
+        &format!(
+            "len={} ch={} head={}",
+            body.len(),
+            use_ch,
+            bytes_hex(&body[..body.len().min(24)])
+        ),
     );
 
     // body data:QQ 分配器(QQ 侧释放;本侧永不释放)。
@@ -1098,7 +1265,12 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     // 小分配不触发;null 检查兜底)。
     let buf = unsafe { new_fn(body.len().max(1)) };
     if buf.is_null() {
-        stage(report_path, "g3s_alloc", false, "operator new returned null");
+        stage(
+            report_path,
+            "g3s_alloc",
+            false,
+            "operator new returned null",
+        );
         return ERR_SEND_ALLOC;
     }
     // SAFETY: buf 容量 ≥ body.len()(new(size))。
@@ -1106,7 +1278,12 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     let begin = buf as u64;
     let end = begin + body.len() as u64;
     let mut vec_hdr: [u64; 3] = [begin, end, end];
-    stage(report_path, "g3s_alloc", true, &format!("buf={begin:x} len={}", body.len()));
+    stage(
+        report_path,
+        "g3s_alloc",
+        true,
+        &format!("buf={begin:x} len={}", body.len()),
+    );
 
     // param_2:本机账号串——逐字节复制活对象 svc+0x1f0(零编码猜测)。
     // 短形态:24B 原样;长形态:头部原样 + data 换 QQ 分配副本。
@@ -1161,7 +1338,12 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
             self_str[0..8].copy_from_slice(&raw[0].to_le_bytes()); // cap|1 原样
             self_str[8..16].copy_from_slice(&(size as u64).to_le_bytes());
             self_str[16..24].copy_from_slice(&(copy as u64).to_le_bytes());
-            stage(report_path, "g3s_selfstr", true, &format!("long len={size} copy={:#x}", copy as usize));
+            stage(
+                report_path,
+                "g3s_selfstr",
+                true,
+                &format!("long len={size} copy={:#x}", copy as usize),
+            );
         }
     }
 
@@ -1169,20 +1351,38 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
     let mut cmd = [0u8; 24];
     make_short_string(&mut cmd, b"MessageSvc.PbSendMsg");
     let mut cb = [0u64; 4];
+    // 消费者分支 = research 专属(default 构建 E0433 自 r2 起预存,本提交
+    // 补门;default 下 use_consumer 落回空 delegate,行为与 0 无异)。
+    #[cfg(feature = "research")]
     if (*ctx).use_consumer != 0 {
-        // N3R30:响应消费者 delegate —— cb = {ctx, flag, invoke, dtor}。
-        // invoke 由 QQ dispatcher 线程在响应到达(或 180s 超时 -1)时调用,
+        // v4(N3R34):响应消费者 delegate —— cb = L1 {ctx, 1, manager, invoker}。
+        // 732A80 把 arg5 内层 delegate 移入捕获块,响应经 0x73C34C → 73bd6c
+        // 门(manager op=4 答 0 = 非空)→ invoke(5 参:inner/tag/errCode/errStr/responseUid)。
         // 防御式实现(consumer_probe;RPM-self 安全读,布局误判不崩)。
-        crate::consumer_probe::set_fallback(report_path);
-        let c = crate::consumer_probe::leak_ctx(report_path);
-        cb = crate::consumer_probe::build_cb(c);
+        let c = match crate::consumer_probe::leak_ctx(wrapper_base, report_path, 0) {
+            Some(c) => c,
+            None => {
+                stage(
+                    report_path,
+                    "g3s_consumer",
+                    false,
+                    "callback module pin or generation context registry unavailable",
+                );
+                return ERR_SEND_ALLOC;
+            }
+        };
+        cb = crate::consumer_probe::build_cb(wrapper_base, c);
         stage(
             report_path,
             "g3s_consumer",
             true,
-            &format!("ctx={:p} invoke={:x}", c as *const _, cb[2]),
+            &format!(
+                "ctx={:p} manager={:x} invoke={:x}",
+                c as *const _, cb[2], cb[3]
+            ),
         );
-    } else {
+    }
+    if (*ctx).use_consumer == 0 || !cfg!(feature = "research") {
         cb[2] = (wrapper_base + EMPTY_FN_CALLABLE_RVA) as u64;
         cb[3] = (wrapper_base + EMPTY_FN_DTOR_RVA) as u64;
     }
@@ -1204,9 +1404,17 @@ pub unsafe fn g3_send_run(ctx: *const G3SendCtx) -> u32 {
         report_path,
         "g3s_submitted",
         true,
-        &format!("send returned (async); peer={peer_uin} body_len={} seq={client_seq}", body.len()),
+        &format!(
+            "send returned (async); peer={peer_uin} body_len={} seq={client_seq}",
+            body.len()
+        ),
     );
-    stage(report_path, "g3s_done", true, "ok — verify delivery on peer");
+    stage(
+        report_path,
+        "g3s_done",
+        true,
+        "ok — verify delivery on peer",
+    );
     OK
 }
 
@@ -1289,7 +1497,12 @@ mod tests {
             use windows_sys::Win32::System::Memory::{
                 VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
             };
-            VirtualAlloc(std::ptr::null(), 0x100, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+            VirtualAlloc(
+                std::ptr::null(),
+                0x100,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_EXECUTE_READWRITE,
+            )
         };
         assert!(!tramp.is_null());
         // SAFETY: 测试进程内新分配 RWX 页。
@@ -1310,21 +1523,35 @@ mod tests {
         };
 
         assert_eq!(ORIG_HITS.load(Ordering::Relaxed), 1, "original not reached");
-        assert_eq!(ORIG_A5.load(Ordering::Relaxed), token_out as *mut u32 as usize, "a5 mangled");
-        assert_eq!(ORIG_A6.load(Ordering::Relaxed), cb.as_mut_ptr() as usize, "a6 mangled");
+        assert_eq!(
+            ORIG_A5.load(Ordering::Relaxed),
+            token_out as *mut u32 as usize,
+            "a5 mangled"
+        );
+        assert_eq!(
+            ORIG_A6.load(Ordering::Relaxed),
+            cb.as_mut_ptr() as usize,
+            "a6 mangled"
+        );
 
         let (records, pushed, _dropped) = drain_records();
         assert!(pushed > before, "no capture record");
         let rec = records.last().expect("no encoded record");
         assert!(rec.contains("\"kind\":\"sso_call\""));
-        assert!(rec.contains("3089665724"), "uin short-form not parsed: {rec}");
+        assert!(
+            rec.contains("3089665724"),
+            "uin short-form not parsed: {rec}"
+        );
         assert!(rec.contains(&format!("\"task_ptr\":{}", hx(task.as_mut_ptr() as u64))));
         assert!(
             rec.contains(&format!("\"ptr\":{}", hx(blob_ptr as u64))),
             "blob candidate missing: {rec}"
         );
         // policy 以 hex 记录:180000 = 0x2BF20(LE "20bf02…")。
-        assert!(rec.contains("\"policy\":\"20bf02"), "policy not captured: {rec}");
+        assert!(
+            rec.contains("\"policy\":\"20bf02"),
+            "policy not captured: {rec}"
+        );
         // callback 以 hex 记录(LE 4444 3333 2222 1111)。
         assert!(rec.contains("4444333322221111"), "cb not captured: {rec}");
         ACTIVE.store(0, Ordering::SeqCst);
@@ -1335,7 +1562,14 @@ mod tests {
     fn inactive_trampoline_skips_capture() {
         let _g = EXEC_LOCK.lock().unwrap();
         static HITS: AtomicUsize = AtomicUsize::new(0);
-        unsafe extern "system" fn nop_orig(_: usize, _: usize, _: usize, _: usize, _: usize, _: usize) {
+        unsafe extern "system" fn nop_orig(
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+            _: usize,
+        ) {
             HITS.fetch_add(1, Ordering::Relaxed);
         }
         ACTIVE.store(0, Ordering::SeqCst);
@@ -1345,7 +1579,12 @@ mod tests {
             use windows_sys::Win32::System::Memory::{
                 VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
             };
-            VirtualAlloc(std::ptr::null(), 0x100, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)
+            VirtualAlloc(
+                std::ptr::null(),
+                0x100,
+                MEM_COMMIT | MEM_RESERVE,
+                PAGE_EXECUTE_READWRITE,
+            )
         };
         assert!(!tramp.is_null());
         // SAFETY: 测试进程内新分配 RWX 页。
@@ -1355,7 +1594,11 @@ mod tests {
         // SAFETY: 假宿主。
         unsafe { f(0, 0, 0, 0, 0, 0) };
         assert_eq!(HITS.load(Ordering::Relaxed), 1);
-        assert_eq!(NEXT.load(Ordering::Relaxed), before, "capture ran while inactive");
+        assert_eq!(
+            NEXT.load(Ordering::Relaxed),
+            before,
+            "capture ran while inactive"
+        );
     }
 
     /// swap_slot 往返对称(自进程 RW 页模拟对象头)。
@@ -1367,11 +1610,17 @@ mod tests {
         let prev = swap_slot(slot, 0x1234_5678_9ABC_DEF0).expect("swap failed");
         assert_eq!(prev, 0xAAAA_BBBB_CCCC_DDDD);
         // SAFETY: 测试自有内存。
-        assert_eq!(unsafe { core::ptr::read_volatile(slot as *const u64) }, 0x1234_5678_9ABC_DEF0);
+        assert_eq!(
+            unsafe { core::ptr::read_volatile(slot as *const u64) },
+            0x1234_5678_9ABC_DEF0
+        );
         let prev2 = swap_slot(slot, 0xAAAA_BBBB_CCCC_DDDD).expect("restore failed");
         assert_eq!(prev2, 0x1234_5678_9ABC_DEF0);
         // SAFETY: 测试自有内存。
-        assert_eq!(unsafe { core::ptr::read_volatile(slot as *const u64) }, 0xAAAA_BBBB_CCCC_DDDD);
+        assert_eq!(
+            unsafe { core::ptr::read_volatile(slot as *const u64) },
+            0xAAAA_BBBB_CCCC_DDDD
+        );
     }
 
     /// libc++ string 判形(短/长)。
@@ -1414,7 +1663,17 @@ mod tests {
     fn send_msg_encoding_friend() {
         // 合成标识(不指向真实账号;uid 存在时 uin 不进 wire)。
         const SYNTH_PEER_UIN: u64 = 2_987_654_321;
-        let body = encode_send_msg(SYNTH_PEER_UIN, Some("u_TESTPEER"), 0, "G3P2", 7, 9, None, 0, 0);
+        let body = encode_send_msg(
+            SYNTH_PEER_UIN,
+            Some("u_TESTPEER"),
+            0,
+            "G3P2",
+            7,
+            9,
+            None,
+            0,
+            0,
+        );
         // 顶层字段序:1(routing)2(content)3(body)4(seq)5(rand)6(ts)。
         let mut pos = 0usize;
         let mut fields = Vec::new();
@@ -1478,13 +1737,19 @@ mod tests {
         assert_eq!(fields[5].0, 6);
         // body 富文本里含元素37(attr 标记字节 aa0217…)
         assert!(
-            fields[2].2.windows(4).any(|w| w == [0xaa, 0x02, 0x17, 0x88]),
+            fields[2]
+                .2
+                .windows(4)
+                .any(|w| w == [0xaa, 0x02, 0x17, 0x88]),
             "general-flags elem missing"
         );
         // body.rich_text.elems.text.str == "G3P2"
         let body_bytes = &fields[2].2;
         let hex = bytes_hex(body_bytes);
-        assert!(hex.ends_with(&bytes_hex(b"G3P2")), "text not at leaf: {hex}");
+        assert!(
+            hex.ends_with(&bytes_hex(b"G3P2")),
+            "text not at leaf: {hex}"
+        );
     }
 
     /// 短形态串物化。
